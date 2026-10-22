@@ -15,18 +15,6 @@ submodule and enabled by miles' `--use-miles-ext-kernels`.
 Under `--use-miles-ext-kernels`, miles calls `miles_ext_kernels.add_arguments(parser)` before parsing and
 `miles_ext_kernels.validate_args(args)` from `miles_validate_args`. Without the flag nothing here is imported.
 
-## Layout (target)
-
-```
-miles_ext_kernels/
-  __init__.py      # _KERNEL_PACKAGES: each exposes add_arguments(group) and validate_args(args)
-  cake_native/     # shared JIT loader + host shim
-  gdn/             # chunk_gated_delta_rule (Qwen GDN)
-  kda/             # chunked KDA (Kimi-K3)
-  dsa/             # DSA indexer, sparse attention, top-k (GLM-5, DeepSeek-V4)
-tests/
-```
-
 ## Adding a kernel
 
 1. PR here: the package under `miles_ext_kernels/<kernel>/`, its arguments in `add_arguments` / `validate_args`
