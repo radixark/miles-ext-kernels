@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "miles-ext-kernels"
+version = "0.0.1"
+description = "Training kernels for miles, consumed as the 3rdparty/miles-ext-kernels submodule"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["miles_ext_kernels*"]
+
+# Kernel sources are JIT-compiled on first use, so they ship with the package.
+[tool.setuptools.package-data]
+"*" = ["*.json", "csrc/**/*"]
+
+[tool.isort]
+profile = "black"
+line_length = 119
+
+[tool.black]
+line_length = 119
+
+[tool.ruff]
+line-length = 320
