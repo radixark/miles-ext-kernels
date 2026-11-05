@@ -66,6 +66,7 @@ packages, and its entry points import the implementation on first use.
 | `rmsnorm` | `ZeroCenteredRMSNorm`, `zero_centered_rmsnorm`, `check_supported`, `supported_hidden_sizes` | `--linear-attention-input-norm cake` | `--cake-rmsnorm-variant` | `det`, `fast` | `sm_100a`, `sm_103a`, `sm_107a` | `hidden_size` | `tests/cake/rmsnorm/` |
 | `dsa` | `sparse_attention`, `sparse_attention_forward`, `sparse_attention_backward`, `lightning_indexer`, `indexer_logits`, `indexer_backward`, `indexer_topk_scores`, `extract_topk_scores`, `select_topk`, `torch_topk`, `packed_key_ids`, `dsa_indexer_det_topk`, `dsa_indexer_det_topk_workspace_size`, `check_device`, `fast_unserved_reason`, `indexer_unserved_reason`, `indexer_det_topk_unserved_reason` | `--dsa-attention-backend cake` | `--cake-dsa-variant`, `--cake-dsa-bwd-workspace-bytes`, `--cake-dsa-lazy-build` | `det`, `fast` (64 heads, no sink; other calls run `det`) | `sm_100a`, `sm_103a`, `sm_107a` | `heads`, `d_qk`, `d_v`, `attn_sink`, `index_heads` | `tests/cake/dsa/` |
 | `mhc` | `mhc_prepare`, `mhc_finish`, `mhc_head`, `is_supported`, `supported_hidden_sizes` | `--mhc-backend cake` | `--cake-mhc-variant` | `det`, `fast` | `sm_100a`, `sm_103a`, `sm_107a` | `hidden`, `sinkhorn_iters` | `tests/cake/mhc/` |
+| `gqa` | `varlen_gqa_attention`, `check_supported`, `is_supported` | `--full-attention-backend cake` | `--cake-gqa-check-seqlens` (checks at every call that the boundaries are well formed and that `max_seqlen_k` is at least every segment's key count, as the kernels require: a smaller one gives wrong gradients without an error; one device synchronization) | `fast` only (dQ is summed with FP32 atomic adds); `--deterministic-mode` rejects the op | `sm_100a`, `sm_103a`, `sm_107a` | none | `tests/cake/gqa/` |
 
 An op's vendored packages, their sources and commits are its block in `miles_ext_kernels/cake/_vendor/VENDORED.json`.
 
@@ -121,6 +122,7 @@ an op with Triton or Gluon kernels also checks that the calls add nothing to a p
 | `rmsnorm` | `hidden_size`: 256, 512, 1536, 2048, 4096, 5120 or 6144 (every architecture); both variants, every token-count window. On `sm_107a`, 4096 launches programs above the 232448 B shared-memory opt-in in CUDA 13.4's oversized mode: where the process's CUDA runtime is older than 13.4 (for example the 13.0 runtime wheel of a `cu130` torch) or the driver's oversized ceiling does not hold them, `prebuild`, `check_supported`, the module's construction and the first call raise `RuntimeError` before any launch |
 | `dsa` | `heads`, `d_qk`, `d_v=512`, `attn_sink=False`, `index_heads=None` (32 also builds the det indexer top-k); `--cake-dsa-lazy-build` builds nothing and gives up the guarantee |
 | `mhc` | `hidden` (4096, 5120, 7168 on `sm_100a` and `sm_103a`; 4096 on `sm_107a`) and `sinkhorn_iters` (1 to 64), both required: both variants and the head; the epsilons are launch arguments and select no library |
+| `gqa` | none: the four libraries of the forward and the BF16 dK / dV backward serve every head layout and length |
 
 ## Memory
 
