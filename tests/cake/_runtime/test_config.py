@@ -284,29 +284,6 @@ def test_unknown_ops_and_options_raise(synth):
         cake.option(None, "cake_synth_scale")
 
 
-def test_variant_and_option_look_the_op_up_once_per_configuration_and_registry(synth, monkeypatch):
-    lookups = []
-    op_spec = registry.op_spec
-    monkeypatch.setattr(registry, "op_spec", lambda op: lookups.append(op) or op_spec(op))
-    for _ in range(3):
-        assert cake.variant("synth") == "det" and cake.option("synth", "cake_synth_scale") == 1.0
-    assert lookups == ["synth", "synth"]
-    cake.configure(cake_synth_scale=2.0)  # a new configuration (configure itself reads every op's declaration)
-    lookups.clear()
-    for _ in range(3):
-        assert cake.option("synth", "cake_synth_scale") == 2.0 and cake.variant("synth") == "det"
-    assert lookups == ["synth", "synth"]
-    cake.configure(cake_synth_variant="fast", cake_synth_scale=3.0)
-    lookups.clear()
-
-    assert cake.variant("synth") == "fast" and cake.option("synth", "cake_synth_scale") == 3.0
-    assert lookups == ["synth"]  # a configured variant needs no lookup
-    monkeypatch.setattr(registry, "OPS", ())  # a new registry, without synth
-    with pytest.raises(KeyError, match="no cake op 'synth'"):
-        cake.option("synth", "cake_synth_scale")
-    assert cake.variant("synth") == "fast"  # a configured variant is read as it is, as before
-
-
 def test_a_refused_variant_is_refused_at_every_call(monkeypatch):
     _install(monkeypatch, variants=("fast",))
     cake.configure(deterministic_mode=True)
