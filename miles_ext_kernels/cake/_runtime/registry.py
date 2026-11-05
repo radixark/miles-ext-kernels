@@ -23,7 +23,10 @@ from .spec import OpSpec
 __all__ = ["OPS", "op_spec", "prebuild", "release"]
 
 # Every op, one line each, in layer order.
-OPS: tuple[str, ...] = ("gdn",)
+OPS: tuple[str, ...] = (
+    "gdn",
+    "kda",
+)
 
 # miles_ext_kernels.cake: op modules are its submodules, implementations those of its _impl package
 _SOURCE = __name__.rsplit(".", 2)[0]
