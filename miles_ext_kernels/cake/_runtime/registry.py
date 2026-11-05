@@ -34,6 +34,7 @@ OPS: tuple[str, ...] = (
     "gqa",
     "dense_gemm",
     "moe_grouped_gemm",
+    "lm_head",
 )
 
 # miles_ext_kernels.cake: op modules are its submodules, implementations those of its _impl package
