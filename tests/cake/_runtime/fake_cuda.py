@@ -1,12 +1,9 @@
-"""A fake CUDA device layer, so the workspace pool's CUDA path runs on the CPU (tests and micro-benchmark).
+"""A fake CUDA device layer, so the workspace pool's CUDA path runs on the CPU.
 
-:class:`FakeCuda` stands in for what the pool reads of the CUDA runtime: the queries of ``torch._C`` behind
-``torch.cuda.current_device``, ``torch.cuda.current_stream(...).cuda_stream`` and
-``torch.cuda.is_current_stream_capturing`` (``_cuda_getDevice``, ``_cuda_getCurrentRawStream``,
-``_cuda_isCurrentStreamCapturing``), those three functions themselves and ``torch.cuda.device``; its ``empty``
+:class:`FakeCuda` stands in for what the pool reads of the CUDA runtime: ``torch.cuda.current_device``,
+``torch.cuda.current_stream``, ``torch.cuda.is_current_stream_capturing`` and ``torch.cuda.device``; its ``empty``
 allocates a CUDA request on the CPU and records the device it was asked for. :meth:`FakeCuda.patches` lists the
-``(object, attribute, value)`` to set on torch; a CPU build of torch has no ``torch._C._cuda_*``, so set them with
-``raising=False``. Importing this module does not import torch.
+``(object, attribute, value)`` to set on torch. Importing this module does not import torch.
 """
 
 from typing import Any
@@ -31,7 +28,6 @@ class _Switch:
 
     def __enter__(self) -> None:
         self.previous, self.cuda.index = self.cuda.index, self.index
-        self.cuda.switches += 1
 
     def __exit__(self, *exc: Any) -> None:
         self.cuda.index = self.previous
@@ -41,7 +37,7 @@ class FakeCuda:
     """``devices`` CUDA devices; device ``i`` starts on stream ``1000 + i`` and nothing captures.
 
     Set ``index`` (the current device), ``streams[i]`` (device ``i``'s current stream) and ``capturing`` (the devices
-    whose current stream captures a graph). ``switches`` counts the device blocks entered.
+    whose current stream captures a graph).
     """
 
     def __init__(self, torch: Any, devices: int = 2) -> None:
@@ -49,7 +45,6 @@ class FakeCuda:
         self.index = 0
         self.streams = {index: FakeStream(1000 + index) for index in range(devices)}
         self.capturing: set[int] = set()
-        self.switches = 0
         self.allocated: list[Any] = []  # the device argument of every CUDA empty
         self._empty = torch.empty
 
@@ -64,9 +59,6 @@ class FakeCuda:
 
     def current_stream(self, device: Any = None) -> FakeStream:
         return self.streams[self.index if device is None else self._index(device)]
-
-    def raw_stream(self, index: int) -> int:
-        return self.streams[index].cuda_stream
 
     def is_current_stream_capturing(self) -> bool:
         return self.index in self.capturing
@@ -87,8 +79,5 @@ class FakeCuda:
             (torch.cuda, "current_stream", self.current_stream),
             (torch.cuda, "is_current_stream_capturing", self.is_current_stream_capturing),
             (torch.cuda, "device", self.device),
-            (torch._C, "_cuda_getDevice", self.current_device),
-            (torch._C, "_cuda_getCurrentRawStream", self.raw_stream),
-            (torch._C, "_cuda_isCurrentStreamCapturing", self.is_current_stream_capturing),
             (torch, "empty", self.empty),
         ]
