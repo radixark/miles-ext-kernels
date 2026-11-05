@@ -17,6 +17,7 @@ pip install -e .[test]      # + pytest
 | extra | for |
 |---|---|
 | `test` | the tests (`pytest`) |
+| `gdn` | `gdn` with an FLA `cp_context` (`flash-linear-attention>=0.5.2`) |
 
 The kernels are compiled with nvcc on the machine that runs them (`$CUDA_HOME/bin/nvcc`, else `nvcc` on `PATH`) and
 loaded with tvm-ffi; FlashInfer itself is not needed. Each architecture needs a minimum toolkit:
@@ -58,6 +59,7 @@ packages, and its entry points import the implementation on first use.
 
 | op | entry points | miles selector | flags | variants | GPUs | prebuild params | tests |
 |---|---|---|---|---|---|---|---|
+| `gdn` | `chunk_gated_delta_rule`, `kcp_chunk_gated_delta_rule`, `build_kcp_context`, `KcpContext` | `--linear-attention-backend cake` | `--cake-gdn-variant`, `--cake-gdn-recompute-state` | `det`, `fast` | `sm_100a`, `sm_103a`, `sm_107a` | none | `tests/cake/gdn/` |
 
 An op's vendored packages, their sources and commits are its block in `miles_ext_kernels/cake/_vendor/VENDORED.json`.
 
@@ -106,6 +108,7 @@ an op with Triton or Gluon kernels also checks that the calls add nothing to a p
 
 | op | model_params |
 |---|---|
+| `gdn` | none: every library of its packages for the device's architecture (FLA's own Triton pre-processing, which a `cp_context` with a process group runs, compiles in FLA on its first call) |
 
 ## Memory
 
