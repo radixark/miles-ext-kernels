@@ -69,11 +69,6 @@ logger = logging.getLogger("miles_ext_kernels")
 
 _state: Mapping[str, Any] = MappingProxyType({})
 _warned: set[tuple[str, str]] = set()
-# What variant() and option() found for one configuration and one op registry (``registry.OPS``): (state, ops,
-# op -> the variant of an unconfigured op, (op, dest) -> option value). Both run at every call of an op; a new
-# configuration or registry starts a new memo, and an error is never remembered.
-_memo: tuple[Any, Any, dict[str, str], dict[tuple[str | None, str], Any]] = (None, None, {}, {})
-_UNSET = object()
 
 
 def _specs() -> Iterator[OpSpec]:
@@ -210,14 +205,6 @@ def configure(args: Namespace | Mapping[str, Any] | None = None, /, **values: An
     _state = MappingProxyType(state)
 
 
-def _current_memo() -> tuple[Any, Any, dict[str, str], dict[tuple[str | None, str], Any]]:
-    global _memo
-    memo = _memo
-    if memo[0] is not _state or memo[1] is not registry.OPS:
-        memo = _memo = (_state, registry.OPS, {}, {})
-    return memo
-
-
 def variant(op: str) -> str:
     """The variant ``op`` runs now: the configured one, else ``det`` (or the op's only variant).
 
@@ -226,30 +213,18 @@ def variant(op: str) -> str:
     value = _state.get(f"cake_{op}_variant")
     if value is not None:
         return value
-    state, ops, defaults, _ = _memo
-    if state is _state and ops is registry.OPS and op in defaults:
-        return defaults[op]
-    state, _, defaults, _ = _current_memo()
     spec = registry.op_spec(op)
-    if state.get("deterministic_mode") and "det" not in spec.variants:
+    if _state.get("deterministic_mode") and "det" not in spec.variants:
         raise _no_det(spec)
-    value = defaults[op] = spec.default_variant
-    return value
+    return spec.default_variant
 
 
 def option(op: str | None, dest: str) -> Any:
     """The configured value of the option ``dest`` of ``op`` (``None``: a runtime option), else its default."""
-    state, ops, _, options = _memo
-    if state is _state and ops is registry.OPS:
-        value = options.get((op, dest), _UNSET)
-        if value is not _UNSET:
-            return value
-    state, _, _, options = _current_memo()
     flags = RUNTIME_FLAGS if op is None else registry.op_spec(op).flags
     for flag in flags:
         if flag.dest == dest:
-            value = options[op, dest] = state.get(dest, flag.default)
-            return value
+            return _state.get(dest, flag.default)
     raise KeyError(f"{'the runtime' if op is None else op} has no option {dest!r}")
 
 
