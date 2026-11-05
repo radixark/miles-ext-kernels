@@ -19,6 +19,7 @@ pip install -e .[test]      # + pytest
 | `test` | the tests (`pytest`) |
 | `gdn` | `gdn` with an FLA `cp_context` (`flash-linear-attention>=0.5.2`) |
 | `dense_gemm` | the dense GEMM packages call the CUDA driver through these bindings for the L2 size (where torch does not report it) and for the zero fill of the FP32 router gradients under `fast` (`cuda-bindings>=12.8`) |
+| `mok` | the Triton kernel of the MoK MXFP8 weight quantizer; without it, PyTorch operations write the same bytes (`triton>=3.8`) |
 
 The kernels are compiled with nvcc on the machine that runs them (`$CUDA_HOME/bin/nvcc`, else `nvcc` on `PATH`) and
 loaded with tvm-ffi; FlashInfer itself is not needed. Each architecture needs a minimum toolkit:
@@ -72,6 +73,7 @@ packages, and its entry points import the implementation on first use.
 | `moe_grouped_gemm` | `grouped_mm`, `check_grouped_dims`, `max_grouped_rows` | `--moe-grouped-gemm-backend cake` (`--train-backend torchtitan`) | `--cake-moe-grouped-gemm-variant` | `det`, `fast` | `sm_100a`, `sm_103a`, `sm_107a` | none | `tests/cake/moe_grouped_gemm/` |
 | `lm_head` | `log_probs` | `--log-probs-backend cake` | `--cake-lm-head-variant`, `--cake-lm-head-chunk-size` | `det`, `fast` | `sm_100a`, `sm_103a`, `sm_107a` | none | `tests/cake/lm_head/` |
 | `gated_act_mxfp8` | `silu_and_mul_mxfp8_quantize`, `silu_and_mul_mxfp8_quantize_backward` | none (not selected by miles) | none | `det` | `sm_100a`, `sm_103a`, `sm_107a` | none | `tests/cake/gated_act_mxfp8/` |
+| `mok` | `prepare_mok_bf16`, `create_mok_bf16_workspace`, `quantize_mok_mxfp8_weights` | none (not selected by miles) | none | `det` | `sm_100a`, `sm_103a`, `sm_107a` | `ep_size`, `local_experts`, `topk`, `hidden_size`, `intermediate_size`, `mxfp8`, `clamped_swiglu`, `fp32_wgrad` | `tests/cake/mok/` |
 
 An op's vendored packages, their sources and commits are its block in `miles_ext_kernels/cake/_vendor/VENDORED.json`.
 
@@ -132,6 +134,7 @@ an op with Triton or Gluon kernels also checks that the calls add nothing to a p
 | `moe_grouped_gemm` | none: both variants' forward, input-gradient and weight-gradient programs (both k tiles, every stage) for any expert shape, and the input gradient's queue probe on `sm_100a` / `sm_103a` |
 | `lm_head` | none: every log-probability stage of both variants, with and without a temperature |
 | `gated_act_mxfp8` | none: every library of the device's architecture (forward and backward; rowwise, colwise or both; every program the `M * K` selection picks) |
+| `mok` | the scheduler layout `ep_size` (1 to 64 ranks; more than one rank needs one NVLink domain with multicast) and `local_experts` (both or neither), `topk`, `clamped_swiglu` and `fp32_wgrad`: each unset builds every value the kernels serve; `mxfp8` (default true; false leaves out the MXFP8 routed-expert kernels) and, with `mxfp8`, the required `hidden_size` and `intermediate_size`, the routed weight shape the weight quantizer's Triton kernel is compiled for. With the layout, `topk`, `clamped_swiglu` and `fp32_wgrad` unset, `prebuild` builds all 48 libraries of the architecture, which is slow: on a GB300 node with 8 parallel nvcc processes, a cold test run that built all 48 took 40.5 min with CUDA 13.0 and 43.6 min with CUDA 13.4 (13 s warm). With all four set it builds 15 (12 with `mxfp8=False`). |
 
 ## Memory
 

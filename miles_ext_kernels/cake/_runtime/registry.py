@@ -36,6 +36,7 @@ OPS: tuple[str, ...] = (
     "moe_grouped_gemm",
     "lm_head",
     "gated_act_mxfp8",
+    "mok",
 )
 
 # miles_ext_kernels.cake: op modules are its submodules, implementations those of its _impl package
