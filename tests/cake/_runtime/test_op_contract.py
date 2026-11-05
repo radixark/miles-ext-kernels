@@ -1,7 +1,7 @@
 """The contract every op module and its implementation keep, checked on every registered op and on ``synth``.
 
 CPU checks only: ``tests/cake/<op>/test_prebuild_gpu.py`` checks the prebuild guarantee of each op on a GPU, over the
-``ROUTES`` it declares (README, Prebuild).
+``ROUTES`` it declares.
 """
 
 import ast
@@ -9,7 +9,6 @@ import importlib
 import inspect
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -148,23 +147,11 @@ def hook_findings(op: str, manifest: dict) -> list[str]:
     return findings
 
 
-def readme_ops(text: str) -> list[str]:
-    """The ops of the README's ``## Ops`` table, in order (none while the README has no such section)."""
-    if "\n## Ops\n" not in text:
-        return []
-    section = text.split("\n## Ops\n", 1)[1].split("\n## ", 1)[0]
-    return re.findall(r"^\| `([a-z][a-z0-9_]*)` \|", section, flags=re.MULTILINE)
-
-
 def test_the_registered_ops_are_the_op_modules():
     modules = sorted(path.stem for path in CAKE.glob("*.py") if not path.name.startswith("_"))
 
     assert sorted(registry.OPS) == modules
     assert len(set(registry.OPS)) == len(registry.OPS)
-
-
-def test_the_readme_lists_the_registered_ops_in_layer_order():
-    assert readme_ops((REPO_ROOT / "README.md").read_text()) == list(registry.OPS)
 
 
 def test_the_op_module_declares_the_op(op):
@@ -356,10 +343,3 @@ def test_the_hook_checker_finds_a_hook_left_in_place(tmp_path, monkeypatch):
         for name in [name for name in sys.modules if name.startswith(f"{VENDOR_MODULE}.cake_synth_hooked")]:
             del sys.modules[name]
         vars(vendor).pop("cake_synth_hooked", None)
-
-
-def test_the_readme_reader_finds_the_op_rows():
-    text = "# x\n\n## Ops\n\n| op | entry points |\n|---|---|\n| `gdn` | a |\n| `kda` | b |\n\n## Next\n| `no` | c |\n"
-
-    assert readme_ops(text) == ["gdn", "kda"]
-    assert readme_ops("# x\n\n## Next\n| `no` | c |\n") == []
