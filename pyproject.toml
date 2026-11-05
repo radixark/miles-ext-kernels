@@ -12,6 +12,7 @@ dependencies = ["torch", "apache-tvm-ffi>=0.1.11,<0.2"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+gdn = ["flash-linear-attention>=0.5.2"]
 
 [tool.setuptools.packages.find]
 include = ["miles_ext_kernels*"]
