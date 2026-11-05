@@ -1,8 +1,9 @@
 default_language_version:
   python: python3
 
-# Generated kernel sources stay byte-identical to the generator's output.
-exclude: '/csrc/'
+# Vendored sources stay byte-identical to their upstream (tools/vendor_cake.py --check), and so does FlashInfer's
+# loader template.
+exclude: '^(miles_ext_kernels/cake/_vendor/|tools/templates/cake_build\.py$)'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
