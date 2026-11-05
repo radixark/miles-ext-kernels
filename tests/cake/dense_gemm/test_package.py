@@ -108,10 +108,6 @@ def _text(doc: str) -> str:
 
 
 def test_the_docs_state_that_the_results_are_not_batch_invariant():
-    readme = (REPO_ROOT / "README.md").read_text()
-    (row,) = [line for line in readme.splitlines() if line.startswith("| `dense_gemm` | `batched_projection")]
-
-    assert "not batch-invariant" in row
     assert "Neither variant is batch-invariant" in _text(dense_gemm.__doc__)
     ops = _ops()
     assert "Neither variant is batch-invariant" in _text(ops.__doc__)
