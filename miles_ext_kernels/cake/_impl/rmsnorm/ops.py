@@ -16,11 +16,11 @@ of such a parameter across the tensor-parallel ranks), builds on the meta device
 Both variants go through FlashInfer's non-deterministic package (``_vendor/cake_rmsnorm_train_backend``):
 ``deterministic=True`` runs its deterministic sibling (``_vendor/cake_rmsnorm_det_train_backend``), whose backward is,
 per token-count window, a main kernel and a fixed-order reduce (``dw`` bitwise reproducible for a given token count
-and SM count) or, at the smallest token counts on SM100a / SM103a, one kernel that sums each ``dw`` column in a fixed
-row order (``dw`` bitwise reproducible for a given token count on any SM count); ``deterministic=False`` runs the same
-forward programs and, per token-count window, a single-kernel backward whose CTAs add their ``dw`` sums with FP64
-atomics (``dw`` not bitwise reproducible; ``dx`` reproducible, within one BF16 ulp of ``det``'s), a column-task kernel
-at the smallest token counts, or ``det``'s kernel pair. A forward reads the configured variant
+and SM count) or, at the smallest token counts of every hidden size but 256, one kernel that sums each ``dw`` column
+in a fixed row order (``dw`` bitwise reproducible for a given token count on any SM count); ``deterministic=False``
+runs the same forward programs and, per token-count window, a single-kernel backward whose CTAs add their ``dw`` sums
+with FP64 atomics (``dw`` not bitwise reproducible; ``dx`` reproducible, within one BF16 ulp of ``det``'s), a
+column-task kernel at the smallest token counts, or ``det``'s kernel pair. A forward reads the configured variant
 (``--cake-rmsnorm-variant`` through ``miles_ext_kernels.configure``; ``det`` when unconfigured) when it runs, and its
 backward runs the same one. ``fast`` serves every hidden size ``det`` serves; it runs ``det``, logged once, while
 ``torch.use_deterministic_algorithms(True)`` is in effect, which the non-deterministic package refuses.

@@ -4,8 +4,8 @@ miles' GDN input layernorm: ``[T, 1, H]`` BF16 hidden states at H = 2048 / 4096 
 kernels serve) and small, irregular and 16k-32k token counts, ``weight`` the w of ``(1 + w)`` in BF16 or FP32. ``y``
 and ``dx`` at FlashInfer's tolerance; the FP32 weight gradient within its budget (rel-L2 <= 1e-4, elementwise
 atol = rtol = 1e-4), a BF16 one widened by its rounding; ``det`` bitwise run to run, twice within a process and once
-in a fresh one, also at both sides of the upper edge of its smallest backward window (on SM100a / SM103a the kernel
-that sums each ``dw`` column in a fixed row order), and on a side stream; ``fast`` with ``y`` bitwise ``det``'s,
+in a fresh one, also at both sides of the upper edge of each of its backward windows at the smallest token counts
+whose kernel sums each ``dw`` column in a fixed row order, and on a side stream; ``fast`` with ``y`` bitwise ``det``'s,
 ``dx`` reproducible and within one BF16 ulp of ``det``'s; ``fast`` runs ``det`` under torch's deterministic
 algorithms; a backward runs its forward's variant. A width whose oversized shared-memory programs this process cannot
 launch (SM107a at 4096 without a CUDA 13.4 runtime) is refused before any launch: its tests assert that refusal, and
@@ -30,6 +30,7 @@ from miles_ext_kernels.cake._runtime import config, loader
 
 from ..helpers import assert_bitwise, assert_repeatable, no_build, requires_arch
 from ._refusal import refusal, runs_or_is_refused
+from ._windows import backward_form
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("tvm_ffi")
@@ -142,11 +143,19 @@ def test_det_and_fast_match_fp64(H, T, params_dtype):
 
 
 def smallest_token_counts(H):
-    """1, 2 and both sides of the upper edge of the first window of ``det``'s FP32-weight backward of ``H`` here: on
-    SM100a / SM103a the window whose kernel sums each ``dw`` column in a fixed row order."""
+    """1, 2 and both sides of the upper edge of the first window of ``det``'s FP32-weight backward of ``H`` here and of
+    each next window while the one above it still sums each ``dw`` column in a fixed row order (the backward of the
+    smallest token counts of every width but 256; SM103a runs two such kernels at H = 512, 1536 and 2048)."""
+    arch = cake.device_arch()
     det = loader.load_package("cake_rmsnorm_det_train_backend")
-    _, edge, _ = det.cake_jit.program_windows(cake.device_arch(), H, "bwd", False, "f32")[0]
-    return sorted({1, 2} | ({edge, edge + 1} if edge is not None else set()))
+    edges = []
+    for _, edge, _ in det.cake_jit.program_windows(arch, H, "bwd", False, "f32"):
+        if edge is None:
+            break
+        edges.append(edge)
+        if backward_form("det", arch, H, edge + 1) != "column":
+            break
+    return sorted({1, 2} | {T for edge in edges for T in (edge, edge + 1)})
 
 
 def det_digests(cases):
