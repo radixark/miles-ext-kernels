@@ -28,6 +28,7 @@ OPS: tuple[str, ...] = (
     "kda",
     "conv1d",
     "gated_rmsnorm",
+    "rmsnorm",
 )
 
 # miles_ext_kernels.cake: op modules are its submodules, implementations those of its _impl package
