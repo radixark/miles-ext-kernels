@@ -13,6 +13,9 @@ dependencies = ["torch", "apache-tvm-ffi>=0.1.11,<0.2"]
 [project.optional-dependencies]
 test = ["pytest"]
 gdn = ["flash-linear-attention>=0.5.2"]
+# the dense GEMM packages call the CUDA driver through these bindings: the L2 size when torch does not report it, and
+# the zero fill of the FP32 router gradients under fast
+dense_gemm = ["cuda-bindings>=12.8"]
 
 [tool.setuptools.packages.find]
 include = ["miles_ext_kernels*"]
