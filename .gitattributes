@@ -1,0 +1,3 @@
+# tools/vendor_cake.py merges the vendoring manifest package by package (README, Development):
+#   git config merge.vendored.driver "python tools/vendor_cake.py merge %O %A %B"
+miles_ext_kernels/cake/_vendor/VENDORED.json merge=vendored

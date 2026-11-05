@@ -641,3 +641,47 @@ def test_device_arch_rejects_other_devices(monkeypatch):
 
     with pytest.raises(NotImplementedError, match="need SM100a, SM103a or SM107a, not compute capability 9.0"):
         loader.device_arch()
+
+
+def test_a_generated_build_json_compiles_with_flashinfer_compile_command(tmp_path, toolkit, tvm_ffi, cache):
+    """The build.json tools/vendor_cake.py generates for a miles pull request's sources builds like FlashInfer's."""
+    spec = importlib.util.spec_from_file_location("vendor_cake", CAKE_BUILD.parents[1] / "vendor_cake.py")
+    vendor_cake = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vendor_cake)
+    root = tmp_path / "vendor" / "cake_synth_generated"
+    record = {"name": "gen_fwd", "sources": ["gen_kernel.cu", "gen_binding.cu"], "ffi_entry": "run"}
+    registry = {"fwd": {**record, "compile_flags": ["-DGEN=1"], "arches": ["sm_100a", "sm_103a"]}}
+    files = {
+        "registry.json": json.dumps(registry).encode(),
+        "csrc/gen_kernel.cu": b"// kernel\n",
+        "csrc/gen_binding.cu": b"// binding\n",
+        "csrc/cake_host_shim.h": (CAKE_BUILD.parent / "cake_host_shim.h").read_bytes(),
+        "cake_build.py": CAKE_BUILD.read_bytes(),
+    }
+    build = {
+        "arch_from": {"sm_107a": "sm_103a"},
+        "link_flags": list(vendor_cake.DEFAULT_LINK_FLAGS),
+        "nvcc_flags": list(vendor_cake.DEFAULT_NVCC_FLAGS),
+        "registry": "registry.json",
+    }
+    files["build.json"] = vendor_cake.render_build_json(root.name, files, build)
+    for relative, data in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_bytes(data)
+    module_spec = importlib.util.spec_from_file_location(f"{root.name}_{uuid.uuid4().hex}", root / "cake_build.py")
+    package = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(package)
+    nvcc = toolkit("13.4.92")
+    loader.install(package)
+
+    for arch in ("sm_100a", "sm_103a", "sm_107a"):
+        package.jit_spec(f"gen_fwd_{arch}").build()
+
+    calls = _calls(nvcc)
+    assert len(calls) == 3
+    for arch, call in zip(("sm_100a", "sm_103a", "sm_107a"), calls):
+        entry = _entry(package, f"gen_fwd_{arch}")
+        reference = compile_command(str(nvcc), root, package.manifest(), entry, (13, 4), INCLUDES)
+        reference = [str(root / arg) if arg in entry["sources"] else arg for arg in reference]
+        assert call[:-1] == reference[1:-1]
+        assert f"-gencode=arch=compute_{arch[3:]},code={arch}" in call and "-DGEN=1" in call
