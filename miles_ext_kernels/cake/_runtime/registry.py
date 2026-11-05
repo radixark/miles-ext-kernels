@@ -26,6 +26,7 @@ __all__ = ["OPS", "op_spec", "prebuild", "release"]
 OPS: tuple[str, ...] = (
     "gdn",
     "kda",
+    "conv1d",
 )
 
 # miles_ext_kernels.cake: op modules are its submodules, implementations those of its _impl package
