@@ -1,0 +1,26 @@
+name: Vendored upstream
+
+# Fetches every recorded upstream commit, so it runs only when the manifest or the tool changes, and weekly.
+on:
+  pull_request:
+    paths:
+      - miles_ext_kernels/cake/_vendor/VENDORED.json
+      - tools/vendor_cake.py
+  push:
+    branches: [main]
+    paths:
+      - miles_ext_kernels/cake/_vendor/VENDORED.json
+      - tools/vendor_cake.py
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  vendored-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/vendor_cake.py --check --upstream

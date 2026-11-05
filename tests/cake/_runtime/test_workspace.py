@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from miles_ext_kernels import cake
-from miles_ext_kernels.cake._runtime import config, workspace
+from miles_ext_kernels.cake._runtime import workspace
 
 from ..helpers import POOLED, requires_cuda
 from .fake_cuda import FakeCuda, FakeStream
@@ -19,10 +19,8 @@ KIB = 1024
 
 @pytest.fixture(autouse=True)
 def fresh_pool(monkeypatch):
-    for name in ("_pools", "_held", "_counters", "_devices", "_cuda_devices"):
+    for name in ("_pools", "_counters"):
         monkeypatch.setattr(workspace, name, {})
-    monkeypatch.setattr(workspace, "_bound", (None, 0))
-    monkeypatch.setattr(workspace, "_direct", None)
 
 
 @pytest.fixture
@@ -38,7 +36,7 @@ def cuda(monkeypatch):
     """Two fake CUDA devices whose buffers live on the CPU (:mod:`.fake_cuda`)."""
     fake = FakeCuda(torch)
     for owner, name, value in fake.patches():
-        monkeypatch.setattr(owner, name, value, raising=False)  # torch._C._cuda_* is absent from a CPU build
+        monkeypatch.setattr(owner, name, value)
     return fake
 
 
@@ -47,10 +45,9 @@ def _take(op, role, numel, dtype=torch.float32, device="cpu"):
 
 
 def _check_total():
-    """The running byte total of every device equals the bytes of its buffers."""
+    """The reported bytes of every device are the bytes of its buffers."""
     for where, pool in workspace._pools.items():
-        assert workspace._held[where] == sum(buffer.numel() for buffer in pool.values()), where
-        assert workspace.stats()[where]["bytes"] == workspace._held[where]
+        assert workspace.stats()[where]["bytes"] == sum(buffer.numel() for buffer in pool.values()), where
 
 
 def test_the_default_bound_keeps_nothing_and_reads_no_stream(monkeypatch):
@@ -62,76 +59,6 @@ def test_the_default_bound_keeps_nothing_and_reads_no_stream(monkeypatch):
     assert first.shape == (256,) and first.dtype == torch.float32
     assert second.data_ptr() != first.data_ptr()
     assert workspace.stats() == {"cpu": {"bytes": 0, "entries": 0, "hits": 0, "misses": 2, "evictions": 0}}
-
-
-def test_the_bound_is_read_once_per_configuration(monkeypatch):
-    reads = []
-    option = config.option
-
-    def counted(op, dest):
-        reads.append((op, dest))
-        return option(op, dest)
-
-    monkeypatch.setattr(config, "option", counted)
-    for _ in range(5):
-        _take("a", "x", 64)
-    assert reads == [(None, "cake_workspace_pool_bytes")]
-    cake.configure(cake_workspace_pool_bytes=KIB)
-    for _ in range(5):
-        _take("a", "x", 64)
-    assert len(reads) == 2 and workspace.stats()["cpu"]["hits"] == 4
-
-
-def test_the_default_bound_allocates_directly_after_the_first_take(monkeypatch):
-    _take("a", "x", 64)
-    assert workspace._direct is config._state
-    monkeypatch.setattr(workspace, "_pooled", lambda *args: pytest.fail("a take left the direct path"))
-    allocated = []
-    empty = torch.empty
-
-    def recorded(shape, *, dtype, device):
-        allocated.append((shape, dtype, device))
-        return empty(shape, dtype=dtype, device=device)
-
-    monkeypatch.setattr(torch, "empty", recorded)
-    shape = torch.Size([2, 3])
-    view = workspace.take("a", "y", shape, torch.bfloat16, "cpu")
-
-    assert allocated == [(shape, torch.bfloat16, torch.device("cpu"))]
-    assert view.shape == shape and view.dtype == torch.bfloat16
-    assert workspace.stats() == {"cpu": {"bytes": 0, "entries": 0, "hits": 0, "misses": 2, "evictions": 0}}
-
-
-def test_a_new_configuration_leaves_the_direct_path_until_its_bound_is_read():
-    _take("a", "x", 64)
-    cake.configure(cake_workspace_pool_bytes=KIB)
-    _take("a", "x", 64)  # the new bound applies at once: the request is pooled
-
-    assert workspace._direct is None and workspace.stats()["cpu"]["entries"] == 1
-    cake.configure()
-    _take("b", "x", 64)  # back at 0: this take evicts what the pool kept, the next one is direct
-
-    assert workspace._direct is None and workspace.stats()["cpu"]["bytes"] == 0
-    _take("a", "x", 64)
-
-    assert workspace._direct is config._state
-    assert workspace.stats()["cpu"] == {"bytes": 0, "entries": 0, "hits": 0, "misses": 4, "evictions": 1}
-
-
-def test_a_buffer_held_on_any_device_keeps_takes_off_the_direct_path(monkeypatch, cuda):
-    unbounded = config._state
-    _take("a", "x", 64)  # direct under the default configuration
-    cake.configure(**POOLED)
-    workspace.take("a", "x", (16,), torch.float32, "cuda:1")  # kept on device 1
-    monkeypatch.setattr(config, "_state", unbounded)  # a configuration of bound 0 again, e.g. one a test restores
-    _take("a", "x", 64)  # device "cpu" holds nothing, device 1 does: no direct path
-
-    assert workspace._direct is None and workspace.stats()[1]["entries"] == 1
-    workspace.take("b", "x", (16,), torch.float32, "cuda:1")  # evicts device 1's buffer
-    _take("a", "x", 64)
-
-    assert workspace.stats()[1] == {"bytes": 0, "entries": 0, "hits": 0, "misses": 2, "evictions": 1}
-    assert workspace._direct is unbounded
 
 
 def test_a_failed_allocation_leaves_the_pool_consistent(monkeypatch):
@@ -158,19 +85,6 @@ def test_a_failed_allocation_leaves_the_pool_consistent(monkeypatch):
     _check_total()
     monkeypatch.setattr(torch, "empty", empty)
     _take("a", "x", 750)
-    _check_total()
-
-
-def test_a_missing_byte_total_is_recomputed_from_the_pool(pooled):
-    _take("a", "x", 256)
-    _take("b", "x", 64)
-    del workspace._held["cpu"]
-    _take("a", "x", 128)  # a hit
-
-    assert workspace._held["cpu"] == 1280
-    _check_total()
-    del workspace._held["cpu"]
-    assert workspace.release("a") == KIB and workspace._held["cpu"] == 256
     _check_total()
 
 
@@ -307,7 +221,7 @@ def test_the_running_total_follows_every_hit_miss_eviction_drop_and_release():
         _take(rng.choice("abc"), rng.choice("xyz"), rng.choice([0, 1, 16, 100, 256, 1000, 5000]))
         _check_total()
         limit = cake.option(None, "cake_workspace_pool_bytes")
-        assert workspace._held["cpu"] <= limit
+        assert workspace.stats()["cpu"]["bytes"] <= limit
     stats = workspace.stats()["cpu"]
     assert stats["hits"] + stats["misses"] == 600 and stats["hits"] > 0 and stats["evictions"] > 0
 
@@ -361,7 +275,7 @@ def test_concurrent_takes_and_stats_keep_the_pool_consistent(bound):
     _check_total()
 
 
-def test_cuda_follows_the_current_device_and_an_index_is_resolved_once(cuda):
+def test_cuda_follows_the_current_device(cuda):
     cake.configure(**POOLED)
     workspace.take("a", "x", (16,), torch.float32, "cuda")
     cuda.index = 1
@@ -370,28 +284,26 @@ def test_cuda_follows_the_current_device_and_an_index_is_resolved_once(cuda):
 
     assert {where: (s["entries"], s["hits"]) for where, s in workspace.stats().items()} == {0: (1, 0), 1: (1, 1)}
     assert list(workspace._pools[0]) == [("a", "x", 1000)] and list(workspace._pools[1]) == [("a", "x", 1001)]
-    assert workspace._devices["cuda"] is workspace._CURRENT
-    assert workspace._devices[torch.device("cuda", 1)] == (1, torch.device("cuda", 1))
 
 
-def test_cuda_reads_the_stream_of_the_current_device_without_switching(cuda):
+def test_cuda_keys_buffers_by_the_stream_of_their_device(cuda):
     cake.configure(**POOLED)
     first = workspace.take("a", "x", (16,), torch.float32, "cuda:0")
     cuda.streams[0] = FakeStream(2000)  # another stream on the same device: another buffer
     other = workspace.take("a", "x", (16,), torch.float32, "cuda:0")
 
-    assert cuda.switches == 0 and other.data_ptr() != first.data_ptr()
+    assert other.data_ptr() != first.data_ptr()
     assert list(workspace._pools[0]) == [("a", "x", 1000), ("a", "x", 2000)]
-    workspace.take("a", "x", (16,), torch.float32, "cuda:1")  # not the current device: read inside its device block
+    workspace.take("a", "x", (16,), torch.float32, "cuda:1")  # not the current device: its own stream
 
-    assert cuda.switches == 1 and cuda.index == 0 and list(workspace._pools[1]) == [("a", "x", 1001)]
+    assert cuda.index == 0 and list(workspace._pools[1]) == [("a", "x", 1001)]
 
 
 def test_cuda_capture_of_the_device_bypasses_its_pool(cuda):
     cake.configure(**POOLED)
     kept = workspace.take("a", "x", (16,), torch.float32, "cuda:1")
     cuda.capturing.add(1)
-    captured = workspace.take("a", "x", (16,), torch.float32, "cuda:1")  # read inside device 1's block
+    captured = workspace.take("a", "x", (16,), torch.float32, "cuda:1")
     cuda.index = 1
     again = workspace.take("a", "x", (16,), torch.float32, "cuda")
 
@@ -403,42 +315,8 @@ def test_cuda_with_the_default_bound_allocates_on_the_current_device(cuda):
     cuda.index = 1
     view = workspace.take("a", "x", (4, 4), torch.float32, "cuda")
 
-    assert view.shape == (4, 4) and cuda.switches == 0
+    assert view.shape == (4, 4)
     assert workspace.stats() == {1: {"bytes": 0, "entries": 0, "hits": 0, "misses": 1, "evictions": 0}}
-
-
-def test_cuda_at_the_default_bound_follows_the_current_device_on_the_direct_path(cuda):
-    workspace.take("a", "x", (4,), torch.float32, "cuda")
-    cuda.index = 1
-    assert workspace._direct is config._state
-    workspace.take("a", "x", (4,), torch.float32, "cuda")
-    workspace.take("a", "x", (4,), torch.float32, torch.device("cuda", 0))
-
-    assert cuda.allocated == [torch.device("cuda", 0), torch.device("cuda", 1), torch.device("cuda", 0)]
-    assert {where: s["misses"] for where, s in workspace.stats().items()} == {0: 2, 1: 1}
-    assert cuda.switches == 0
-
-
-def test_cuda_reads_the_runtime_queries_and_builds_no_stream_object(cuda, monkeypatch):
-    for name in ("current_device", "current_stream", "is_current_stream_capturing"):
-        monkeypatch.setattr(torch.cuda, name, lambda *args, name=name: pytest.fail(f"take called torch.cuda.{name}"))
-    cake.configure(**POOLED)
-    first = workspace.take("a", "x", (16,), torch.float32, "cuda")
-    again = workspace.take("a", "x", (16,), torch.float32, "cuda:0")
-    workspace.take("a", "x", (16,), torch.float32, "cuda:1")  # not the current device: inside its device block
-    cuda.capturing.add(0)
-    captured = workspace.take("a", "x", (16,), torch.float32, "cuda:0")
-
-    assert again.data_ptr() == first.data_ptr() != captured.data_ptr()
-    assert list(workspace._pools[0]) == [("a", "x", 1000)] and list(workspace._pools[1]) == [("a", "x", 1001)]
-    assert cuda.switches == 1
-
-
-def test_a_cuda_build_of_torch_has_the_runtime_queries_the_pool_reads():
-    if torch.version.cuda is None and getattr(torch.version, "hip", None) is None:
-        pytest.skip("a CPU build of torch")
-    for name in ("_cuda_getDevice", "_cuda_getCurrentRawStream", "_cuda_isCurrentStreamCapturing"):
-        assert callable(getattr(torch._C, name, None)), name
 
 
 @requires_cuda
