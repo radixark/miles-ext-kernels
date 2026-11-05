@@ -196,6 +196,74 @@
         }
       }
     },
+    "gated_rmsnorm": {
+      "cake_rmsnorm_silu_gate_det_train_backend": {
+        "cake_revision": "2cfac1977804be013a235fb4c471615e9e1f40cf",
+        "files": {
+          "__init__.py": "2dde55014b1ffb3e3f8038c6a5b2f8bb21766f0e",
+          "build.json": "cacabf1970ef5e6263a87940a71f3ac7c384c20f",
+          "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
+          "cake_jit.py": "a29ca5222ba91d486b9849dd090360c9010164a0",
+          "csrc/.clang-format": "f43f54d358caf923b9f44d076ec0faf7775c189e",
+          "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c",
+          "csrc/cake_rmsnorm_silu_gate_det_train_3c1aaebdec47df0111e4_binding.cu": "c8e3be2050be7b3eedf5ae013ba40a4467495e3d",
+          "csrc/cake_rmsnorm_silu_gate_det_train_3c1aaebdec47df0111e4_kernel.cu": "ac7696fae6081054451e887b7f4b0e0307421d31",
+          "csrc/cake_rmsnorm_silu_gate_det_train_47d2327da7f419fce725_binding.cu": "45c6690f9f5e6a5fb7a9216fd0854d40b9d9e5ed",
+          "csrc/cake_rmsnorm_silu_gate_det_train_47d2327da7f419fce725_kernel.cu": "a622860e34511a902a652d1627640a2dbfb70880",
+          "csrc/cake_rmsnorm_silu_gate_det_train_9d6efc19ce4885c5a4d0_binding.cu": "95e8730978388e7025b8139165e6f2165daa6e06",
+          "csrc/cake_rmsnorm_silu_gate_det_train_9d6efc19ce4885c5a4d0_kernel.cu": "cf67d4486a1b060aa74249c1f5dd397c948f3e31",
+          "csrc/cake_rmsnorm_silu_gate_det_train_aeceb63b55b0c3368dc9_binding.cu": "be18e5deef9e350b76805d1c185ff2650632c600",
+          "csrc/cake_rmsnorm_silu_gate_det_train_aeceb63b55b0c3368dc9_kernel.cu": "9aa8233a0e0ed40b03a171b2b83e3f6a6b565eda"
+        },
+        "source": {
+          "commit": "c5db8d3ccd3fa3842812280f7f208718dc0b8610",
+          "kind": "flashinfer",
+          "path": "flashinfer/cake_rmsnorm_silu_gate_det_train_backend",
+          "repo": "https://github.com/flashinfer-ai/flashinfer"
+        }
+      },
+      "cake_rmsnorm_silu_gate_train_backend": {
+        "cake_revision": "1e5eb1ede3ce4588c272ec03d718e88beea1858f",
+        "files": {
+          "__init__.py": "7129b8b39a5d7d963e7b891c4a7b726c330cb760",
+          "build.json": "cf408b9710a21ec57b5c130c7516cfab75beae91",
+          "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
+          "cake_jit.py": "61af9480e7c2c87d3a84ca0e20224feca9b0143a",
+          "csrc/.clang-format": "15d65fe75aa829f172c793c1243831ce8bc7a6a2",
+          "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c",
+          "csrc/cake_rmsnorm_silu_gate_train_05ffc12001cf81513436_binding.cu": "23b4795e623bdc1e50526a763221f10ee27037e2",
+          "csrc/cake_rmsnorm_silu_gate_train_05ffc12001cf81513436_kernel.cu": "a8fa36b79c4e90523e2101c9b4b0265eafca8fa6",
+          "csrc/cake_rmsnorm_silu_gate_train_26c869703d0ab9e4a39d_binding.cu": "18fcee0c3a5c5eda70b012d9b4918337b7d50095",
+          "csrc/cake_rmsnorm_silu_gate_train_26c869703d0ab9e4a39d_kernel.cu": "5784d06bde07447d7c1d046680efef54292c9b17",
+          "csrc/cake_rmsnorm_silu_gate_train_4c6188a9425364b78977_binding.cu": "c9872f2eb280a9758fdffd5635d630c94c718904",
+          "csrc/cake_rmsnorm_silu_gate_train_4c6188a9425364b78977_kernel.cu": "3ecb2431643e0e6877bb1789b6451d8aae312f78",
+          "csrc/cake_rmsnorm_silu_gate_train_55ff8a9d0ba6d83285b5_binding.cu": "998bd3ed6f9c8f69e221fc1ee4e577602b0262e7",
+          "csrc/cake_rmsnorm_silu_gate_train_55ff8a9d0ba6d83285b5_kernel.cu": "3cec808f292e8954e4da6c2a14279f9425338201",
+          "csrc/cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8_binding.cu": "c12a6b545fc1a0cb28b3289d5b1b87671f85b38a",
+          "csrc/cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8_kernel.cu": "b61209723ebf5cc9f2450d66b571cb5e31f96770",
+          "csrc/cake_rmsnorm_silu_gate_train_8b61372f6a32eeca4d10_binding.cu": "9dce6a7e3fdb76f93a774e5a498852e2994c23cd",
+          "csrc/cake_rmsnorm_silu_gate_train_8b61372f6a32eeca4d10_kernel.cu": "f6e8f011b4ea978cfa67b04ce85cbdc5764877e2",
+          "csrc/cake_rmsnorm_silu_gate_train_8bd481246a4b97382250_binding.cu": "102e033e00494b671270f6fcfb0e8ccc3dfebb1e",
+          "csrc/cake_rmsnorm_silu_gate_train_8bd481246a4b97382250_kernel.cu": "5175f76801d602fda93137eda75855199fe6f187",
+          "csrc/cake_rmsnorm_silu_gate_train_9f2f4d1f2b85a7469a7d_binding.cu": "fb10b878cc4bf591b5e91488424f0dc557ed1a41",
+          "csrc/cake_rmsnorm_silu_gate_train_9f2f4d1f2b85a7469a7d_kernel.cu": "51bca0ade29adb53a1fcdb755a01c671a7088791",
+          "csrc/cake_rmsnorm_silu_gate_train_c447141e8f19dd798212_binding.cu": "6dd972ac5a3c290aa1056d54fdd2cf8b69319990",
+          "csrc/cake_rmsnorm_silu_gate_train_c447141e8f19dd798212_kernel.cu": "086cf4c3328147b3314a83d9192365237c61a98a",
+          "csrc/cake_rmsnorm_silu_gate_train_cb597a0bebd6145e2024_binding.cu": "549355d07b5185b5b0763f780a473cc92d1281ca",
+          "csrc/cake_rmsnorm_silu_gate_train_cb597a0bebd6145e2024_kernel.cu": "e1a5a74fe399a1baac93b20f0afa8d3b9067f326",
+          "csrc/cake_rmsnorm_silu_gate_train_e0672c312c57421abe21_binding.cu": "21c6d97ab2d5c563421cf32ea5e83d1daa71fc00",
+          "csrc/cake_rmsnorm_silu_gate_train_e0672c312c57421abe21_kernel.cu": "18cfaacb882789fabf8e9077bf145382e45e65ab",
+          "csrc/cake_rmsnorm_silu_gate_train_e6a05f4e7ec6b374d3f2_binding.cu": "c2d3a31af298f58f2844c8d0e28ac2a4863d11e7",
+          "csrc/cake_rmsnorm_silu_gate_train_e6a05f4e7ec6b374d3f2_kernel.cu": "6ad00efd039c1a840b26830b4097df9c4a0f0a0c"
+        },
+        "source": {
+          "commit": "c5db8d3ccd3fa3842812280f7f208718dc0b8610",
+          "kind": "flashinfer",
+          "path": "flashinfer/cake_rmsnorm_silu_gate_train_backend",
+          "repo": "https://github.com/flashinfer-ai/flashinfer"
+        }
+      }
+    },
     "gdn": {
       "cake_gdn_det_train": {
         "cake_revision": "b10550d5b0663808da215167053ca7290c590d4a",
