@@ -71,6 +71,7 @@ packages, and its entry points import the implementation on first use.
 | `dense_gemm` | `batched_projection`, `router_gating`, `check_projection_dims`, `fast_projection_programs`, `fast_router_programs` | `--batched-projection-gemm-backend cake`, `--moe-router-gemm-backend cake` (Megatron only) | `--cake-dense-gemm-variant` hidden, always `det` | `det`, `fast` (miles runs `det`; `fast` changes only weight-gradient programs, on the rows and token counts its tables select for the device; the op module lists the rows where they are known to miss `det`'s BF16 accuracy budget); not batch-invariant: a token's results can change in their last bits with the token count of the call | `sm_100a`, `sm_103a`, `sm_107a` | `projections`, `router` | `tests/cake/dense_gemm/` |
 | `moe_grouped_gemm` | `grouped_mm`, `check_grouped_dims`, `max_grouped_rows` | `--moe-grouped-gemm-backend cake` (`--train-backend torchtitan`) | `--cake-moe-grouped-gemm-variant` | `det`, `fast` | `sm_100a`, `sm_103a`, `sm_107a` | none | `tests/cake/moe_grouped_gemm/` |
 | `lm_head` | `log_probs` | `--log-probs-backend cake` | `--cake-lm-head-variant`, `--cake-lm-head-chunk-size` | `det`, `fast` | `sm_100a`, `sm_103a`, `sm_107a` | none | `tests/cake/lm_head/` |
+| `gated_act_mxfp8` | `silu_and_mul_mxfp8_quantize`, `silu_and_mul_mxfp8_quantize_backward` | none (not selected by miles) | none | `det` | `sm_100a`, `sm_103a`, `sm_107a` | none | `tests/cake/gated_act_mxfp8/` |
 
 An op's vendored packages, their sources and commits are its block in `miles_ext_kernels/cake/_vendor/VENDORED.json`.
 
@@ -130,6 +131,7 @@ an op with Triton or Gluon kernels also checks that the calls add nothing to a p
 | `dense_gemm` | `projections`: `(num_heads, d_in, d_out, weight_layout)` tuples; `router`: `(num_experts, hidden_size)` tuples. The plan of a GEMM depends on the token count, so it builds every program the two packages register for the architecture for the GEMM kinds given (the projections, the router), not one plan per shape |
 | `moe_grouped_gemm` | none: both variants' forward, input-gradient and weight-gradient programs (both k tiles, every stage) for any expert shape, and the input gradient's queue probe on `sm_100a` / `sm_103a` |
 | `lm_head` | none: every log-probability stage of both variants, with and without a temperature |
+| `gated_act_mxfp8` | none: every library of the device's architecture (forward and backward; rowwise, colwise or both; every program the `M * K` selection picks) |
 
 ## Memory
 
