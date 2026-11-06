@@ -84,7 +84,7 @@ def _launched_own_programs() -> set[str]:
 
 
 def _clear_caches() -> None:
-    _fast_backend().clear_convenience_caches()  # this package's and the deterministic package's
+    _fast_backend().cake_dense_gemm_nondet_train_convenience_cache_clear()  # this package's and the deterministic package's
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -224,8 +224,8 @@ def test_router_fast_runs_the_planned_programs_with_det_bits_or_budget(name):
     want = g.T @ x2
     # the package's FP32 weight gradient (the program router_gating runs) within the router budget, and the BF16
     # gradient router_gating returns within one rounding of it
-    dw32 = _fast_backend().router_wgrad(
-        grad.reshape(-1, experts).float(), x.reshape(-1, hidden).float(), deterministic=False
+    dw32 = _fast_backend().cake_dense_gemm_nondet_train_router_wgrad(
+        grad.reshape(-1, experts).float(), x.reshape(-1, hidden).float()
     )
     assert _rel_fro(dw32, want) <= ROUTER_REL_FRO_MAX, planned["weight_grad"]
     assert fast[2].dtype == torch.bfloat16 and _rel_fro(fast[2], want) <= BF16_ROUNDED_REL_FRO_MAX

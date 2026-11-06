@@ -47,7 +47,7 @@ OP = OpSpec(
     variants=("det", "fast"),
     cli_variants=("det",),
     selected_by=_SELECTORS,
-    packages=("dense_projection_det_gemm", "dense_projection_gemm"),
+    packages=("cake_dense_gemm_det_train", "cake_dense_gemm_nondet_train"),
     exports=(
         "OPERATIONS",
         "WEIGHT_LAYOUTS",

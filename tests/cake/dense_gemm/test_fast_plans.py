@@ -139,7 +139,7 @@ def test_fast_binds_the_vendored_deterministic_package():
     det_backend, _ = ops._vendored()
     fast_backend, fast_jit = ops._vendored_fast()
 
-    assert fast_backend.__name__ == "miles_ext_kernels.cake._vendor.dense_projection_gemm.cake_backend"
+    assert fast_backend.__name__ == "miles_ext_kernels.cake._vendor.cake_dense_gemm_nondet_train.cake_backend"
     assert fast_backend.deterministic_backend() is det_backend
     assert fast_jit.deterministic_module("cake_jit") is ops._vendored()[1]
 

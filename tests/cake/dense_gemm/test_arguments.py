@@ -41,7 +41,7 @@ def test_the_op_declares_two_selectors_two_variants_and_miles_runs_det():
     assert spec is dense_gemm.OP
     assert spec.selected_by == (("batched_projection_gemm_backend", "cake"), ("moe_router_gemm_backend", "cake"))
     assert spec.variants == ("det", "fast") and spec.cli_choices == ("det",)
-    assert spec.packages == ("dense_projection_det_gemm", "dense_projection_gemm")
+    assert spec.packages == ("cake_dense_gemm_det_train", "cake_dense_gemm_nondet_train")
     assert spec.flags == ()
 
 
