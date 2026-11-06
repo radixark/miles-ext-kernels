@@ -400,7 +400,7 @@
           "csrc/cake_ffi_checks.h": "43f6edf073a2ceec397925110b7418af437dcba6"
         },
         "source": {
-          "commit": "2ffaa2684f05f16858d1aeafc57f9d96dace9889",
+          "commit": "da118ebfdd5b54dfad95d09bffbba3b739ba27c2",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_dense_gemm_det_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
@@ -481,7 +481,7 @@
           "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c"
         },
         "source": {
-          "commit": "2ffaa2684f05f16858d1aeafc57f9d96dace9889",
+          "commit": "da118ebfdd5b54dfad95d09bffbba3b739ba27c2",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_dense_gemm_nondet_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
