@@ -85,7 +85,8 @@ def _launched_own_programs() -> set[str]:
 
 
 def _clear_caches() -> None:
-    _fast_backend().cake_dense_gemm_nondet_train_convenience_cache_clear()  # this package's and the deterministic package's
+    # this package's caches and the deterministic package's
+    _fast_backend().cake_dense_gemm_nondet_train_convenience_cache_clear()
 
 
 # ---------------------------------------------------------------------------------------------------------------

@@ -3,8 +3,8 @@ Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
-Deterministic DSA lightning-indexer top-k: FlashInfer's Cake package ``cake_dsa_indexer_det_train`` (built by the runtime
-loader) on SM100a / SM103a / SM107a.
+Deterministic DSA lightning-indexer top-k: FlashInfer's Cake package ``cake_dsa_indexer_det_train`` (built by the
+runtime loader) on SM100a / SM103a / SM107a.
 
 :func:`dsa_indexer_det_topk` scores every visible key of every query and selects the exact top-k in one call, without
 a ``[T, T_kv]`` logits matrix::
