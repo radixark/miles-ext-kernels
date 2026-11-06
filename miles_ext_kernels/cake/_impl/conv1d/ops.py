@@ -11,7 +11,7 @@ Packed causal depthwise conv1d + SiLU (kernel size 4) on the vendored Cake kerne
 
     y[t, c] = bf16(silu(sum_k weight[c, k] * x[t - 3 + k, c]))      # x of another document is 0
 
-``det`` runs FlashInfer's deterministic package (``_vendor/cake_causal_conv1d_det_train_backend``): its backward
+``det`` runs FlashInfer's deterministic package (``_vendor/cake_causal_conv1d_det_train``): its backward
 writes per-CTA partial rows of the weight gradient and a second launch sums them in a fixed order, so the gradients
 are bitwise reproducible for a given ``(S, C, device)``. ``fast`` runs the non-deterministic package
 (``_vendor/cake_causal_conv1d_nondet_train``): the same forward programs (``y`` is ``det``'s bits) and a one-launch
@@ -71,7 +71,7 @@ __all__ = [
 
 OP = "conv1d"
 # the vendored package of each variant
-PACKAGES = {"det": "cake_causal_conv1d_det_train_backend", "fast": "cake_causal_conv1d_nondet_train"}
+PACKAGES = {"det": "cake_causal_conv1d_det_train", "fast": "cake_causal_conv1d_nondet_train"}
 KERNEL_SIZE = 4
 CHANNEL_MULTIPLE = 8
 SILU_GRAD_PREACTIVATIONS = ("bf16", "fp32")
@@ -82,7 +82,10 @@ _SILU_GRAD = "cake_conv1d_silu_grad_preactivation"
 _KCP_MODULES: dict[str, ModuleType] = {}  # variant -> the kcp module its context-parallel calls run
 # the host-cache and graph-cache clears of each variant's kcp module
 _KCP_CLEARS = {
-    "det": ("host_cache_clear", "graph_cache_clear"),
+    "det": (
+        "cake_causal_conv1d_det_train_kcp_host_cache_clear",
+        "cake_causal_conv1d_det_train_kcp_graph_cache_clear",
+    ),
     "fast": (
         "cake_causal_conv1d_nondet_train_kcp_host_cache_clear",
         "cake_causal_conv1d_nondet_train_kcp_graph_cache_clear",
@@ -329,7 +332,7 @@ def causal_conv1d_kcp_multi(
     xs = [x.contiguous() for x in xs]
     weights = [_kcp_taps(w) for w in weights]
     if variant == "det":
-        return kcp.cake_causal_conv1d_det_multi_kcp(
+        return kcp.cake_causal_conv1d_det_kcp_multi(
             xs, weights, kcp_context, recompute_handle=recompute_handle, cooperative=cooperative
         )
     return kcp.cake_causal_conv1d_nondet_kcp_multi(

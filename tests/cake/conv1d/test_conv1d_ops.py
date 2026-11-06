@@ -318,7 +318,10 @@ def test_release_drops_the_packages_host_plans(monkeypatch):
     fast = ops._package("fast")
     monkeypatch.setattr(fast, "plan_cache_clear", lambda: cleared.append("fast plans"))
     clears = {
-        "det": ("host_cache_clear", "graph_cache_clear"),
+        "det": (
+            "cake_causal_conv1d_det_train_kcp_host_cache_clear",
+            "cake_causal_conv1d_det_train_kcp_graph_cache_clear",
+        ),
         "fast": (
             "cake_causal_conv1d_nondet_train_kcp_host_cache_clear",
             "cake_causal_conv1d_nondet_train_kcp_graph_cache_clear",

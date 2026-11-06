@@ -37,7 +37,7 @@ OP = OpSpec(
     summary="packed causal depthwise conv1d + SiLU, kernel size 4, forward + backward, context parallelism",
     variants=("det", "fast"),
     selected_by=(("linear_attention_conv_backend", "cake"),),
-    packages=("cake_causal_conv1d_det_train_backend", "cake_causal_conv1d_nondet_train"),
+    packages=("cake_causal_conv1d_det_train", "cake_causal_conv1d_nondet_train"),
     exports=("causal_conv1d", "causal_conv1d_kcp", "causal_conv1d_kcp_multi", "check_supported"),
     flags=(
         Flag(

@@ -1,7 +1,7 @@
 {
   "ops": {
     "conv1d": {
-      "cake_causal_conv1d_det_train_backend": {
+      "cake_causal_conv1d_det_train": {
         "allow": {
           "env_read": [
             "kcp.py"
@@ -10,8 +10,8 @@
         "cake_revision": "7918a2cea2fb7dc42485ce7334809ec6ec090649",
         "files": {
           ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
-          "__init__.py": "49ba8bd22a01d47b120e56e6531ebdf27f7eea97",
-          "build.json": "3b5ed6e851350e74f25e50063a85962d648e8d96",
+          "__init__.py": "ac59c75439efed49f2ff824752973f05a203254f",
+          "build.json": "a3f5076691bf13810a7124479222fcd7d514db24",
           "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
           "cake_jit.py": "21490ea0bc3c30f24ee00d7fecc2028d6ea91180",
           "csrc/.clang-format": "fae08c8733daa6518650a74bd03ba3688a90453d",
@@ -100,13 +100,13 @@
           "csrc/cake_causal_conv1d_det_train_facdd7ca702cfb7d821a_kcp_binding.cu": "bcf37647f853effee42da9611ffa532a009be8d7",
           "csrc/cake_causal_conv1d_det_train_facdd7ca702cfb7d821a_kcp_kernel.cu": "382469991a3708b68072ed57351a80363256f28e",
           "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c",
-          "kcp.py": "1a4126322b746ca0b1bf0b8af481fb957811fad4",
-          "kcp_jit.py": "862480a6085c1e832ce9dbab56c928589e481466"
+          "kcp.py": "6629ac52f3f0abc45559cd797e98921a9a16685c",
+          "kcp_jit.py": "3c7ade1ed827021ea3b54d077b38be1efd71a148"
         },
         "source": {
-          "commit": "158dfcbfc857dc8e7b93deef078a02d7f914370e",
+          "commit": "d45c5a9f59f99a93c6818e4933b48b6bb5c0e2e3",
           "kind": "flashinfer",
-          "path": "flashinfer/cake_causal_conv1d_det_train_backend",
+          "path": "flashinfer/experimental/cake/cake_causal_conv1d_det_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
         }
       },
@@ -195,7 +195,7 @@
           "kcp_jit.py": "a3bf3760dc2052ed9ecd0b8dc01718db60c7ec39"
         },
         "source": {
-          "commit": "158dfcbfc857dc8e7b93deef078a02d7f914370e",
+          "commit": "d45c5a9f59f99a93c6818e4933b48b6bb5c0e2e3",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_causal_conv1d_nondet_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"

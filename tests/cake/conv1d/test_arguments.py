@@ -46,7 +46,7 @@ def test_the_op_declares_its_selector_packages_and_entry_points():
     assert spec is conv1d.OP
     assert spec.variants == ("det", "fast") and spec.cli_choices == ("det", "fast")
     assert spec.selected_by == (("linear_attention_conv_backend", "cake"),)
-    assert spec.packages == ("cake_causal_conv1d_det_train_backend", "cake_causal_conv1d_nondet_train")
+    assert spec.packages == ("cake_causal_conv1d_det_train", "cake_causal_conv1d_nondet_train")
     assert conv1d.__all__ == ["OP", "causal_conv1d", "causal_conv1d_kcp", "causal_conv1d_kcp_multi", "check_supported"]
     assert [flag.name for flag in spec.flags] == [SILU_GRAD]
 

@@ -54,7 +54,7 @@ class _Route:
         return types.SimpleNamespace(
             cake_causal_conv1d_det_kcp=self._single("det"),
             cake_causal_conv1d_nondet_kcp=self._single("fast"),
-            cake_causal_conv1d_det_multi_kcp=self._multi("det_multi"),
+            cake_causal_conv1d_det_kcp_multi=self._multi("det_multi"),
             cake_causal_conv1d_nondet_kcp_multi=self._multi("fast_multi"),
         )
 
@@ -66,6 +66,12 @@ def route(monkeypatch):
     monkeypatch.setattr(ops, "_kcp_module", lambda variant: module)
     cake.configure(cake_conv1d_variant="fast")
     return recorder
+
+
+def test_the_stand_in_entries_are_entries_of_the_packages_kcp_modules():
+    for name in vars(_Route().module()):
+        variant = "det" if "_det_" in name else "fast"
+        assert callable(getattr(ops._kcp_module(variant), name)), (variant, name)
 
 
 def _operands(C=16, T=5, taps=torch.float32):
