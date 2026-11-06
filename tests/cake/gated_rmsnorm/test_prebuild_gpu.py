@@ -117,7 +117,7 @@ def test_configure_after_a_call_switches_the_next_call_without_a_build(monkeypat
 
     cake.prebuild(OP)
     calls = []
-    for variant, name in (("det", "cake_rmsnorm_silu_gate_det"), ("fast", "cake_rmsnorm_silu_gate")):
+    for variant, name in (("det", "cake_rmsnorm_silu_gate_det"), ("fast", "cake_rmsnorm_silu_gate_nondet")):
         package = ops._package(variant)
         original = getattr(package, name)
 
@@ -133,7 +133,7 @@ def test_configure_after_a_call_switches_the_next_call_without_a_build(monkeypat
     with no_build():
         run(x, z, w, dy)
 
-    assert calls == ["cake_rmsnorm_silu_gate_det", "cake_rmsnorm_silu_gate"]
+    assert calls == ["cake_rmsnorm_silu_gate_det", "cake_rmsnorm_silu_gate_nondet"]
 
 
 def test_no_flashinfer_module_is_imported():
