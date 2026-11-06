@@ -33,6 +33,12 @@ gradient. A label at or above ``V`` is an error: each call queues the device-sid
 of the kernels (no host synchronization), so such a label stops the CUDA stream with a device-side assertion error,
 which ends the CUDA context, instead of returning a plausible ``logp``.
 
+Deterministic algorithms. A ``fast`` call's backward reads ``torch.are_deterministic_algorithms_enabled()`` when it
+runs: with a trainable input it then raises PyTorch's alert (``RuntimeError``) before the package launches anything,
+or, under ``warn_only=True``, warns and runs ``fast``. The forward runs as always and ``det`` never alerts. That is the
+rule of the packages before the mode-word naming; ``cake_lm_head_nondet_train`` itself alerts only before a K-sliced
+dX reduction (under ``warn_only=True`` it then warns a second time), so this module raises the alert for every shape.
+
 Weight gradient. ``dW`` is BF16, one cast of an FP32 ``[V, H]`` accumulator: during the backward the accumulator
 (``4 * V * H`` bytes) and the BF16 ``dW`` (``2 * V * H`` bytes) are live next to one chunk's BF16 logits. There is no
 FP32 ``dW``: the autograd engine casts a gradient to the dtype of its input, BF16 for ``W``.
@@ -43,6 +49,7 @@ from __future__ import annotations
 import functools
 import logging
 import sys
+import warnings
 from importlib import import_module
 from pathlib import Path
 from types import ModuleType
@@ -60,6 +67,9 @@ PACKAGES = {"det": "cake_lm_head_det_train", "fast": "cake_lm_head_nondet_train"
 _VENDOR = "miles_ext_kernels.cake._vendor"
 # the modules of a package whose binding caches keep device workspaces (release() clears them)
 _BINDING_MODULES = ("cake_backend", "cake_backend_opt_in")
+# what the alert of a fast backward under torch.use_deterministic_algorithms(True) names
+_FAST_BACKWARD = "the backward of the cake lm_head fast variant"
+_DET_VARIANT = "--cake-lm-head-variant det is the deterministic variant"
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +131,27 @@ def _assert_labels_below(labels: torch.Tensor, vocab: int) -> None:
         torch._assert_async(condition)
 
 
+def _alert_nondeterministic_backward(grad: torch.Tensor) -> None:
+    """PyTorch's alert for the backward of a ``fast`` call, a hook on its ``logp`` (so it runs before the package's
+    backward launches anything): a ``RuntimeError`` while torch's deterministic algorithms are enabled, a
+    ``UserWarning`` under ``warn_only=True`` (the backward then runs ``fast``), nothing otherwise. Torch's flags are
+    read when the backward runs."""
+    if not torch.are_deterministic_algorithms_enabled():
+        return
+    if torch.is_deterministic_algorithms_warn_only_enabled():
+        warnings.warn(
+            f"{_FAST_BACKWARD} does not have a deterministic implementation, but you set "
+            f"'torch.use_deterministic_algorithms(True, warn_only=True)'; {_DET_VARIANT}",
+            stacklevel=2,
+        )
+        return
+    raise RuntimeError(
+        f"{_FAST_BACKWARD} does not have a deterministic implementation, but you set "
+        f"'torch.use_deterministic_algorithms(True)'; {_DET_VARIANT}, or use the 'warn_only=True' option if that is "
+        "acceptable for your application"
+    )
+
+
 def log_probs(
     X: torch.Tensor,
     W: torch.Tensor,
@@ -150,7 +181,8 @@ def log_probs(
     ``--cake-lm-head-chunk-size``), read now; ``det``'s bits depend on the chunk size. Raises ``ValueError`` for
     shapes, dtypes or values the kernels do not serve and for ``X`` off CUDA, ``NotImplementedError`` off SM100a /
     SM103a / SM107a and ``RuntimeError`` when the toolkit cannot build the device's kernels. A call of ``T == 0`` rows
-    returns an empty ``logp`` (zero ``dW``).
+    returns an empty ``logp`` (zero ``dW``). The backward of a ``fast`` call raises PyTorch's alert under
+    ``torch.use_deterministic_algorithms(True)`` (module docstring, Deterministic algorithms).
     """
     if X.device.type != "cuda":
         raise ValueError(f"the cake lm_head kernels run on a CUDA device, X is on {X.device}")
@@ -164,9 +196,12 @@ def log_probs(
         return entry.cake_lm_head_det_train_logprob_temperature(
             X, W, labels, chunk_size=chunk_size, num_valid_rows=num_valid_rows, temperature=temperature
         )
-    return entry.cake_lm_head_nondet_train_logprob_temperature(
+    logp = entry.cake_lm_head_nondet_train_logprob_temperature(
         X, W, labels, chunk_size=chunk_size, num_valid_rows=num_valid_rows, temperature=temperature
     )
+    if logp.requires_grad:
+        logp.register_hook(_alert_nondeterministic_backward)
+    return logp
 
 
 def prebuild(*, device: Any = None, max_workers: int | None = None) -> list[Path]:
