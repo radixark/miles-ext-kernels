@@ -2,11 +2,10 @@
 
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
-
+from pathlib import Path
 
 VENDOR = Path(__file__).resolve().parents[2] / "miles_ext_kernels" / "cake" / "_vendor"
 MODE_WORD_PACKAGE = re.compile(r"cake_.+_(?:det|nondet)_train(?:_kcp)?$")
@@ -14,7 +13,14 @@ MODE_WORD_PACKAGE = re.compile(r"cake_.+_(?:det|nondet)_train(?:_kcp)?$")
 
 def test_mode_word_vendor_modules_import_with_flashinfer_blocked():
     manifest = json.loads((VENDOR / "VENDORED.json").read_text())
-    packages = sorted(name for op in manifest["ops"].values() for name, record in op.items() if MODE_WORD_PACKAGE.fullmatch(name) and record["source"]["kind"] == "flashinfer" and "/experimental/cake/" in record["source"]["path"])
+    packages = sorted(
+        name
+        for op in manifest["ops"].values()
+        for name, record in op.items()
+        if MODE_WORD_PACKAGE.fullmatch(name)
+        and record["source"]["kind"] == "flashinfer"
+        and "/experimental/cake/" in record["source"]["path"]
+    )
     assert packages, "No mode-word CAKE packages found in VENDORED.json"
 
     child = r"""
