@@ -6,7 +6,8 @@ builds every program the two packages register for the device's architecture for
 route of :data:`ROUTES` runs the forward and the backward over token counts from 1 to 20480, among them 239 and seeded
 random counts, under ``no_build`` in ``det`` and in ``fast`` (``check_prebuild`` configures each). The routes cover
 every switch a call takes at call time: the variant, the weight layout, a strided input slice and a weight split of
-a parameter (read in place), a weight that is not 16-byte aligned (copied), one gradient only, a side stream, the
+a parameter (read in place), a weight that is not 16-byte aligned (copied), one gradient only, a single-head
+``out_in`` weight gradient (the packages' weight-gradient entry points; on an input slice too), a side stream, the
 router's ``[T, 1, H]`` and ``[T, H]`` inputs, and ``fast`` under ``torch.use_deterministic_algorithms`` (it runs
 ``det``). The cold prebuild compiles every registered program of the architecture (over 100 libraries). A fresh
 process that imports the implementation and runs both variants loads no flashinfer module. Needs a CUDA device; the
@@ -138,6 +139,10 @@ ROUTES = {
     ),
     "dense-4096-32-weight-gradient-only": _over_tokens(
         _projection_step, PROJECTIONS["dense-4096-32"], grads=("weight",)
+    ),
+    # x is a slice of a wider head; the weight is rows 16 to 47 of a [64, 4096] parameter
+    "dense-4096-32-slice-and-split": _over_tokens(
+        _projection_step, PROJECTIONS["dense-4096-32"], slot=4096 + 64, split=(64, 16)
     ),
     "dsv4-o-group-g8-side-stream": _on_a_side_stream(_over_tokens(_projection_step, PROJECTIONS["dsv4-o-group-g8"])),
     **{name: _over_tokens(_router_step, *shape) for name, shape in ROUTERS.items()},
