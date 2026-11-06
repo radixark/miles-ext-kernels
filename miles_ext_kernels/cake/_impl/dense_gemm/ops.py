@@ -4,10 +4,10 @@ Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
 The dense projection GEMMs miles calls (SM100a / SM103a / SM107a), on the vendored FlashInfer packages
-``dense_projection_det_gemm`` (``det``) and ``dense_projection_gemm`` (``fast``), whose libraries the runtime's loader
+``cake_dense_gemm_det_train`` (``det``) and ``cake_dense_gemm_nondet_train`` (``fast``), whose libraries the runtime's loader
 builds with nvcc and loads with tvm-ffi (SM107a with a CUDA 13.4 or newer toolkit).
 
-K1 (``dense_projection_det_gemm``) computes ``out[l, m, n] = sum_k A[l, m, k] B[l, k, n]`` over strided BF16 views with
+K1 (``cake_dense_gemm_det_train``) computes ``out[l, m, n] = sum_k A[l, m, k] B[l, k, n]`` over strided BF16 views with
 FP32 accumulation and one rounding at the store. Its launch plan, split-K and stream-K fixup order are a pure function
 of the views' geometry and the device, so every call is bit-reproducible. It reads a view in place when the view starts
 at a 16-byte aligned address, has unit stride on one matrix axis and its other strides in whole 16-byte units, and it
@@ -20,23 +20,22 @@ of the splits accumulate with chunked FP32 promotion and the split-K partials ar
 bit-reproducible with FP32-class error (a relative Frobenius error of about 2e-7 against FP64).
 
 Variants. A call runs the variant configured when its forward runs (``config.variant("dense_gemm")``); its backward
-runs the variant of its forward. ``det`` runs the deterministic package. ``fast`` runs the non-deterministic package
-with ``deterministic=False``, which has the deterministic package's operations and dtypes and binds it as its sibling
-(``use_deterministic_backend``). It runs a weight gradient on its own split-K (K1) or stream-K (K2) program where its
-measured tables select the row for the device's architecture and SM count and the token count: the K1 weight gradients
-of single-batch rows with ``d_in`` 4096 to 8192 and ``d_out`` 32 to 1024, and the router weight gradient of 256
-experts at hidden 4096, 5120 or 6144 inside measured token windows. Its split partials add in the order they finish, so
-such a gradient is not bit-reproducible run to run (two splits are: one add of two values). Every other row, the
-forwards and the input gradients run the deterministic programs, with the same plans and bits as ``det``.
+runs the variant of its forward. ``det`` runs the deterministic package. ``fast`` runs the non-deterministic package,
+which has the deterministic package's operations and dtypes and binds it as its sibling
+(``use_deterministic_backend``). Its measured tables select split-K (K1), stream-K (K2), cluster or short-token SIMT
+programs for qualifying shapes, token counts, architectures and SM counts. Some router input gradients also select
+SIMT programs. The split-K and stream-K weight gradients add partials in the order they finish, so those gradients
+are not bit-reproducible run to run. Other routes use the deterministic sibling, with the same plans and bits as
+``det``.
 :func:`fast_projection_programs` and :func:`fast_router_programs` say which programs ``fast`` runs for a shape, a token
-count and a device. While ``torch.use_deterministic_algorithms(True)`` is in effect the non-deterministic package
-refuses ``deterministic=False``, so a ``fast`` call runs ``det`` and the runtime logs it once.
+count and a device. With ``torch.use_deterministic_algorithms(True)``, the non-deterministic package raises at an
+order-varying launch; with ``warn_only=True`` it warns and runs the selected ``fast`` program.
 
-Known accuracy misses of ``fast``. On 148-SM sm_103a parts (B300), ``fast`` runs the two-split K1 weight gradient of
-the single-head ``5120 -> 48`` and ``5120 -> 64`` BF16 projections at every token count from 65. Its result missed the
+Historical accuracy misses of ``fast``. On 148-SM sm_103a parts (B300), the two-split K1 weight gradient of
+the single-head ``5120 -> 48`` and ``5120 -> 64`` BF16 projections missed the
 deterministic package's BF16 budget (atol = rtol = 1e-2, no element outside) for one of 10 seeds at 40961 and 40962
 tokens (``5120 -> 48``) and at 47105 tokens (``5120 -> 64``), where the deterministic program met it on every seed.
-These are the measurements of flashinfer-ai/flashinfer#8743, a later FlashInfer change that runs the deterministic
+These are the measurements of flashinfer-ai/flashinfer#8743. The current FlashInfer planner runs the deterministic
 program for ``5120 -> 48`` BF16 at 40961 to 49151 tokens and for ``5120 -> 64`` BF16 at 47105 to 49152 tokens on these
 parts. miles calls neither shape and runs ``det``.
 
@@ -90,15 +89,15 @@ WEIGHT_LAYOUTS = ("in_out", "out_in")
 OPERATIONS = ("forward", "input_grad", "weight_grad")
 
 _OP = "dense_gemm"
-_DET = "dense_projection_det_gemm"
-_FAST = "dense_projection_gemm"
+_DET = "cake_dense_gemm_det_train"
+_FAST = "cake_dense_gemm_nondet_train"
 _VENDOR = "miles_ext_kernels.cake._vendor"
 
 
 @functools.cache
 def _vendored() -> tuple[ModuleType, ModuleType]:
     """``(cake_backend, cake_jit)`` of the deterministic package."""
-    from miles_ext_kernels.cake._vendor.dense_projection_det_gemm import cake_backend, cake_jit
+    from miles_ext_kernels.cake._vendor.cake_dense_gemm_det_train import cake_backend, cake_jit
 
     return cake_backend, cake_jit
 
@@ -108,26 +107,22 @@ def _vendored_fast() -> tuple[ModuleType, ModuleType]:
     """``(cake_backend, cake_jit)`` of the non-deterministic package, its deterministic sibling bound to the vendored
     deterministic package (it resolves its deterministic programs, plans and rules there)."""
     det_backend, _ = _vendored()
-    from miles_ext_kernels.cake._vendor.dense_projection_gemm import cake_backend, cake_jit
+    from miles_ext_kernels.cake._vendor.cake_dense_gemm_nondet_train import cake_backend, cake_jit
 
     cake_backend.use_deterministic_backend(det_backend)
     return cake_backend, cake_jit
 
 
 def _call_variant(variant: str) -> str:
-    """``variant``, or ``det`` for ``fast`` while torch's deterministic algorithms are enabled (the non-deterministic
-    package refuses ``deterministic=False`` then)."""
-    if variant == "fast" and torch.are_deterministic_algorithms_enabled():
-        config.warn_runs_det(_OP, "calls under torch.use_deterministic_algorithms(True)")
-        return "det"
+    """Keep the selected mode; the nondet package alerts at its nondeterministic step."""
     return variant
 
 
 def _k1_gemm(variant: str) -> Callable:
     """The K1 entry point ``gemm(A, B, out)`` of ``variant``."""
     if variant == "det":
-        return _vendored()[0].dense_projection_det_gemm
-    return functools.partial(_vendored_fast()[0].dense_projection_gemm, deterministic=False)
+        return _vendored()[0].cake_dense_gemm_det_train_projection
+    return _vendored_fast()[0].cake_dense_gemm_nondet_train_projection
 
 
 def _device_index(device: Any) -> int:
@@ -288,11 +283,11 @@ def _router_backward(variant: str) -> tuple[Callable, Callable]:
     """``(dgrad(g, w), wgrad(g, x))``: the K2 input and weight gradients of ``variant``."""
     if variant == "det":
         backend = _vendored()[0]
-        return backend.router_det_dgrad, backend.router_det_wgrad
+        return backend.cake_dense_gemm_det_train_router_dgrad, backend.cake_dense_gemm_det_train_router_wgrad
     backend = _vendored_fast()[0]
     return (
-        functools.partial(backend.router_dgrad, deterministic=False),
-        functools.partial(backend.router_wgrad, deterministic=False),
+        backend.cake_dense_gemm_nondet_train_router_dgrad,
+        backend.cake_dense_gemm_nondet_train_router_wgrad,
     )
 
 
@@ -445,9 +440,9 @@ def program_kind(template: str) -> str:
     ``"projections"``: the other K1 programs (BF16 output) and the swapped few-token forwards (``swap_ab_*``).
     ``ValueError`` for a template of no known kind.
     """
-    if template.startswith(("router_fp32_", "split_fp32_")):
+    if template.startswith(("router_fp32_", "router_partials_", "split_fp32_")):
         return "router"
-    if template.startswith(("dense_proj_det_gemm_", "dense_proj_gemm_atomic_")):
+    if template.startswith(("dense_proj_det_gemm_", "dense_proj_gemm_atomic_", "dense_proj_gemm_dsm_")):
         return "router" if "f32" in template.split("_") else "projections"
     if template.startswith("swap_ab_"):
         return "projections"
@@ -456,8 +451,8 @@ def program_kind(template: str) -> str:
 
 def _registries() -> tuple[tuple[str, ModuleType], ...]:
     """``(package, cake_jit)`` of both packages: their registered programs per architecture (``KERNELS``)."""
-    from miles_ext_kernels.cake._vendor.dense_projection_det_gemm import cake_jit as det_jit
-    from miles_ext_kernels.cake._vendor.dense_projection_gemm import cake_jit as fast_jit
+    from miles_ext_kernels.cake._vendor.cake_dense_gemm_det_train import cake_jit as det_jit
+    from miles_ext_kernels.cake._vendor.cake_dense_gemm_nondet_train import cake_jit as fast_jit
 
     return (_DET, det_jit), (_FAST, fast_jit)
 
@@ -528,8 +523,8 @@ def prebuild(
 
 
 def release() -> None:
-    """Drop the planned launches and the workspaces of both vendored packages (their ``clear_convenience_caches``)."""
+    """Drop the planned launches and workspaces of both vendored packages."""
     for package in (_FAST, _DET):
         backend = sys.modules.get(f"{_VENDOR}.{package}.cake_backend")
         if backend is not None:
-            backend.clear_convenience_caches()
+            getattr(backend, f"{package}_convenience_cache_clear")()

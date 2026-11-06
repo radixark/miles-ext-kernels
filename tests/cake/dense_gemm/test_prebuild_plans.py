@@ -19,7 +19,7 @@ pytest.importorskip("tvm_ffi")
 
 from miles_ext_kernels.cake._impl.dense_gemm import ops  # noqa: E402
 
-DET, FAST = "dense_projection_det_gemm", "dense_projection_gemm"
+DET, FAST = "cake_dense_gemm_det_train", "cake_dense_gemm_nondet_train"
 PARTS = (
     ("sm_100a", 148),
     ("sm_100a", 152),
@@ -84,7 +84,7 @@ class _Planner:
                 template = backend.swap_ab_template(batches, rows, cols, self.sm_count, self.arch)
                 if template is not None:
                     return DET, self.det_jit.select_module(self.arch, template)
-        planned, *_ = backend.plan_dense_projection_det_gemm(
+        planned, *_ = backend.cake_dense_gemm_det_train_projection_plan(
             a, b, out, sm_count=self.sm_count, l2_bytes=L2_BYTES, arch=self.arch
         )
         return DET, self.det_jit.select_module(self.arch, planned.template)
@@ -95,7 +95,7 @@ class _Planner:
             template = ops._fast_k2_template(a, b, out, arch=self.arch, sm_count=self.sm_count)
             if template is not None:
                 return FAST, self.fast_jit.select_module(self.arch, template)
-        planned, *_ = self.det_backend.plan_router_fp32_det_gemm(a, b, out)
+        planned, *_ = self.det_backend.cake_dense_gemm_det_train_router_plan(a, b, out)
         return DET, self.det_jit.select_module(self.arch, planned.template)
 
     def library(self, package: str, module: str) -> str:

@@ -202,7 +202,7 @@ def test_the_routes_reach_the_fast_programs_of_this_device():
     own = {programs["weight_grad"] for programs in planned} - {None}
     if not own:
         pytest.skip(f"fast runs no program of its own for these shapes on {ARCH} with {SM_COUNT} SMs")
-    prebuilt = set(ops.programs_to_prebuild(ARCH, ["projections", "router"])["dense_projection_gemm"])
+    prebuilt = set(ops.programs_to_prebuild(ARCH, ["projections", "router"])["cake_dense_gemm_nondet_train"])
     _, fast_jit = ops._vendored_fast()
 
     assert {fast_jit.library_name(fast_jit.select_module(ARCH, program), ARCH) for program in own} <= prebuilt

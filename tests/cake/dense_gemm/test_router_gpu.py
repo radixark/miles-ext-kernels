@@ -147,7 +147,7 @@ def test_the_device_needs_its_architectures_toolkit(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Cases of the vendored package's own tests (tests/experimental/test_cake_dense_projection_det_gemm.py at the
+# Cases of the vendored package's own tests (tests/experimental/test_cake_dense_gemm_det_train.py at the
 # vendored commit), on its prepared and convenience launches.
 # ---------------------------------------------------------------------------
 
@@ -168,7 +168,7 @@ def _router_inputs(op, T, seed, K=6144, N=256):
 def test_router_rows_match_fp64_reference_and_rerun_bit_exact(op, T):
     backend, _ = ops._vendored()
     v = _router_inputs(op, T, seed=SEED + 4)
-    prepared = backend.prepare_router_fp32_det_gemm(v["A"], v["B"], v["out"])
+    prepared = backend.cake_dense_gemm_det_train_router_prepare(v["A"], v["B"], v["out"])
     assert prepared.splits == backend.ROUTER_SPLITS[prepared.plan.layout]
     first = prepared.launch().clone()
     prepared.launch()
@@ -183,11 +183,11 @@ def test_router_rows_match_fp64_reference_and_rerun_bit_exact(op, T):
         assert int((top != ref_top).any(dim=1).sum()) == 0
     # the eager entry point of the row gives the same bits
     eager = dict(
-        fwd=lambda: backend.router_det_forward(v["X"], v["W"]),
-        dgrad=lambda: backend.router_det_dgrad(v["G"], v["W"]),
-        wgrad=lambda: backend.router_det_wgrad(v["G"], v["X"]),
+        fwd=lambda: backend.cake_dense_gemm_det_train_router_forward(v["X"], v["W"]),
+        dgrad=lambda: backend.cake_dense_gemm_det_train_router_dgrad(v["G"], v["W"]),
+        wgrad=lambda: backend.cake_dense_gemm_det_train_router_wgrad(v["G"], v["X"]),
     )[op]
-    backend.clear_convenience_caches()
+    backend.cake_dense_gemm_det_train_convenience_cache_clear()
     assert torch.equal(eager(), v["out"])
     assert torch.equal(eager(), v["out"])  # the second call runs the cached plan
 
@@ -198,7 +198,7 @@ def test_repeated_router_launches_are_bitwise_identical(op, T):
     with NaN before every rerun, gives the first launch's bits each time."""
     backend, _ = ops._vendored()
     v = _router_inputs(op, T, seed=SEED + 8)
-    prepared = backend.prepare_router_fp32_det_gemm(v["A"], v["B"], v["out"])
+    prepared = backend.cake_dense_gemm_det_train_router_prepare(v["A"], v["B"], v["out"])
     first = prepared.launch().clone()
     torch.cuda.synchronize()
     assert bool(torch.isfinite(first).all())

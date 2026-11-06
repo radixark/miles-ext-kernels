@@ -18,7 +18,7 @@ from miles_ext_kernels import cake
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VENDORED = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "VENDORED.json"
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-FI_COMMIT = "c5db8d3ccd3fa3842812280f7f208718dc0b8610"
+FI_COMMIT = "da118ebfdd5b54dfad95d09bffbba3b739ba27c2"
 
 
 def _ops():
@@ -31,10 +31,13 @@ def _ops():
 def test_both_packages_come_from_one_flashinfer_commit_and_cake_revision():
     block = json.loads(VENDORED.read_text())["ops"]["dense_gemm"]
 
-    assert set(block) == {"dense_projection_det_gemm", "dense_projection_gemm"}
+    assert set(block) == {"cake_dense_gemm_det_train", "cake_dense_gemm_nondet_train"}
     assert {entry["source"]["commit"] for entry in block.values()} == {FI_COMMIT}
     assert len({entry["cake_revision"] for entry in block.values()}) == 1
-    assert block["dense_projection_gemm"]["source"]["path"] == "flashinfer/experimental/dense_projection_gemm"
+    assert (
+        block["cake_dense_gemm_nondet_train"]["source"]["path"]
+        == "flashinfer/experimental/cake/cake_dense_gemm_nondet_train"
+    )
     assert all("allow" not in entry for entry in block.values())
 
 
@@ -59,7 +62,7 @@ def test_every_registered_program_has_a_kind_and_the_kinds_split_the_registry(ar
 @pytest.mark.parametrize("arch", ARCHES)
 def test_the_router_kind_holds_the_k2_programs_the_split_and_the_fp32_forwards(arch):
     ops = _ops()
-    det_jit = dict(ops._registries())["dense_projection_det_gemm"]
+    det_jit = dict(ops._registries())["cake_dense_gemm_det_train"]
     kinds = {template: ops.program_kind(template) for template in det_jit.KERNELS[arch]}
 
     k2 = ("router_fp32_det_gemm_kk", "router_fp32_det_gemm_kn", "router_fp32_det_gemm_nn_t")
