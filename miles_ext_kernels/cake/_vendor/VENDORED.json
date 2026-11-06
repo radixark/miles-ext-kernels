@@ -445,13 +445,13 @@
         "cake_revision": "66dfdbba90b203e45aa6f05fb399f056cf525863",
         "files": {
           ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
-          "README.md": "475746daafdee9b66d2e5a3d350b38004104ca66",
+          "README.md": "658998e7f7c685f19fc697c9515bcb96c624f760",
           "__init__.py": "1b0af35216093e11e0d71f53a8a7f63dfd6bc626",
           "build.json": "331e2c25f424e88bbf4021c5ef29f1ee14f8d5ef",
           "cake_backend.py": "46d76479a1381f9ae4618c5e8f49b445071fa94e",
           "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
-          "cake_jit.py": "48a4b7f8eaa3c3cbb39faf1b5b20ee422bfaa74f",
-          "cake_policy.py": "e7bb64a8f3b8e97c9dd5c57692081e0bf1b1838e",
+          "cake_jit.py": "da781a9efe83258ba8c5531f3bed8e901a13aeee",
+          "cake_policy.py": "8025692bf51f65df7357aa65f6e54b344415e9da",
           "csrc/.clang-format": "47a38a93f2dbdd6d944f9dddc3465e3fb65aec29",
           "csrc/cake_dsa_indexer_det_topk/cake_dsa_indexer_det_topk_034b49542f7f9a407d0e_binding.cu": "4763d2b28eea9ff09b9c901c82a9998c73037fa4",
           "csrc/cake_dsa_indexer_det_topk/cake_dsa_indexer_det_topk_034b49542f7f9a407d0e_kernel.cu": "9a983ae12a758de6d345860d8968b3fa3d8e8265",
@@ -551,7 +551,7 @@
           "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c"
         },
         "source": {
-          "commit": "c8eab4e4d1efa8d91b9e6528b99d8cd097e45028",
+          "commit": "4c2b8a7ed4af902df94e83260c8c12e8d3f71872",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_dsa_indexer_det_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
@@ -603,7 +603,7 @@
           "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c"
         },
         "source": {
-          "commit": "c8eab4e4d1efa8d91b9e6528b99d8cd097e45028",
+          "commit": "4c2b8a7ed4af902df94e83260c8c12e8d3f71872",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_dsa_sparse_attention_nondet_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
