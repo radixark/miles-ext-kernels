@@ -102,7 +102,8 @@ def prebuild(*, device=None, max_workers: int | None = None) -> list[Path]:
     (default: the current CUDA device); returns their cache paths. Idempotent.
 
     Every route of both packages on that architecture is built: the forwards and backwards of every row-count tier
-    (short, regular, mid, long) and both weight-gradient dtypes, so no call of any shape compiles afterwards.
+    (short, regular, mid, long, extra-long) and both weight-gradient dtypes, so no call of any shape compiles
+    afterwards.
     ``NotImplementedError`` for an unsupported device, ``RuntimeError`` for a toolkit too old for it.
     """
     arch = loader.device_arch(device)
