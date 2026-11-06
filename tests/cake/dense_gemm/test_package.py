@@ -18,7 +18,7 @@ from miles_ext_kernels import cake
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VENDORED = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "VENDORED.json"
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-FI_COMMIT = "2ffaa2684f05f16858d1aeafc57f9d96dace9889"
+FI_COMMIT = "da118ebfdd5b54dfad95d09bffbba3b739ba27c2"
 
 
 def _ops():
