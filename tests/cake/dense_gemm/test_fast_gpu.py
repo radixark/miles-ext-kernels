@@ -16,6 +16,7 @@ skip elsewhere.
 """
 
 import logging
+import warnings
 
 import pytest
 
@@ -236,17 +237,30 @@ def test_router_fast_runs_the_planned_programs_with_det_bits_or_budget(name):
 # fast under torch.use_deterministic_algorithms: it runs det
 
 
-def test_fast_runs_det_under_torch_deterministic_algorithms(caplog, monkeypatch):
+@pytest.mark.parametrize("warn_only", [False, True], ids=["alert", "warn_only"])
+def test_fast_runs_det_under_torch_deterministic_algorithms(caplog, monkeypatch, warn_only):
+    """While torch's deterministic algorithms are enabled (``warn_only=True`` included) a ``fast`` call runs ``det``:
+    ``det``'s bits, one log line, no alert of the non-deterministic package, whose own programs of these rows (a
+    stream-K router weight gradient, a split-K projection weight gradient) can raise it on some parts."""
     monkeypatch.setattr(config, "_warned", set())
-    leaves = _router_leaves(*ROUTERS["router-e256-h5120-t16384"][:2], 16384, SEED)
-    det = _router_step(*leaves, "det")
-    torch.use_deterministic_algorithms(True)
+    router = _router_leaves(*ROUTERS["router-e256-h5120-t16384"][:2], 16384, SEED)
+    heads, d_in, d_out, layout, tokens = PROJECTIONS["dense-4096-32-t16384"]
+    projection = _projection_leaves(heads, d_in, d_out, layout, tokens, SEED)
+    det = [*_router_step(*router, "det"), *_projection_step(*projection, layout, "det")]
+    previous = torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True, warn_only=warn_only)
     try:
         with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
-            fast = _router_step(*leaves, "fast")
+            with warnings.catch_warnings(record=True) as seen:
+                warnings.simplefilter("always")
+                fast = [*_router_step(*router, "fast"), *_projection_step(*projection, layout, "fast")]
     finally:
-        torch.use_deterministic_algorithms(False)
+        torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
 
     for got, want in zip(fast, det):
         assert torch.equal(got, want)
-    assert any("torch.use_deterministic_algorithms(True)" in record.getMessage() for record in caplog.records)
+    assert not [str(w.message) for w in seen if "cake_dense_gemm_nondet_train" in str(w.message)]
+    assert [record.getMessage() for record in caplog.records if "dense_gemm" in record.getMessage()] == [
+        "miles_ext_kernels.cake.dense_gemm: the fast variant does not serve calls under "
+        "torch.use_deterministic_algorithms(True); running det"
+    ]

@@ -22,14 +22,16 @@ bit-reproducible with FP32-class error (a relative Frobenius error of about 2e-7
 Variants. A call runs the variant configured when its forward runs (``config.variant("dense_gemm")``); its backward
 runs the variant of its forward. ``det`` runs the deterministic package. ``fast`` runs the non-deterministic package,
 which has the deterministic package's operations and dtypes and binds it as its sibling
-(``use_deterministic_backend``). Its measured tables select split-K (K1), stream-K (K2), cluster or short-token SIMT
-programs for qualifying shapes, token counts, architectures and SM counts. Some router input gradients also select
-SIMT programs. The split-K and stream-K weight gradients add partials in the order they finish, so those gradients
-are not bit-reproducible run to run. Other routes use the deterministic sibling, with the same plans and bits as
-``det``.
+(``use_deterministic_backend``). Where its measured tables select the row for the device's architecture and SM count
+and the token count, it runs a program of its own: a split-K program for a K1 weight gradient, a stream-K or a
+short-token SIMT program for the router weight gradient, a short-token SIMT program for the router input gradient. A
+split-K or stream-K program adds its partials in the order they finish, so a gradient whose elements get more than
+two partials is not bit-reproducible run to run; a SIMT program stores every element once, with other bits than
+``det``'s. Every forward and every other gradient runs the deterministic program, with the plan and bits of ``det``.
 :func:`fast_projection_programs` and :func:`fast_router_programs` say which programs ``fast`` runs for a shape, a token
-count and a device. With ``torch.use_deterministic_algorithms(True)``, the non-deterministic package raises at an
-order-varying launch; with ``warn_only=True`` it warns and runs the selected ``fast`` program.
+count and a device. While ``torch.use_deterministic_algorithms(True)`` is in effect (``warn_only=True`` included) a
+``fast`` call runs ``det`` and the runtime logs it once: the non-deterministic package raises PyTorch's alert at its
+order-varying launches then (a warning with ``warn_only=True``).
 
 Historical accuracy misses of ``fast``. On 148-SM sm_103a parts (B300), the two-split K1 weight gradient of
 the single-head ``5120 -> 48`` and ``5120 -> 64`` BF16 projections missed the
@@ -114,7 +116,11 @@ def _vendored_fast() -> tuple[ModuleType, ModuleType]:
 
 
 def _call_variant(variant: str) -> str:
-    """Keep the selected mode; the nondet package alerts at its nondeterministic step."""
+    """``variant``, or ``det`` for ``fast`` while torch's deterministic algorithms are enabled (``warn_only=True``
+    included: the non-deterministic package raises PyTorch's alert at its order-varying launches then)."""
+    if variant == "fast" and torch.are_deterministic_algorithms_enabled():
+        config.warn_runs_det(_OP, "calls under torch.use_deterministic_algorithms(True)")
+        return "det"
     return variant
 
 
