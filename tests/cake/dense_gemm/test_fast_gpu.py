@@ -2,17 +2,17 @@
 ``cake.configure(cake_dense_gemm_variant="fast")``), against ``det`` and FP64.
 
 For every case the programs the non-deterministic package launches are the ones ``fast_projection_programs`` /
-``fast_router_programs`` report for the device's architecture and SM count. The forward and the input gradient are
-bitwise ``det``'s; so is the weight gradient where ``fast`` runs the deterministic program. Where it runs a program of
-its own, the weight gradient is within the deterministic package's accuracy budget against FP64 (BF16 output: atol =
-rtol = 1e-2 and a relative RMS of 3e-3; the router's FP32 weight gradient: relative Frobenius error 2e-6). The cases
-are miles' projections and routers and the single-head projections and 256-expert routers whose weight gradients the
-package's tables give a program of its own on some part, at token counts inside those tables. The rows the op module
-lists as known accuracy misses of ``fast`` (148-SM sm_103a parts) are measured over 10 seeds and recorded: an expected
-failure where an element is outside the budget. Then ``fast`` running ``det`` under
-``torch.use_deterministic_algorithms``. The prebuild of ``fast`` is checked in ``test_prebuild_gpu.py``, ``det``
-repeating bit for bit in ``test_determinism_gpu.py``. Needs a CUDA device; the tests need SM100a / SM103a / SM107a and
-skip elsewhere.
+``fast_router_programs`` report for the device's architecture and SM count. The forward is bitwise ``det``'s, and so
+is each gradient where ``fast`` runs the deterministic program. Where it runs a program of its own (a weight gradient,
+or a router input gradient on a short-token SIMT program), that gradient is within the deterministic package's accuracy
+budget against FP64 (BF16 output: atol = rtol = 1e-2 and a relative RMS of 3e-3; the router's FP32 gradients: relative
+Frobenius error 2e-6). The cases are miles' projections and routers and the single-head projections and 256-expert
+routers whose gradients the package's tables give a program of its own on some part, at token counts inside those
+tables. The rows where ``fast``'s two-split weight gradient missed the BF16 budget with the package vendored before
+(148-SM sm_103a parts, the op module's historical accuracy misses) now run the deterministic program, with ``det``'s
+bits. Then ``fast`` running ``det`` under ``torch.use_deterministic_algorithms``. The prebuild of ``fast`` is checked
+in ``test_prebuild_gpu.py``, ``det`` repeating bit for bit in ``test_determinism_gpu.py``. Needs a CUDA device; the
+tests need SM100a / SM103a / SM107a and skip elsewhere.
 """
 
 import logging
@@ -146,36 +146,34 @@ def test_projection_fast_runs_the_planned_programs_with_det_bits_or_budget(name)
         assert_rel_rms({"weight gradient": fast[2]}, {"weight gradient": want[2]}, {"weight gradient": BF16_REL_RMS})
 
 
-# The op module's "Known accuracy misses" of fast on 148-SM sm_103a parts: name -> (heads, d_in, d_out, weight layout,
-# tokens), at token counts where fast's two-split weight gradient missed the BF16 budget for one of 10 seeds
-KNOWN_MISSES = {
+# The op module's "Historical accuracy misses" of fast on 148-SM sm_103a parts: name -> (heads, d_in, d_out, weight
+# layout, tokens), at token counts where fast's two-split weight gradient missed the BF16 budget for one of 10 seeds
+# with the package vendored before; the vendored package's tables run the deterministic program there now
+FORMER_MISSES = {
     "dense-5120-48-t40961": (1, 5120, 48, "out_in", 40961),
     "dense-5120-48-t40962": (1, 5120, 48, "out_in", 40962),
     "dense-5120-64-t47105": (1, 5120, 64, "out_in", 47105),
 }
 
 
-@pytest.mark.parametrize("name", list(KNOWN_MISSES))
-def test_the_known_accuracy_misses_of_fast_are_measured_and_recorded(name, record_property):
+@pytest.mark.parametrize("name", list(FORMER_MISSES))
+def test_the_former_accuracy_misses_of_fast_run_det_bits(name):
     if (ARCH, SM_COUNT) != ("sm_103a", 148):
-        pytest.skip("the known accuracy misses of fast are on 148-SM sm_103a parts")
-    heads, d_in, d_out, layout, tokens = KNOWN_MISSES[name]
+        pytest.skip("the former accuracy misses of fast are on 148-SM sm_103a parts")
+    heads, d_in, d_out, layout, tokens = FORMER_MISSES[name]
     planned = fast_projection_programs(
         heads, d_in, d_out, weight_layout=layout, tokens=tokens, arch=ARCH, sm_count=SM_COUNT
     )
-    assert planned["weight_grad"] is not None, planned
-    outside = {}
-    for seed in range(SEED, SEED + 10):
-        x, weight, grad = _projection_leaves(heads, d_in, d_out, layout, tokens, seed=seed)
-        det = _projection_step(x, weight, grad, layout, "det")
-        fast = _projection_step(x, weight, grad, layout, "fast")
-        assert torch.equal(fast[0], det[0]) and torch.equal(fast[1], det[1]), seed
-        want = _projection_step(x.double(), weight.double(), grad.double(), layout, "fp64")[2]
-        diff = (fast[2].double() - want).abs()
-        outside[seed] = int((diff > BF16_ATOL + BF16_RTOL * want.abs()).sum())
-    record_property("weight_gradient_elements_outside_the_bf16_budget_per_seed", outside)
-    if any(outside.values()):
-        pytest.xfail(f"{name}: a known accuracy miss of fast (elements outside the BF16 budget per seed: {outside})")
+    assert set(planned.values()) == {None}, planned
+    x, weight, grad = _projection_leaves(heads, d_in, d_out, layout, tokens, seed=SEED)
+    det = _projection_step(x, weight, grad, layout, "det")
+    _clear_caches()
+    fast = _projection_step(x, weight, grad, layout, "fast")
+    torch.cuda.synchronize()
+
+    assert not _launched_own_programs()
+    for got, want in zip(fast, det):
+        assert torch.equal(got, want)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -214,14 +212,25 @@ def test_router_fast_runs_the_planned_programs_with_det_bits_or_budget(name):
     fast = _router_step(x, weight, grad, "fast")
     torch.cuda.synchronize()
 
-    assert planned["forward"] is None and planned["input_grad"] is None
-    assert _launched_own_programs() == ({planned["weight_grad"]} - {None}), planned
+    assert planned["forward"] is None
+    assert _launched_own_programs() == ({planned["input_grad"], planned["weight_grad"]} - {None}), planned
     assert torch.equal(fast[0], det[0]), "logits differ from det"
-    assert torch.equal(fast[1], det[1]), "input gradient differs from det"
+    g, x2 = grad.reshape(-1, experts).double(), x.reshape(-1, hidden).double()
+    if planned["input_grad"] is None:
+        assert torch.equal(fast[1], det[1]), "input gradient differs from det on the deterministic program"
+    else:
+        # the package's SIMT input gradient (other bits than det's BF16x3 emulation) within the router budget, and the
+        # BF16 gradient router_gating returns within one rounding of it
+        want_dx = g @ weight.double()
+        dx32 = _fast_backend().cake_dense_gemm_nondet_train_router_dgrad(
+            grad.reshape(-1, experts).float(), weight.float()
+        )
+        assert _rel_fro(dx32, want_dx) <= ROUTER_REL_FRO_MAX, planned["input_grad"]
+        dx = fast[1].reshape(-1, hidden)
+        assert dx.dtype == torch.bfloat16 and _rel_fro(dx, want_dx) <= BF16_ROUNDED_REL_FRO_MAX, planned["input_grad"]
     if planned["weight_grad"] is None:
         assert torch.equal(fast[2], det[2]), "weight gradient differs from det on the deterministic program"
         return
-    g, x2 = grad.reshape(-1, experts).double(), x.reshape(-1, hidden).double()
     want = g.T @ x2
     # the package's FP32 weight gradient (the program router_gating runs) within the router budget, and the BF16
     # gradient router_gating returns within one rounding of it

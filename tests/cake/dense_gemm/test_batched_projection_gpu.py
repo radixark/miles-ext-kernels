@@ -270,7 +270,7 @@ def test_strided_views_and_storage_offsets_match_fp64_reference():
     Gs = torch.randn(T, Nf, generator=gen, device="cuda").to(torch.bfloat16)
     out_t_buf = torch.full((Nf, K + 8), float("nan"), device="cuda", dtype=torch.float32)
     out_t = out_t_buf[:, :K]
-    prepared = backend.prepare_projection_det_wgrad(Gs, A, out_t)
+    prepared = backend.cake_dense_gemm_det_train_projection_wgrad_prepare(Gs, A, out_t)
     assert prepared.plan.transposed_out
     prepared.launch()
     torch.cuda.synchronize()

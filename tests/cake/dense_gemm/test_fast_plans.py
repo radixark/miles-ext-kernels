@@ -235,7 +235,8 @@ def test_every_recorded_program_is_built_by_the_package(arch):
     libraries = {entry["name"] for entry in fast_jit.cake_build.manifest()["libraries"]}
     templates = {
         template
-        for (part_arch, _), cases in EXPECTED_WEIGHT_GRAD.items()
+        for expected in (EXPECTED_WEIGHT_GRAD, EXPECTED_INPUT_GRAD)
+        for (part_arch, _), cases in expected.items()
         if part_arch == arch
         for tokens in cases.values()
         for template in tokens.values()
