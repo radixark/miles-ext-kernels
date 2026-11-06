@@ -18,7 +18,7 @@ FLOOR = {"sm_100a": "12.8", "sm_103a": "12.9", "sm_107a": "13.4"}
 LIBRARIES = {
     "cake_dsa_indexer_det_train": {"sm_100a": 62, "sm_103a": 62, "sm_107a": 57},
     "cake_dsa_sparse_det": {"sm_100a": 43, "sm_103a": 43, "sm_107a": 43},
-    "cake_dsa_train": {"sm_100a": 14, "sm_103a": 14, "sm_107a": 14},
+    "cake_dsa_sparse_attention_nondet_train": {"sm_100a": 14, "sm_103a": 14, "sm_107a": 14},
 }
 
 FAKE_NVCC = """#!@PYTHON@
@@ -43,7 +43,11 @@ def _libraries(package: str, arch: str) -> list[dict]:
 
 
 def test_the_op_ships_the_three_packages_both_variants_and_its_options():
-    assert dsa.OP.packages == ("cake_dsa_indexer_det_train", "cake_dsa_sparse_det", "cake_dsa_train")
+    assert dsa.OP.packages == (
+        "cake_dsa_indexer_det_train",
+        "cake_dsa_sparse_det",
+        "cake_dsa_sparse_attention_nondet_train",
+    )
     assert dsa.OP.variants == ("det", "fast")
     assert dsa.OP.selected_by == (("dsa_attention_backend", "cake"),)
     assert [flag.name for flag in dsa.OP.flags] == ["--cake-dsa-bwd-workspace-bytes", "--cake-dsa-lazy-build"]
@@ -99,7 +103,7 @@ def test_sm107a_needs_cuda_13_4_whatever_the_package_records(package, nvcc):
     names = [entry["name"] for entry in _libraries(package, "sm_107a")]
     recorded = {entry["min_cuda"] for entry in _libraries(package, "sm_107a")}
 
-    assert recorded == ({"13.0"} if package == "cake_dsa_train" else {"13.4"})
+    assert recorded == ({"13.0"} if package == "cake_dsa_sparse_attention_nondet_train" else {"13.4"})
     for name in names[:2]:
         with pytest.raises(RuntimeError, match=r"needs CUDA 13\.4 or newer"):
             loader.prebuild_libraries(package, [name])
