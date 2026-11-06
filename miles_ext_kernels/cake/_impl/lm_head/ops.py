@@ -12,12 +12,13 @@ through FP32 accumulators with one BF16 cast each. No vocabulary-sized buffer sp
 reads its variant (``config.variant("lm_head")``) and chunk size when it runs; its backward runs the package of its
 forward:
 
-* ``det``: ``cake_lm_head_det_loss``. Fixed chunk order, no atomics: ``logp``, ``dX`` and ``dW`` repeat bit for bit
+* ``det``: ``cake_lm_head_det_train``. Fixed chunk order, no atomics: ``logp``, ``dX`` and ``dW`` repeat bit for bit
   for a fixed chunk size.
-* ``fast``: ``cake_lm_head_loss``. ``det``'s ``logp`` bits; the dX GEMM of a K-sliced chunk adds its slices into the
-  FP32 accumulator in an unordered reduction, so ``dX`` may differ run to run by FP32 rounding; ``dW`` keeps ``det``'s
-  bits unless a valid row has a zero incoming gradient; a backward of more than one default chunk skips the GEMM work
-  of the rows whose incoming gradient is zero (PPO-clipped or masked tokens).
+* ``fast``: ``cake_lm_head_nondet_train``. ``det``'s ``logp`` bits; the dX GEMM of a K-sliced chunk adds its slices
+  into the FP32 accumulator in an unordered reduction, so ``dX`` may differ run to run by FP32 rounding; ``dW`` keeps
+  ``det``'s bits unless a valid row has a zero incoming gradient; a backward of at least the architecture's floor of
+  valid rows (1946 on SM100a and SM107a, 3891 on SM103a) skips the GEMM work of the rows whose incoming gradient is
+  zero (PPO-clipped or masked tokens).
 
 Host synchronization. A call without ``num_valid_rows`` reads its count of valid rows back to the host once, in the
 forward (the backward reuses the forward's row index). With ``num_valid_rows`` the forward plans on the given count
@@ -55,7 +56,7 @@ __all__ = ["log_probs", "prebuild", "release"]
 
 OP = "lm_head"
 # the vendored package of each variant
-PACKAGES = {"det": "cake_lm_head_det_loss", "fast": "cake_lm_head_loss"}
+PACKAGES = {"det": "cake_lm_head_det_train", "fast": "cake_lm_head_nondet_train"}
 _VENDOR = "miles_ext_kernels.cake._vendor"
 # the modules of a package whose binding caches keep device workspaces (release() clears them)
 _BINDING_MODULES = ("cake_backend", "cake_backend_opt_in")
@@ -160,17 +161,11 @@ def log_probs(
     if W.ndim == 2:
         _assert_labels_below(labels, int(W.shape[0]))
     if variant == "det":
-        return entry.chunked_lm_head_det_logprob_temperature(
+        return entry.cake_lm_head_det_train_logprob_temperature(
             X, W, labels, chunk_size=chunk_size, num_valid_rows=num_valid_rows, temperature=temperature
         )
-    return entry.chunked_lm_head_logprob_temperature(
-        X,
-        W,
-        labels,
-        chunk_size=chunk_size,
-        deterministic=False,
-        num_valid_rows=num_valid_rows,
-        temperature=temperature,
+    return entry.cake_lm_head_nondet_train_logprob_temperature(
+        X, W, labels, chunk_size=chunk_size, num_valid_rows=num_valid_rows, temperature=temperature
     )
 
 

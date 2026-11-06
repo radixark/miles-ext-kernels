@@ -133,7 +133,7 @@ def compile_command(
 
 
 def _manifest(digests: dict[str, str]) -> dict[str, Any]:
-    """A cake-build/1 manifest in the shape of FlashInfer's (cake_lm_head_loss: sm_103a '==13.0' -> -Xptxas -O0,
+    """A cake-build/1 manifest in the shape of FlashInfer's (cake_lm_head_nondet_train: sm_103a '==13.0' -> -Xptxas -O0,
     sm_107a min_cuda 13.4)."""
 
     def entry(arch: str, min_cuda: str, nvcc_flags: list[str], nvcc_flags_if: list[dict[str, Any]]) -> dict[str, Any]:

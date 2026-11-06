@@ -509,7 +509,8 @@ def test_a_given_valid_row_count_gives_the_counted_bits(T, ignore_frac):
 @pytest.mark.parametrize("variant", VARIANTS)
 def test_zero_gradient_rows_get_a_zero_hidden_gradient(variant):
     """PPO-clipped and masked tokens reach the kernels as rows with a zero incoming gradient (``fast`` skips their
-    GEMM work above one chunk): within the gate, with exact zeros in their ``dX`` rows."""
+    GEMM work from the architecture's floor of valid rows on): within the gate, with exact zeros in their ``dX``
+    rows."""
     H, V = SHAPES[0]
     p = _problem(H, V, 16231, temperature=0.7, zero_dlogp_frac=0.3)
     oracle, baseline = _references(p)
