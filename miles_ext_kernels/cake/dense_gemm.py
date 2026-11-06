@@ -11,8 +11,8 @@ Dense projection GEMMs for SM100a / SM103a / SM107a, forward and backward:
   ``--moe-router-dtype fp32``.
 
 ``det`` runs the deterministic package and repeats bit for bit for identical inputs; ``fast`` runs the
-non-deterministic package, whose weight gradients add split partials in the order they finish where its measured
-tables select a program of its own, and the deterministic programs, with their bits, everywhere else
+non-deterministic package, which selects its own short-token SIMT router programs and measured weight-gradient
+programs where its routing tables qualify them, and uses its deterministic sibling elsewhere
 (``fast_projection_programs`` / ``fast_router_programs`` report its choice). miles selects these GEMMs with
 ``--batched-projection-gemm-backend cake`` and ``--moe-router-gemm-backend cake`` and runs ``det``. Neither variant is
 batch-invariant: the plan of a GEMM depends on the token count, so a token's results can change in their last bits

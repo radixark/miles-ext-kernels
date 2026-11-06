@@ -22,21 +22,20 @@ bit-reproducible with FP32-class error (a relative Frobenius error of about 2e-7
 Variants. A call runs the variant configured when its forward runs (``config.variant("dense_gemm")``); its backward
 runs the variant of its forward. ``det`` runs the deterministic package. ``fast`` runs the non-deterministic package,
 which has the deterministic package's operations and dtypes and binds it as its sibling
-(``use_deterministic_backend``). It runs a weight gradient on its own split-K (K1) or stream-K (K2) program where its
-measured tables select the row for the device's architecture and SM count and the token count: the K1 weight gradients
-of single-batch rows with ``d_in`` 4096 to 8192 and ``d_out`` 32 to 1024, and the router weight gradient of 256
-experts at hidden 4096, 5120 or 6144 inside measured token windows. Its split partials add in the order they finish, so
-such a gradient is not bit-reproducible run to run (two splits are: one add of two values). Every other row, the
-forwards and the input gradients run the deterministic programs, with the same plans and bits as ``det``.
+(``use_deterministic_backend``). Its measured tables select split-K (K1), stream-K (K2), cluster or short-token SIMT
+programs for qualifying shapes, token counts, architectures and SM counts. Some router input gradients also select
+SIMT programs. The split-K and stream-K weight gradients add partials in the order they finish, so those gradients
+are not bit-reproducible run to run. Other routes use the deterministic sibling, with the same plans and bits as
+``det``.
 :func:`fast_projection_programs` and :func:`fast_router_programs` say which programs ``fast`` runs for a shape, a token
 count and a device. With ``torch.use_deterministic_algorithms(True)``, the non-deterministic package raises at an
 order-varying launch; with ``warn_only=True`` it warns and runs the selected ``fast`` program.
 
-Known accuracy misses of ``fast``. On 148-SM sm_103a parts (B300), ``fast`` runs the two-split K1 weight gradient of
-the single-head ``5120 -> 48`` and ``5120 -> 64`` BF16 projections at every token count from 65. Its result missed the
+Historical accuracy misses of ``fast``. On 148-SM sm_103a parts (B300), the two-split K1 weight gradient of
+the single-head ``5120 -> 48`` and ``5120 -> 64`` BF16 projections missed the
 deterministic package's BF16 budget (atol = rtol = 1e-2, no element outside) for one of 10 seeds at 40961 and 40962
 tokens (``5120 -> 48``) and at 47105 tokens (``5120 -> 64``), where the deterministic program met it on every seed.
-These are the measurements of flashinfer-ai/flashinfer#8743, a later FlashInfer change that runs the deterministic
+These are the measurements of flashinfer-ai/flashinfer#8743. The current FlashInfer planner runs the deterministic
 program for ``5120 -> 48`` BF16 at 40961 to 49151 tokens and for ``5120 -> 64`` BF16 at 47105 to 49152 tokens on these
 parts. miles calls neither shape and runs ``det``.
 
