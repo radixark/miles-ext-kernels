@@ -4,8 +4,8 @@ Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
 The dense projection GEMMs miles calls (SM100a / SM103a / SM107a), on the vendored FlashInfer packages
-``cake_dense_gemm_det_train`` (``det``) and ``cake_dense_gemm_nondet_train`` (``fast``), whose libraries the runtime's loader
-builds with nvcc and loads with tvm-ffi (SM107a with a CUDA 13.4 or newer toolkit).
+``cake_dense_gemm_det_train`` (``det``) and ``cake_dense_gemm_nondet_train`` (``fast``), whose libraries the runtime's
+loader builds with nvcc and loads with tvm-ffi (SM107a with a CUDA 13.4 or newer toolkit).
 
 K1 (``cake_dense_gemm_det_train``) computes ``out[l, m, n] = sum_k A[l, m, k] B[l, k, n]`` over strided BF16 views with
 FP32 accumulation and one rounding at the store. Its launch plan, split-K and stream-K fixup order are a pure function
@@ -15,9 +15,9 @@ needs the output columns ``N`` to be a multiple of 8. :func:`batched_projection`
 activations and the per-head weight views as they are, and copies a view only when it breaks that contract (a weight
 whose storage is not 16-byte aligned in its parameter buffer, a gradient that is not contiguous).
 
-K2 (``router_fp32_det_gemm``) is an FP32 GEMM through the exact three-way BF16 split of both operands: the products
-of the splits accumulate with chunked FP32 promotion and the split-K partials are summed in a fixed order, so it is
-bit-reproducible with FP32-class error (a relative Frobenius error of about 2e-7 against FP64).
+K2 (``cake_dense_gemm_det_train_router``) is an FP32 GEMM through the exact three-way BF16 split of both operands:
+the products of the splits accumulate with chunked FP32 promotion and the split-K partials are summed in a fixed order,
+so it is bit-reproducible with FP32-class error (a relative Frobenius error of about 2e-7 against FP64).
 
 Variants. A call runs the variant configured when its forward runs (``config.variant("dense_gemm")``); its backward
 runs the variant of its forward. ``det`` runs the deterministic package. ``fast`` runs the non-deterministic package,
@@ -329,10 +329,12 @@ def router_gating(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     forward multiplies the BF16 operands with FP32 accumulation and output (K1), the backward computes
     ``dx = g @ weight.float()`` and ``dweight = g.T @ x.float()`` in FP32 (K2) and rounds them to the dtypes of ``x``
     and ``weight``. ``E`` and ``H`` must be multiples of 8. Under ``det`` every call is bit-reproducible call to call.
-    Under ``fast`` the logits and the input gradient have ``det``'s bits; the weight gradient runs the
-    non-deterministic stream-K program where :func:`fast_router_programs` names one (256 experts at hidden 4096, 5120
-    or 6144 in measured token windows), whose partial tiles add in the order they finish, and ``det``'s program
-    elsewhere. The plan, and with it the last bits of a token's logits, depends on the number of tokens of the call.
+    Under ``fast`` the logits have ``det``'s bits; a gradient runs a program of the non-deterministic package where
+    :func:`fast_router_programs` names one (256 experts at hidden 4096, 5120 or 6144 in measured token windows): a
+    short-token SIMT program of the weight or input gradient, which stores every element once (other bits than
+    ``det``'s), or a stream-K weight gradient, whose partial tiles add in the order they finish; it runs ``det``'s
+    program elsewhere. The plan, and with it the last bits of a token's logits, depends on the number of tokens of the
+    call.
     """
     if weight.dim() != 2 or x.shape[-1] != weight.shape[1]:
         raise ValueError(
@@ -370,7 +372,8 @@ def _fast_k1_template(a, b, out, *, arch: str, sm_count: int) -> str | None:
 
 def _fast_k2_template(a, b, out, *, arch: str, sm_count: int) -> str | None:
     """As :func:`_fast_k1_template` for the K2 call ``out = a @ b`` (FP32 views; ``plan_atomic_router``): only the
-    router weight gradient of the rows and token windows the package's tables select gets a program."""
+    router weight gradient and input gradient of the rows and token windows the package's tables select get a
+    program (the input gradient only in its short-token SIMT windows)."""
     plan, _ = _vendored_fast()[0].plan_atomic_router(a, b, out, arch=arch, sm_count=sm_count)
     return None if plan is None else plan.template
 
@@ -387,7 +390,8 @@ def _projection_views(num_heads: int, d_in: int, d_out: int, tokens: int, in_out
 
 def _router_views(num_experts: int, hidden_size: int, tokens: int):
     """The views the router's three GEMMs launch: ``((A, B, out) of the K1 forward, of the K2 input gradient, of the
-    K2 weight gradient)`` as ``meta`` tensors (the weight gradient as the package's ``router_wgrad`` launches it)."""
+    K2 weight gradient)`` as ``meta`` tensors (the weight gradient as the package's
+    ``cake_dense_gemm_nondet_train_router_wgrad`` launches it)."""
     fp32 = torch.float32
     forward = (_meta(tokens, hidden_size), _meta(hidden_size, num_experts), _meta(tokens, num_experts, dtype=fp32))
     g, x = _meta(tokens, num_experts, dtype=fp32), _meta(tokens, hidden_size, dtype=fp32)
