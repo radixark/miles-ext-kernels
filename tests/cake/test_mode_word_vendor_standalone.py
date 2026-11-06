@@ -7,11 +7,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 VENDOR = Path(__file__).resolve().parents[2] / "miles_ext_kernels" / "cake" / "_vendor"
 MODE_WORD_PACKAGE = re.compile(r"cake_.+_(?:det|nondet)_train(?:_kcp)?$")
 
 
 def test_mode_word_vendor_modules_import_with_flashinfer_blocked():
+    # the vendored modules import torch and tvm_ffi at module level
+    pytest.importorskip("torch")
+    pytest.importorskip("tvm_ffi")
     manifest = json.loads((VENDOR / "VENDORED.json").read_text())
     packages = sorted(
         name
