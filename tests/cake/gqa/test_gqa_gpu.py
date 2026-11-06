@@ -7,8 +7,8 @@ and every gradient within FlashInfer's declared budget and twice the measured er
 The output, the LSE and dK / dV repeat bit for bit run to run (in one process and in a new one), on the default and a
 side stream, for any valid ``max_seqlen_k``; dQ is within its FP32 reordering. Also: the opt-in check of
 ``max_seqlen_k`` and the boundaries, document isolation, checkpointing, no device synchronization in steady state, the
-pooled backward scratch and ``release``, the rejected operands, and two GPUs giving the same bits. Needs a B200 /
-GB200, B300 / GB300 or R200 and skips elsewhere.
+pooled backward scratch and ``release``, the rejected operands, the backward's alert under torch's deterministic
+algorithms, and two GPUs giving the same bits. Needs a B200 / GB200, B300 / GB300 or R200 and skips elsewhere.
 """
 
 import json
@@ -281,6 +281,28 @@ def test_rejects_unsupported_operands(device):
     with pytest.raises(ValueError, match="int32"):
         gqa.varlen_gqa_attention(q, k, v, cq.long(), ck.long(), max_seqlen_k=10)
     assert not gqa.is_supported(12, 4) and gqa.is_supported(24, 4)
+
+
+def test_the_backward_raises_the_deterministic_algorithms_alert(device):
+    """No det variant serves the op: under ``torch.use_deterministic_algorithms(True)`` the backward raises PyTorch's
+    alert (dQ is summed with atomics); with ``warn_only=True`` it warns and runs, giving the bits of a plain call."""
+    x = c.inputs(c.MILES_SEGMENTS, c.MILES_SEGMENTS, 16, 2, device, seed=11)
+    plain = c.run(x)
+    torch.cuda.synchronize()
+    previous = torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled()
+    try:
+        torch.use_deterministic_algorithms(True)
+        with pytest.raises(RuntimeError, match="does not have a deterministic implementation"):
+            c.run(x)
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        with pytest.warns(UserWarning, match="does not have a deterministic implementation"):
+            warned = c.run(x)
+        torch.cuda.synchronize()
+    finally:
+        torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
+
+    assert_bitwise(c.repeatable(plain), c.repeatable(warned))
+    c.assert_dq_close(warned["dq"], plain["dq"])
 
 
 def test_default_and_side_stream_calls_agree_bit_for_bit(device, pooled):

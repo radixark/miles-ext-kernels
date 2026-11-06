@@ -182,8 +182,10 @@ def varlen_gqa_attention(
 
     Raises ``ValueError`` for operands the kernels do not take (dtype, head dim, an odd query group, strides, the
     boundary vectors) and in a process configured for deterministic mode (there is no ``det`` variant),
-    ``TypeError`` when ``max_seqlen_k`` is not an int, ``RuntimeError`` on another GPU. With the option
-    ``cake_gqa_check_seqlens`` it also checks the boundaries and ``max_seqlen_k`` on the host (:func:`check_seqlens`).
+    ``TypeError`` when ``max_seqlen_k`` is not an int, ``RuntimeError`` on another GPU. The backward raises PyTorch's
+    alert (a ``RuntimeError``; a ``UserWarning`` with ``warn_only=True``, then it runs) while
+    ``torch.use_deterministic_algorithms(True)`` is in effect. With the option ``cake_gqa_check_seqlens`` it also
+    checks the boundaries and ``max_seqlen_k`` on the host (:func:`check_seqlens`).
     """
     config.variant(OP)  # "fast", the only variant; raises in a process configured for deterministic mode
     if isinstance(max_seqlen_k, bool) or not isinstance(max_seqlen_k, int):
