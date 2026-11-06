@@ -3,8 +3,8 @@ Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
-Packed causal GQA attention, head dimension 256, forward and backward on the vendored ``cake_gqa_train`` package
-(FlashInfer's ``flashinfer.gqa_train`` backend), SM100a / SM103a / SM107a.
+Packed causal GQA attention, head dimension 256, forward and backward on the vendored ``cake_gqa_nondet_train`` package
+(FlashInfer's ``flashinfer.cake_gqa_nondet_train`` backend), SM100a / SM103a / SM107a.
 
 Semantics. ``q [T_q, H_q, 256]``, ``k`` / ``v [T_k, H_kv, 256]`` (BF16, ``H_q / H_kv`` even), segments packed by
 int32 device ``cu_seqlens_q`` / ``cu_seqlens_k`` (``cu[0] = 0``, non-decreasing, ``cu_q[B] = T_q``,
@@ -39,7 +39,7 @@ from typing import Any
 import torch
 
 from miles_ext_kernels.cake._runtime import config, loader, workspace
-from miles_ext_kernels.cake._vendor.cake_gqa_train import cake_backend, cake_jit
+from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_backend, cake_jit
 
 __all__ = [
     "HEAD_DIM",
@@ -54,7 +54,7 @@ __all__ = [
 ]
 
 OP = "gqa"
-PACKAGE = "cake_gqa_train"
+PACKAGE = "cake_gqa_nondet_train"
 HEAD_DIM = cake_backend.HEAD_DIM
 # The stages one forward and backward of varlen_gqa_attention launch (BF16 dK / dV), in launch order.
 STAGES = ("fwd", "bwd_pre", "bwd_bf16", "bwd_post")
@@ -135,7 +135,7 @@ class _VarlenGQAAttention(torch.autograd.Function):
         softmax_scale: float,
         max_seqlen_k: int,
     ) -> torch.Tensor:
-        out, lse = cake_backend.gqa_attention_fwd(
+        out, lse = cake_backend.cake_gqa_nondet_train_forward(
             q, k, v, cu_seqlens_q, cu_seqlens_k, softmax_scale=softmax_scale, workspace=PoolWorkspace(q.device)
         )
         ctx.save_for_backward(q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k)
@@ -146,7 +146,7 @@ class _VarlenGQAAttention(torch.autograd.Function):
     @staticmethod
     def backward(ctx: Any, dout: torch.Tensor) -> tuple[torch.Tensor | None, ...]:  # type: ignore[override]
         q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
-        dq, dk, dv = cake_backend.gqa_attention_bwd(
+        dq, dk, dv = cake_backend.cake_gqa_nondet_train_backward(
             q,
             k,
             v,

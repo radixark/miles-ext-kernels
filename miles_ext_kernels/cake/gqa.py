@@ -84,7 +84,7 @@ OP = OpSpec(
     summary="packed causal GQA attention, head dim 256, forward + backward",
     variants=("fast",),
     selected_by=(("full_attention_backend", "cake"),),
-    packages=("cake_gqa_train",),
+    packages=("cake_gqa_nondet_train",),
     exports=("check_supported", "is_supported", "varlen_gqa_attention"),
     flags=(
         Flag(

@@ -40,7 +40,7 @@ def test_the_op_is_registered_with_its_one_variant_and_no_variant_flag():
     spec = cake.op_spec("gqa")
 
     assert "gqa" in cake.OPS and spec is gqa.OP
-    assert spec.variants == ("fast",) and spec.packages == ("cake_gqa_train",)
+    assert spec.variants == ("fast",) and spec.packages == ("cake_gqa_nondet_train",)
     assert spec.selected_by == (("full_attention_backend", "cake"),)
     assert not spec.has_variant_flag
     assert "cake_gqa_variant" not in vars(_parse([]))

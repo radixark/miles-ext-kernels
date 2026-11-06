@@ -29,7 +29,7 @@ import miles_ext_kernels  # noqa: E402
 from miles_ext_kernels import cake  # noqa: E402
 from miles_ext_kernels.cake import gqa  # noqa: E402
 from miles_ext_kernels.cake._runtime import workspace  # noqa: E402
-from miles_ext_kernels.cake._vendor.cake_gqa_train import cake_backend, cake_jit  # noqa: E402
+from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_backend, cake_jit  # noqa: E402
 
 from ..helpers import POOLED, assert_bitwise, assert_rel_rms  # noqa: E402
 from . import _cases as c  # noqa: E402

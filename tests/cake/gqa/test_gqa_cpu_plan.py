@@ -19,7 +19,7 @@ import pytest
 from miles_ext_kernels.cake import MIN_CUDA
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PACKAGE_DIR = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "cake_gqa_train"
+PACKAGE_DIR = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "cake_gqa_nondet_train"
 OPS = REPO_ROOT / "miles_ext_kernels" / "cake" / "_impl" / "gqa" / "ops.py"
 # ops.STAGES, the forward and the BF16 dK / dV backward, which is the path the entry point runs
 STAGES = ("fwd", "bwd_pre", "bwd_bf16", "bwd_post")
