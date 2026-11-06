@@ -14,7 +14,7 @@ Packed causal depthwise conv1d + SiLU (kernel size 4) on the vendored Cake kerne
 ``det`` runs FlashInfer's deterministic package (``_vendor/cake_causal_conv1d_det_train_backend``): its backward
 writes per-CTA partial rows of the weight gradient and a second launch sums them in a fixed order, so the gradients
 are bitwise reproducible for a given ``(S, C, device)``. ``fast`` runs the non-deterministic package
-(``_vendor/cake_causal_conv1d_train_backend``): the same forward programs (``y`` is ``det``'s bits) and a one-launch
+(``_vendor/cake_causal_conv1d_nondet_train``): the same forward programs (``y`` is ``det``'s bits) and a one-launch
 backward whose ``dx`` is ``det``'s bits and whose weight gradient is summed across CTAs with unordered FP32 reductions
 (FP64 under ``silu_grad_preactivation="fp32"``), within ``det``'s error budget. Both packages serve every route miles
 uses (FP32 or BF16 taps, either SiLU' policy). The one call ``fast`` does not serve is a call while
@@ -71,7 +71,7 @@ __all__ = [
 
 OP = "conv1d"
 # the vendored package of each variant
-PACKAGES = {"det": "cake_causal_conv1d_det_train_backend", "fast": "cake_causal_conv1d_train_backend"}
+PACKAGES = {"det": "cake_causal_conv1d_det_train_backend", "fast": "cake_causal_conv1d_nondet_train"}
 KERNEL_SIZE = 4
 CHANNEL_MULTIPLE = 8
 SILU_GRAD_PREACTIVATIONS = ("bf16", "fp32")
@@ -80,6 +80,14 @@ TAP_DTYPES = (torch.float32, torch.bfloat16)
 _BACKEND = "--linear-attention-conv-backend cake"
 _SILU_GRAD = "cake_conv1d_silu_grad_preactivation"
 _KCP_MODULES: dict[str, ModuleType] = {}  # variant -> the kcp module its context-parallel calls run
+# the host-cache and graph-cache clears of each variant's kcp module
+_KCP_CLEARS = {
+    "det": ("host_cache_clear", "graph_cache_clear"),
+    "fast": (
+        "cake_causal_conv1d_nondet_train_kcp_host_cache_clear",
+        "cake_causal_conv1d_nondet_train_kcp_graph_cache_clear",
+    ),
+}
 
 
 @functools.cache
@@ -203,8 +211,8 @@ def release() -> None:
     for variant in PACKAGES:
         kcp = _KCP_MODULES.get(variant)
         if kcp is not None:
-            kcp.host_cache_clear()
-            kcp.graph_cache_clear()
+            for clear in _KCP_CLEARS[variant]:
+                getattr(kcp, clear)()
 
 
 def _one_document(S: int, device: torch.device) -> torch.Tensor:
@@ -243,7 +251,7 @@ def causal_conv1d(
     package = _package(variant)
     if variant == "det":
         return package.cake_causal_conv1d_det(x, weight, cu_seqlens, None, silu_grad_preactivation=policy)
-    return package.cake_causal_conv1d(x, weight, cu_seqlens, None, silu_grad_preactivation=policy, deterministic=False)
+    return package.cake_causal_conv1d_nondet(x, weight, cu_seqlens, None, silu_grad_preactivation=policy)
 
 
 def _kcp_taps(weight: torch.Tensor) -> torch.Tensor:
@@ -293,13 +301,8 @@ def causal_conv1d_kcp(
         return kcp.cake_causal_conv1d_det_kcp(
             x_local, weight, kcp_context, recompute_handle=recompute_handle, cooperative=cooperative
         )
-    return kcp.cake_causal_conv1d_kcp(
-        x_local,
-        weight,
-        kcp_context,
-        recompute_handle=recompute_handle,
-        cooperative=cooperative,
-        deterministic=False,
+    return kcp.cake_causal_conv1d_nondet_kcp(
+        x_local, weight, kcp_context, recompute_handle=recompute_handle, cooperative=cooperative
     )
 
 
@@ -329,11 +332,6 @@ def causal_conv1d_kcp_multi(
         return kcp.cake_causal_conv1d_det_multi_kcp(
             xs, weights, kcp_context, recompute_handle=recompute_handle, cooperative=cooperative
         )
-    return kcp.cake_causal_conv1d_multi_kcp(
-        xs,
-        weights,
-        kcp_context,
-        recompute_handle=recompute_handle,
-        cooperative=cooperative,
-        deterministic=False,
+    return kcp.cake_causal_conv1d_nondet_kcp_multi(
+        xs, weights, kcp_context, recompute_handle=recompute_handle, cooperative=cooperative
     )

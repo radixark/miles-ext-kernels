@@ -7,13 +7,13 @@
             "kcp.py"
           ]
         },
-        "cake_revision": "436007caea880748e94347e93a4800d91421a0a6",
+        "cake_revision": "7918a2cea2fb7dc42485ce7334809ec6ec090649",
         "files": {
           ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
-          "__init__.py": "d18931b17450b41b5b7692afeae8bc5620e6ad61",
-          "build.json": "283e6c6d5c07c0b55cbc38d9a30b898e1d947bd4",
+          "__init__.py": "49ba8bd22a01d47b120e56e6531ebdf27f7eea97",
+          "build.json": "3b5ed6e851350e74f25e50063a85962d648e8d96",
           "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
-          "cake_jit.py": "ec22d620c8ebe960695b7b9ed7a4966f6bc338d6",
+          "cake_jit.py": "21490ea0bc3c30f24ee00d7fecc2028d6ea91180",
           "csrc/.clang-format": "fae08c8733daa6518650a74bd03ba3688a90453d",
           "csrc/cake_causal_conv1d_det_train_08880ca12e4064bc8cdb_binding.cu": "1bfa86720e0a24415f5cc0aca8a7951425b21ab7",
           "csrc/cake_causal_conv1d_det_train_08880ca12e4064bc8cdb_kernel.cu": "53af3ae30f2a8b8083e97a8b713e0c460d66d127",
@@ -43,6 +43,8 @@
           "csrc/cake_causal_conv1d_det_train_517710d1f0988cf570a9_kernel.cu": "c81fbde98a78af80900fa1d71fb1e6967e0c1e5a",
           "csrc/cake_causal_conv1d_det_train_5288d132a5cc927ae729_kcp_binding.cu": "b064ffd656bf42979a8a0302fa71ec6f4cca7ca4",
           "csrc/cake_causal_conv1d_det_train_5288d132a5cc927ae729_kcp_kernel.cu": "23d6de4761976ae69e968920ea34d2f32d24c168",
+          "csrc/cake_causal_conv1d_det_train_5ca7515dd2118dd96241_binding.cu": "6069ce03ebd7fc51f180e4526a718b8d35cba45d",
+          "csrc/cake_causal_conv1d_det_train_5ca7515dd2118dd96241_kernel.cu": "e43543bf997928957e778afe5ddefcc9382a9700",
           "csrc/cake_causal_conv1d_det_train_675940a7a4fc0dba4b53_kcp_binding.cu": "ddd04d853e92708c7fb9343e9aeff9b63845e44e",
           "csrc/cake_causal_conv1d_det_train_675940a7a4fc0dba4b53_kcp_kernel.cu": "42e5fc6d9bae6a78de36f4e87083b6625261166a",
           "csrc/cake_causal_conv1d_det_train_6ea6d5fc9e7fa3f2d039_kcp_binding.cu": "4dc3f427302227a9e38039a49fb9c10e1b2ebe48",
@@ -73,6 +75,8 @@
           "csrc/cake_causal_conv1d_det_train_aeff6106e2822f313a0c_kernel.cu": "c0ca33ef73e7dcad16b5a0bda631815b8b2d2998",
           "csrc/cake_causal_conv1d_det_train_b4f7ff5a3dd9ddd2f41c_binding.cu": "db559898ad61161c447ca23620198c44353e44c6",
           "csrc/cake_causal_conv1d_det_train_b4f7ff5a3dd9ddd2f41c_kernel.cu": "fe5b7c186326d61416ca57843da1a620b056782a",
+          "csrc/cake_causal_conv1d_det_train_baca4c969c783d07d81f_binding.cu": "f4c53aaeda0419f920b11fd97725a19d697ada6d",
+          "csrc/cake_causal_conv1d_det_train_baca4c969c783d07d81f_kernel.cu": "5e0df150c320818f17c9e4ba803c45771cf61ac4",
           "csrc/cake_causal_conv1d_det_train_c8027a64ba3cc38333bf_binding.cu": "80d698775aded2bcdc1ffae430ac7a4775b67852",
           "csrc/cake_causal_conv1d_det_train_c8027a64ba3cc38333bf_kernel.cu": "25fb13516a249ca528e70d218dd49106cf5308bb",
           "csrc/cake_causal_conv1d_det_train_cc7a117aee9c7ae829c4_binding.cu": "e6821818c7493202be58cfa258c27edd3846ffde",
@@ -83,6 +87,8 @@
           "csrc/cake_causal_conv1d_det_train_d46036aa2bc5f90bb0f6_kernel.cu": "693303ae51a28750b5be14c5cfc5d8592e2884c6",
           "csrc/cake_causal_conv1d_det_train_d829c95e1d610bc14b23_binding.cu": "6a8f92573242b42af552f5f3230ec3bfff06cc44",
           "csrc/cake_causal_conv1d_det_train_d829c95e1d610bc14b23_kernel.cu": "2dac0cdfe85ca86f32dedb27e8a334cf65614610",
+          "csrc/cake_causal_conv1d_det_train_e057357c655024d4ff1d_binding.cu": "cc0d156f8d90e46d67530c1dc49e8016105310b3",
+          "csrc/cake_causal_conv1d_det_train_e057357c655024d4ff1d_kernel.cu": "a37555bf395e23f563f67d53135e60b09837906b",
           "csrc/cake_causal_conv1d_det_train_ea8f91038a9dea452ff2_binding.cu": "903de2398f51ad2baebf21ddd0285a0badc710db",
           "csrc/cake_causal_conv1d_det_train_ea8f91038a9dea452ff2_kernel.cu": "6a8ec6f90949b29741f48a338631a20433fc427e",
           "csrc/cake_causal_conv1d_det_train_f1545adfd2bb28044419_binding.cu": "8583643d4f5c65ed0e47024ab550c39ed02ab1a8",
@@ -94,17 +100,17 @@
           "csrc/cake_causal_conv1d_det_train_facdd7ca702cfb7d821a_kcp_binding.cu": "bcf37647f853effee42da9611ffa532a009be8d7",
           "csrc/cake_causal_conv1d_det_train_facdd7ca702cfb7d821a_kcp_kernel.cu": "382469991a3708b68072ed57351a80363256f28e",
           "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c",
-          "kcp.py": "814a9272c2766d535bdc7b62369650adfd05662a",
+          "kcp.py": "1a4126322b746ca0b1bf0b8af481fb957811fad4",
           "kcp_jit.py": "862480a6085c1e832ce9dbab56c928589e481466"
         },
         "source": {
-          "commit": "c5db8d3ccd3fa3842812280f7f208718dc0b8610",
+          "commit": "158dfcbfc857dc8e7b93deef078a02d7f914370e",
           "kind": "flashinfer",
           "path": "flashinfer/cake_causal_conv1d_det_train_backend",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
         }
       },
-      "cake_causal_conv1d_train_backend": {
+      "cake_causal_conv1d_nondet_train": {
         "allow": {
           "env_read": [
             "kcp.py"
@@ -113,10 +119,10 @@
         "cake_revision": "e2364535b3fdee40e818d46943205c17a5605634",
         "files": {
           ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
-          "__init__.py": "59a6ff83fe1644a2d10e58eaa0aaca5d8ebcefca",
-          "build.json": "87feb7f6f28ad1b5f9d4d974535d5abf3868d43b",
+          "__init__.py": "72b75ab831f0cfc5169b4ab709c8fe11da5f2727",
+          "build.json": "19999d528f157fc52e946c34d634d8a1976017d4",
           "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
-          "cake_jit.py": "c6592fcd0cf8ac7c88da0a96ab146ad1e45a9cc5",
+          "cake_jit.py": "654e21045e48a19a786d7c727b544ed4169ccbc9",
           "csrc/.clang-format": "5b709a088072620e7474541a766eb3d5db5feec0",
           "csrc/cake_causal_conv1d_train_012b6319a0cc717911b9_binding.cu": "ecd005aad46d2cf21a615ff2ecc62242e47852c1",
           "csrc/cake_causal_conv1d_train_012b6319a0cc717911b9_kernel.cu": "26995033b8d6272375c6677edec214ea3f24d7c3",
@@ -185,13 +191,13 @@
           "csrc/cake_causal_conv1d_train_ffa1f5752a2f183cd02f_binding.cu": "c2467b3fe163ce9f455602845da87c48c7087743",
           "csrc/cake_causal_conv1d_train_ffa1f5752a2f183cd02f_kernel.cu": "619b75dd8fb4ff4f05ae422ec2294288c754a118",
           "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c",
-          "kcp.py": "61822079b74a94da8fb9db1d61d488d2cfbf3dfd",
-          "kcp_jit.py": "2d7bef3ce06133bed2fd0757ceff255f00d6cd9c"
+          "kcp.py": "65e0b2ca6b4489d3cc725742c578e3d794934872",
+          "kcp_jit.py": "a3bf3760dc2052ed9ecd0b8dc01718db60c7ec39"
         },
         "source": {
-          "commit": "c5db8d3ccd3fa3842812280f7f208718dc0b8610",
+          "commit": "158dfcbfc857dc8e7b93deef078a02d7f914370e",
           "kind": "flashinfer",
-          "path": "flashinfer/experimental/cake/cake_causal_conv1d_train_backend",
+          "path": "flashinfer/experimental/cake/cake_causal_conv1d_nondet_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
         }
       }

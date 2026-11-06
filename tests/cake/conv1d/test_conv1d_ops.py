@@ -41,7 +41,7 @@ class _Packages:
     def package(self, variant):
         if variant == "det":
             return types.SimpleNamespace(cake_causal_conv1d_det=self._entry("det"))
-        return types.SimpleNamespace(cake_causal_conv1d=self._entry("fast"))
+        return types.SimpleNamespace(cake_causal_conv1d_nondet=self._entry("fast"))
 
 
 @pytest.fixture
@@ -78,7 +78,7 @@ def test_each_call_reads_the_configured_variant_and_policy(packages):
     ops.causal_conv1d(x, w)
 
     assert [(call.variant, call.kwargs) for call in packages.calls] == [
-        ("fast", {"silu_grad_preactivation": "fp32", "deterministic": False}),
+        ("fast", {"silu_grad_preactivation": "fp32"}),
         ("det", {"silu_grad_preactivation": "bf16"}),
         ("det", {"silu_grad_preactivation": "bf16"}),
     ]
@@ -317,10 +317,18 @@ def test_release_drops_the_packages_host_plans(monkeypatch):
     cleared = []
     fast = ops._package("fast")
     monkeypatch.setattr(fast, "plan_cache_clear", lambda: cleared.append("fast plans"))
+    clears = {
+        "det": ("host_cache_clear", "graph_cache_clear"),
+        "fast": (
+            "cake_causal_conv1d_nondet_train_kcp_host_cache_clear",
+            "cake_causal_conv1d_nondet_train_kcp_graph_cache_clear",
+        ),
+    }
     for variant in ops.PACKAGES:
         kcp = ops._kcp_module(variant)
-        monkeypatch.setattr(kcp, "host_cache_clear", lambda variant=variant: cleared.append(f"{variant} kcp host"))
-        monkeypatch.setattr(kcp, "graph_cache_clear", lambda variant=variant: cleared.append(f"{variant} kcp graphs"))
+        host, graphs = clears[variant]
+        monkeypatch.setattr(kcp, host, lambda variant=variant: cleared.append(f"{variant} kcp host"))
+        monkeypatch.setattr(kcp, graphs, lambda variant=variant: cleared.append(f"{variant} kcp graphs"))
 
     assert cake.release("conv1d") == 0
     assert cleared == ["fast plans", "det kcp host", "det kcp graphs", "fast kcp host", "fast kcp graphs"]

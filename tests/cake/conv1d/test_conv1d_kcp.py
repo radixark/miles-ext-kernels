@@ -53,9 +53,9 @@ class _Route:
     def module(self):
         return types.SimpleNamespace(
             cake_causal_conv1d_det_kcp=self._single("det"),
-            cake_causal_conv1d_kcp=self._single("fast"),
+            cake_causal_conv1d_nondet_kcp=self._single("fast"),
             cake_causal_conv1d_det_multi_kcp=self._multi("det_multi"),
-            cake_causal_conv1d_multi_kcp=self._multi("fast_multi"),
+            cake_causal_conv1d_nondet_kcp_multi=self._multi("fast_multi"),
         )
 
 
@@ -86,10 +86,7 @@ def test_each_variant_runs_its_packages_route(route, variant):
     ((name, x_seen, w_seen, ctx_seen, kwargs),) = route.calls
     assert name == variant and ctx_seen is ctx
     assert torch.equal(x_seen, x) and torch.equal(w_seen, w)
-    expected = {"recompute_handle": handle, "cooperative": False}
-    if variant == "fast":
-        expected["deterministic"] = False
-    assert kwargs == expected
+    assert kwargs == {"recompute_handle": handle, "cooperative": False}  # no variant keyword: the module is the mode
 
 
 def test_the_configured_variant_is_the_default(route):
@@ -168,7 +165,7 @@ def test_the_multi_call_runs_its_packages_route(route, variant):
     ((name, xs, ws, ctx_seen, kwargs),) = route.calls
     assert name == f"{variant}_multi" and ctx_seen is ctx
     assert [w.dtype for w in ws] == [torch.float32, torch.float32]
-    assert kwargs.get("deterministic", True) is (variant == "det")
+    assert kwargs == {"recompute_handle": None, "cooperative": None}
 
 
 def test_the_multi_call_takes_sequences(route):

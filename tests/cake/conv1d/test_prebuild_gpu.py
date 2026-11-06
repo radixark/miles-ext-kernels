@@ -175,7 +175,7 @@ def entries(monkeypatch):
         names = (
             [(package, "cake_causal_conv1d_det"), (kcp_module, "cake_causal_conv1d_det_kcp")]
             if variant == "det"
-            else [(package, "cake_causal_conv1d"), (kcp_module, "cake_causal_conv1d_kcp")]
+            else [(package, "cake_causal_conv1d_nondet"), (kcp_module, "cake_causal_conv1d_nondet_kcp")]
         )
         for module, name in names:
             original = getattr(module, name)
@@ -199,5 +199,6 @@ def test_a_variant_configured_after_a_call_runs_at_the_next_call_without_a_build
         kcp("fast")
     det_calls = [("det", "cake_causal_conv1d_det")] * len(SINGLE_RANK_POINTS)
     det_calls += [("det", "cake_causal_conv1d_det_kcp")] * len(KCP_CHANNELS)
-    fast_calls = [("fast", "cake_causal_conv1d")] + [("fast", "cake_causal_conv1d_kcp")] * len(KCP_CHANNELS)
+    fast_calls = [("fast", "cake_causal_conv1d_nondet")]
+    fast_calls += [("fast", "cake_causal_conv1d_nondet_kcp")] * len(KCP_CHANNELS)
     assert entries == det_calls + fast_calls

@@ -292,7 +292,7 @@ def test_fast_runs_det_under_torch_deterministic_algorithms(monkeypatch, caplog)
 def entries(monkeypatch):
     """The package entry each call runs, with its SiLU' policy, recorded (the calls still run the kernels)."""
     calls = []
-    for variant, name in (("det", "cake_causal_conv1d_det"), ("fast", "cake_causal_conv1d")):
+    for variant, name in (("det", "cake_causal_conv1d_det"), ("fast", "cake_causal_conv1d_nondet")):
         package = ops._package(variant)
         original = getattr(package, name)
 
