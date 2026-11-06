@@ -6,9 +6,11 @@ The deterministic package's ``cake_dense_gemm_det_train_projection_wgrad`` runs 
 package's ``cake_dense_gemm_nondet_train_projection_wgrad`` plans its split-K program on ``X.T @ G`` and runs the
 deterministic entry point's program on a row its planner does not take. The calls of ``batched_projection`` are
 recorded on CPU tensors: only a single-head ``out_in`` weight gradient calls the weight-gradient entry point, on the
-``[T, D]`` matrices; every other GEMM keeps its K1 call. On ``meta`` views, for every part and a sweep of token counts,
-the deterministic plan of the views the backward hands the entry point is the package's own plan of its ``[T, D]``
-matrices, and ``fast_projection_programs`` reports the program the non-deterministic entry point plans.
+``[T, D]`` matrices; every other GEMM keeps its K1 call. On ``meta`` tensors, for every part and a sweep of token
+counts, the backward of ``batched_projection`` on an input slice of a wider head runs the deterministic entry point
+itself, whose launch plans the views it is handed for the part instead of launching: the plan is the one the entry
+point makes of its own call on contiguous ``[T, D]`` matrices, with the input slice read in place. And
+``fast_projection_programs`` reports the program the non-deterministic entry point plans.
 """
 
 import types
@@ -128,26 +130,33 @@ def _meta(*shape: int) -> torch.Tensor:
     return torch.empty(*shape, dtype=torch.bfloat16, device="meta")
 
 
-def _wgrad_views(d_in: int, d_out: int, tokens: int):
-    """``(G, X, dw)``: the views the backward hands the weight-gradient entry point (``meta``)."""
-    x, g, weight = ops._projection_views(1, d_in, d_out, tokens, False)
-    recorded = []
+@pytest.fixture
+def det_entry_plans(backends, monkeypatch):
+    """``(part, plans)``: the deterministic weight-gradient entry point runs on ``meta`` tensors for the part
+    ``part["arch"]`` / ``part["sm_count"]`` (set by the test). The entry point picks the orientation itself
+    (``wgrad_views`` for the part's architecture) and hands its views to its launch, which here plans them with the
+    part's facts, as ``_k1_plan`` plans them on a device, and appends ``(plan, A, B)`` to ``plans`` instead of
+    launching."""
+    det, _ = backends
+    part, plans = {}, []
 
-    def k1(*views):
-        raise AssertionError("a single-head out_in weight gradient made a K1 call")
+    def launch(A, B, out, *, transposed_out=False, enable_pdl=None, **knobs):
+        plan, *_ = det.cake_dense_gemm_det_train_projection_plan(
+            A,
+            B,
+            out,
+            sm_count=part["sm_count"],
+            l2_bytes=L2_BYTES,
+            transposed_out=transposed_out,
+            arch=part["arch"],
+            **knobs,
+        )
+        plans.append((plan, A, B))
+        return out
 
-    ops._wgrad(k1, lambda *views: recorded.append(views), x, g, weight, False)
-    (views,) = recorded
-    return views
-
-
-def _det_plan(det, g, x, dw, arch: str, sm_count: int):
-    """The deterministic weight-gradient entry point's plan of ``(G, X, dw)``: its orientation and its planner."""
-    a, b, transposed = det.wgrad_views(g, x, arch=arch, out_f32=dw.dtype == torch.float32)
-    plan, *_ = det.cake_dense_gemm_det_train_projection_plan(
-        a, b, dw, sm_count=sm_count, l2_bytes=L2_BYTES, transposed_out=transposed, arch=arch
-    )
-    return plan
+    monkeypatch.setattr(det, "arch_for", lambda device=None: part["arch"])
+    monkeypatch.setattr(det, "_launch_cached_gemm", launch)
+    return part, plans
 
 
 def test_the_weight_gradient_entry_points_are_the_packages(backends):
@@ -157,20 +166,38 @@ def test_the_weight_gradient_entry_points_are_the_packages(backends):
     assert ops._k1_wgrad("fast") is fast.cake_dense_gemm_nondet_train_projection_wgrad
 
 
-def test_det_plans_a_single_head_weight_gradient_as_the_package_plans_its_own_call(backends):
+def test_det_plans_a_single_head_weight_gradient_as_the_package_plans_its_own_call(
+    backends, det_entry_plans, monkeypatch
+):
     det, _ = backends
+    part, plans = det_entry_plans
+    monkeypatch.setattr(ops, "_arch", lambda device=None: part["arch"])
+    monkeypatch.setattr(ops, "_k1_gemm", lambda variant: lambda *views: None)  # the forward
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: types.SimpleNamespace(query=lambda: True))
+    cake.configure(cake_dense_gemm_variant="det")
     orientations = set()
     for arch, sm_count in PARTS:
+        part.update(arch=arch, sm_count=sm_count)
         for name, (d_in, d_out) in SINGLE_HEAD.items():
             for tokens in TOKENS:
-                g, x, dw = _wgrad_views(d_in, d_out, tokens)
-                assert (g.shape, x.shape, dw.shape) == ((tokens, d_out), (tokens, d_in), (d_out, d_in))
-                launched = _det_plan(det, g, x, dw, arch, sm_count)
+                case = (arch, sm_count, name, tokens)
+                plans.clear()
+                # the backward of batched_projection on the first d_in features of a wider head
+                act = _meta(tokens, 1, d_in + SLOT)
+                weight = _meta(1, d_out, d_in).requires_grad_(True)
+                out = batched_projection(act[..., :d_in], weight, weight_layout="out_in")
+                out.backward(_meta(tokens, 1, d_out))
                 # the package's own call: contiguous [T, D] matrices and a [D_out, D_in] gradient
-                own = _det_plan(det, _meta(tokens, d_out), _meta(tokens, d_in), _meta(d_out, d_in), arch, sm_count)
+                det.cake_dense_gemm_det_train_projection_wgrad(
+                    _meta(tokens, d_out), _meta(tokens, d_in), _meta(d_out, d_in)
+                )
 
-                assert launched == own, (arch, sm_count, name, tokens)
-                assert launched.transposed_out == (name in SWAPPED), (arch, sm_count, name, tokens)
+                (launched, a, b), (own, _, _) = plans
+                assert launched == own, case
+                assert launched.transposed_out == (name in SWAPPED), case
+                # X [T, D_in] is the input slice, read in place (the row stride of the wider head)
+                x = a.t() if launched.transposed_out else b
+                assert (x.shape, x.stride()) == ((tokens, d_in), (d_in + SLOT, 1)), case
                 orientations.add(launched.transposed_out)
     assert orientations == {False, True}
 
