@@ -1,4 +1,4 @@
-"""The deterministic indexer top-k (FlashInfer's Cake ``cake_dsa_indexer_det``) on SM100a / SM103a / SM107a.
+"""The deterministic indexer top-k (FlashInfer's Cake ``cake_dsa_indexer_det_train``) on SM100a / SM103a / SM107a.
 
 * accuracy -- packed segments at the recorded training token counts (16231 and 16172 queries in 8 segments, top-k 2048
   and 4096), keys longer than the queries, compressed keys (ratio 4), explicit and negative causal offsets, empty

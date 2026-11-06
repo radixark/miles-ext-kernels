@@ -14,7 +14,7 @@ FP32 attention sink).
 - ``fast`` (``cake_dsa_train``): 64 local query heads, ``d_v`` 512 with a 64-channel RoPE tail or none, no sink; ``dq``
   repeats bit for bit, ``dkv`` accumulates in FP32 with ``red.global`` atomics. Any other call runs ``det`` and logs it
   once per reason.
-- :func:`dsa_indexer_det_topk` (``cake_dsa_indexer_det``): fused indexer scores and the exact top-k of packed segments
+- :func:`dsa_indexer_det_topk` (``cake_dsa_indexer_det_train``): fused indexer scores and the exact top-k of packed segments
   for 32 index heads of dimension 128, bit for bit run to run.
 
 miles selects the op with ``--dsa-attention-backend cake``. ``prebuild("dsa", heads=..., d_qk=..., d_v=...,
@@ -37,7 +37,7 @@ OP = OpSpec(
     summary="DeepSeek sparse attention and lightning indexer, forward + backward",
     variants=("det", "fast"),
     selected_by=(("dsa_attention_backend", "cake"),),
-    packages=("cake_dsa_indexer_det", "cake_dsa_sparse_det", "cake_dsa_train"),
+    packages=("cake_dsa_indexer_det_train", "cake_dsa_sparse_det", "cake_dsa_train"),
     exports=(
         "check_device",
         "dsa_indexer_det_topk",
