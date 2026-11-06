@@ -10,9 +10,12 @@ Frobenius error 2e-6). The cases are miles' projections and routers and the sing
 routers whose gradients the package's tables give a program of its own on some part, at token counts inside those
 tables. The rows where ``fast``'s two-split weight gradient missed the BF16 budget with the package vendored before
 (148-SM sm_103a parts, the op module's historical accuracy misses) now run the deterministic program, with ``det``'s
-bits. Then ``fast`` running ``det`` under ``torch.use_deterministic_algorithms``. The prebuild of ``fast`` is checked
-in ``test_prebuild_gpu.py``, ``det`` repeating bit for bit in ``test_determinism_gpu.py``. Needs a CUDA device; the
-tests need SM100a / SM103a / SM107a and skip elsewhere.
+bits. The single-head rows whose ``det`` weight gradient runs the deterministic package's weight-gradient entry point
+(the transposed-store ``X.T @ G``) are held to the relative RMS budget against FP64, ``det`` and ``fast`` where it runs
+the deterministic program, also at a token count past 49152. Then ``fast`` running ``det`` under
+``torch.use_deterministic_algorithms``. The prebuild of ``fast`` is checked in ``test_prebuild_gpu.py``, ``det``
+repeating bit for bit in ``test_determinism_gpu.py``. Needs a CUDA device; the tests need SM100a / SM103a / SM107a and
+skip elsewhere.
 """
 
 import logging
@@ -175,6 +178,44 @@ def test_the_former_accuracy_misses_of_fast_run_det_bits(name):
     assert not _launched_own_programs()
     for got, want in zip(fast, det):
         assert torch.equal(got, want)
+
+
+# The single-head out_in rows whose det weight gradient runs the transposed-store X.T @ G of the deterministic
+# package's weight-gradient entry point, besides 4096 -> 32 (test_determinism_gpu.py): name -> (d_in, d_out, tokens),
+# at the token counts of PROJECTIONS and at 65537; held to the relative RMS budget against FP64 (no elementwise check)
+SINGLE_HEAD_WEIGHT_GRADIENTS = {
+    f"dense-{d_in}-{d_out}-t{t}": (d_in, d_out, t)
+    for d_in, d_out in ((5120, 48), (5120, 64), (6144, 128), (8192, 128))
+    for t in (1001, 16384, 65537)
+}
+
+
+def _weight_gradient(x, weight, grad, variant):
+    """The weight gradient of one ``out_in`` projection under ``variant`` (the input takes no gradient)."""
+    weight = weight.detach().clone().requires_grad_(True)
+    cake.configure(cake_dense_gemm_variant=variant)
+    batched_projection(x, weight, weight_layout="out_in").backward(grad)
+    return weight.grad
+
+
+@pytest.mark.parametrize("name", list(SINGLE_HEAD_WEIGHT_GRADIENTS))
+def test_single_head_weight_gradient_of_det_and_of_fast_on_det_is_within_budget(name, record_property):
+    d_in, d_out, tokens = SINGLE_HEAD_WEIGHT_GRADIENTS[name]
+    planned = fast_projection_programs(
+        1, d_in, d_out, weight_layout="out_in", tokens=tokens, arch=ARCH, sm_count=SM_COUNT
+    )
+    x, weight, grad = _projection_leaves(1, d_in, d_out, "out_in", tokens, seed=SEED + d_in + d_out + tokens)
+
+    got = {"det": _weight_gradient(x, weight, grad, "det")}
+    if planned["weight_grad"] is None:
+        _clear_caches()
+        got["fast"] = _weight_gradient(x, weight, grad, "fast")
+        torch.cuda.synchronize()
+        assert not _launched_own_programs()
+        assert torch.equal(got["fast"], got["det"]), "weight gradient differs from det on the deterministic program"
+    want = (grad[:, 0].double().T @ x[:, 0].double()).unsqueeze(0)
+    measured = assert_rel_rms(got, dict.fromkeys(got, want), dict.fromkeys(got, BF16_REL_RMS))
+    record_property("rel_rms", measured)
 
 
 # ---------------------------------------------------------------------------------------------------------------
