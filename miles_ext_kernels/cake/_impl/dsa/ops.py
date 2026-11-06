@@ -13,7 +13,7 @@ Public surface (all layouts of :mod:`.layouts`):
   - ``det``: the DSA det version (``cake_dsa_sparse_det``, launched through :mod:`.kernels`). Every gradient is
     bit-reproducible run to run: no floating-point atomics, and the key-side gradients are reduced from per-slot FP32
     partials in an order fixed by the indices.
-  - ``fast``: FlashInfer's Cake DSA training kernels (``cake_dsa_train``) for 64 local query heads, ``d_v = 512`` with
+  - ``fast``: FlashInfer's Cake DSA training kernels (``cake_dsa_sparse_attention_nondet_train``) for 64 local query heads, ``d_v = 512`` with
     a 64-channel RoPE tail or none, and no attention sink. ``dq`` is bit-reproducible; ``dkv`` is accumulated with FP32
     ``red.global`` atomics, so its summation order changes from run to run. A call ``fast`` does not serve
     (:func:`fast_unserved_reason`) runs ``det`` and says so once per reason.
@@ -103,8 +103,8 @@ def fast_unserved_reason(heads: int, d_qk: int, d_v: int, *, has_sink: bool, num
 
 @functools.cache
 def _fast_backend():
-    """``(cake_build, cake_jit, cake_backend)`` of the vendored FlashInfer package ``cake_dsa_train``."""
-    package = loader.load_package("cake_dsa_train").__name__
+    """``(cake_build, cake_jit, cake_backend)`` of the vendored FlashInfer package ``cake_dsa_sparse_attention_nondet_train``."""
+    package = loader.load_package("cake_dsa_sparse_attention_nondet_train").__name__
     from importlib import import_module
 
     return tuple(import_module(f"{package}.{name}") for name in ("cake_build", "cake_jit", "cake_backend"))
@@ -179,7 +179,7 @@ def release() -> None:
     """Drop the cached FlashInfer bindings (with their workspaces) and the loaded det stages."""
     import sys
 
-    backend = sys.modules.get(f"{loader.load_package('cake_dsa_train').__name__}.cake_backend")
+    backend = sys.modules.get(f"{loader.load_package('cake_dsa_sparse_attention_nondet_train').__name__}.cake_backend")
     if backend is not None:
         backend.BINDING_CACHE.clear()
     native.release()
@@ -443,7 +443,7 @@ def _fast_sparse_attention(q, kv, indices, sm_scale: float, layout: str, num_seg
     program = _fast_program(q_flat.shape[-1])
     _fast_first_call(program, device_arch(q_flat.device))
     if program == cake_jit.PROGRAM:
-        out = backend.dsa_sparse_attention(
+        out = backend.cake_dsa_sparse_attention_nondet(
             q_flat[..., :FAST_D_V],
             q_flat[..., FAST_D_V:],
             kv_flat[:, :FAST_D_V],
@@ -453,7 +453,7 @@ def _fast_sparse_attention(q, kv, indices, sm_scale: float, layout: str, num_seg
             num_segments=num_segments,
         )
     else:
-        out = backend.dsa_sparse_attention_nope(
+        out = backend.cake_dsa_sparse_attention_nondet_nope(
             q_flat, kv_flat, idx_flat, softmax_scale=sm_scale, num_segments=num_segments
         )
     return meta.rows_to_layout(out)
