@@ -12,9 +12,9 @@ shared by every token and head::
     rstd = 1 / sqrt(mean(x^2) + eps)                     # FP32
     y    = bf16(((x * rstd) * weight) * silu(z))         # FP32, one rounding
 
-``det`` runs FlashInfer's deterministic package (``_vendor/cake_rmsnorm_silu_gate_det_train_backend``): the weight
+``det`` runs FlashInfer's deterministic package (``_vendor/cake_rmsnorm_silu_gate_det_train``): the weight
 gradient is summed in FP32 per CTA chunk and in FP64 across the chunks in an order fixed by the row count, so it is
-bitwise reproducible. ``fast`` runs the non-deterministic package (``_vendor/cake_rmsnorm_silu_gate_train_backend``):
+bitwise reproducible. ``fast`` runs the non-deterministic package (``_vendor/cake_rmsnorm_silu_gate_nondet_train``):
 the same forward arithmetic (``y`` is ``det``'s bits) and a one-kernel backward whose ``dx`` and ``dz`` are ``det``'s
 bits and whose CTAs add their FP64 column sums with atomics, so the weight gradient may differ between runs, always
 within ``det``'s bound ``|dw| * 2^-7 + sum|terms| * 2^-20``. ``fast`` serves every call ``det`` serves; while
@@ -40,7 +40,7 @@ __all__ = ["check_supported", "prebuild", "release", "rmsnorm_silu_gate"]
 OP = "gated_rmsnorm"
 HEAD_DIM = 128
 # the vendored package of each variant
-PACKAGES = {"det": "cake_rmsnorm_silu_gate_det_train_backend", "fast": "cake_rmsnorm_silu_gate_train_backend"}
+PACKAGES = {"det": "cake_rmsnorm_silu_gate_det_train", "fast": "cake_rmsnorm_silu_gate_nondet_train"}
 
 _BACKEND = "--linear-attention-output-norm-backend cake"
 
@@ -139,4 +139,4 @@ def rmsnorm_silu_gate(x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor, ep
     package = _package(variant)
     if variant == "det":
         return package.cake_rmsnorm_silu_gate_det(x, z, weight, eps)
-    return package.cake_rmsnorm_silu_gate(x, z, weight, eps, deterministic=False)
+    return package.cake_rmsnorm_silu_gate_nondet(x, z, weight, eps)
