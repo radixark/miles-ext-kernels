@@ -11,11 +11,12 @@ FP32 attention sink).
 - ``det``, the DSA det version (``cake_dsa_sparse_det``): no floating-point atomics; the key-side gradients are reduced
   from FP32 partials in an order fixed by the indices (a 4-way tree per key), so identical inputs give identical bits.
   Every head count, with or without a sink. The indexer scores and their backward are always ``det``.
-- ``fast`` (``cake_dsa_sparse_attention_nondet_train``): 64 local query heads, ``d_v`` 512 with a 64-channel RoPE tail or none, no sink; ``dq``
-  repeats bit for bit, ``dkv`` accumulates in FP32 with ``red.global`` atomics. Any other call runs ``det`` and logs it
-  once per reason.
-- :func:`dsa_indexer_det_topk` (``cake_dsa_indexer_det_train``): fused indexer scores and the exact top-k of packed segments
-  for 32 index heads of dimension 128, bit for bit run to run.
+- ``fast`` (``cake_dsa_sparse_attention_nondet_train``): 64 local query heads, ``d_v`` 512 with a 64-channel RoPE
+  tail or none, no sink; ``dq`` repeats bit for bit, ``dkv`` accumulates in FP32 with ``red.global`` atomics. Any other
+  call, and every call while ``torch.use_deterministic_algorithms(True)`` is in effect, runs ``det`` and logs it once
+  per reason.
+- :func:`dsa_indexer_det_topk` (``cake_dsa_indexer_det_train``): fused indexer scores and the exact top-k of packed
+  segments for 32 index heads of dimension 128, bit for bit run to run.
 
 miles selects the op with ``--dsa-attention-backend cake``. ``prebuild("dsa", heads=..., d_qk=..., d_v=...,
 attn_sink=..., index_heads=...)`` builds every library a layer of that geometry may launch.
