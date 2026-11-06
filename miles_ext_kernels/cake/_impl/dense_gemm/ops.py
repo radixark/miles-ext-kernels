@@ -13,7 +13,10 @@ of the views' geometry and the device, so every call is bit-reproducible. It rea
 at a 16-byte aligned address, has unit stride on one matrix axis and its other strides in whole 16-byte units, and it
 needs the output columns ``N`` to be a multiple of 8. :func:`batched_projection` hands it the token-major ``[T, H, D]``
 activations and the per-head weight views as they are, and copies a view only when it breaks that contract (a weight
-whose storage is not 16-byte aligned in its parameter buffer, a gradient that is not contiguous).
+whose storage is not 16-byte aligned in its parameter buffer, a gradient that is not contiguous). The weight gradient
+of a single-head ``out_in`` projection goes through the package's weight-gradient entry point on the ``[T, D]``
+matrices, which runs the GEMM in the orientation the package gives the row (the transposed-store ``X.T @ G`` for a
+narrow ``D_out`` such as ``4096 -> 32``).
 
 K2 (``cake_dense_gemm_det_train_router``) is an FP32 GEMM through the exact three-way BF16 split of both operands:
 the products of the splits accumulate with chunked FP32 promotion and the split-K partials are summed in a fixed order,
@@ -131,6 +134,17 @@ def _k1_gemm(variant: str) -> Callable:
     return _vendored_fast()[0].cake_dense_gemm_nondet_train_projection
 
 
+def _k1_wgrad(variant: str) -> Callable:
+    """The K1 weight-gradient entry point ``wgrad(G, X, out)`` of ``variant``: ``out[N, K] = G[T, N].T @ X[T, K]``.
+    The deterministic package plans the GEMM in the orientation its measured rules or its small-``N`` rule give the
+    row (``wgrad_views``: for a narrow ``N`` the transposed-store ``X.T @ G``); the non-deterministic package plans
+    its split-K program on ``X.T @ G`` with the transposed store and runs the deterministic entry point's program on a
+    row its planner does not take."""
+    if variant == "det":
+        return _vendored()[0].cake_dense_gemm_det_train_projection_wgrad
+    return _vendored_fast()[0].cake_dense_gemm_nondet_train_projection_wgrad
+
+
 def _device_index(device: Any) -> int:
     device = torch.device("cuda") if device is None else torch.device(device)
     if device.type != "cuda":
@@ -187,7 +201,10 @@ def _k2_view(t: torch.Tensor) -> torch.Tensor:
 
 # The three GEMMs of a projection, as K1 calls ``gemm(A, B, out)`` over [H, ...] views of the token-major tensors
 # ``x [T, H, D_in]``, ``g`` / ``out [T, H, D_out]`` and of ``weight`` ([H, D_in, D_out] in_out, [H, D_out, D_in]
-# out_in). The weight gradient is computed in the weight's own orientation.
+# out_in). The weight gradient is stored in the weight's own orientation. That of an in_out or multi-head projection
+# is a K1 call in that orientation; that of a single-head out_in projection is the package's weight-gradient call
+# ``wgrad(G [T, D_out], X [T, D_in], dw [D_out, D_in])`` (``_k1_wgrad``), which runs the transposed-store ``X.T @ G``
+# where the package gives the row that orientation (a narrow ``D_out``, such as 4096 -> 32).
 def _forward(gemm: Callable, x, weight, out, in_out: bool) -> None:
     gemm(x.transpose(0, 1), weight if in_out else weight.transpose(1, 2), out.transpose(0, 1))
 
@@ -196,9 +213,11 @@ def _dgrad(gemm: Callable, g, weight, dx, in_out: bool) -> None:
     gemm(g.transpose(0, 1), weight.transpose(1, 2) if in_out else weight, dx.transpose(0, 1))
 
 
-def _wgrad(gemm: Callable, x, g, dw, in_out: bool) -> None:
+def _wgrad(gemm: Callable, wgrad: Callable, x, g, dw, in_out: bool) -> None:
     if in_out:
         gemm(x.permute(1, 2, 0), g.transpose(0, 1), dw)
+    elif dw.shape[0] == 1:
+        wgrad(g[:, 0], x[:, 0], dw[0])
     else:
         gemm(g.permute(1, 2, 0), x.transpose(0, 1), dw)
 
@@ -221,7 +240,8 @@ class _BatchedProjection(torch.autograd.Function):
         # The autograd engine may run this on a thread that has not used the CUDA runtime yet; the programs encode
         # their tensor maps through the driver API, which needs the device's primary context current on this thread.
         torch.cuda.current_stream(x.device).query()
-        gemm = _k1_gemm(_call_variant(ctx.variant))
+        variant = _call_variant(ctx.variant)
+        gemm = _k1_gemm(variant)
         g = _k1_view(grad)
         dx = dw = None
         if ctx.needs_input_grad[0]:
@@ -229,7 +249,7 @@ class _BatchedProjection(torch.autograd.Function):
             _dgrad(gemm, g, weight, dx, ctx.in_out)
         if ctx.needs_input_grad[1]:
             dw = torch.empty(weight.shape, dtype=weight.dtype, device=weight.device)
-            _wgrad(gemm, x, g, dw, ctx.in_out)
+            _wgrad(gemm, _k1_wgrad(variant), x, g, dw, ctx.in_out)
         return dx, dw, None, None
 
 
@@ -360,13 +380,14 @@ def _check_part(arch: str, sm_count: int) -> None:
         raise ValueError(f"sm_count must be a device's SM count, got {sm_count}")
 
 
-def _fast_k1_template(a, b, out, *, arch: str, sm_count: int) -> str | None:
+def _fast_k1_template(a, b, out, *, transposed_out: bool = False, arch: str, sm_count: int) -> str | None:
     """The template of the non-deterministic package's program that ``fast`` launches for the K1 call
-    ``gemm(a, b, out)`` on a device of ``arch`` with ``sm_count`` SMs, or ``None``: the call runs the deterministic
-    program. This is the package's own planner (``plan_atomic_gemm``), which its launches call with the device's
-    architecture and SM count; it plans only the weight gradients (both operands MN-major) of the rows its tables
-    select."""
-    plan = _vendored_fast()[0].plan_atomic_gemm(a, b, out, transposed_out=False, arch=arch, sm_count=sm_count)[0]
+    ``gemm(a, b, out)`` (``transposed_out``: the transposed store, ``out`` is ``[N, M]``) on a device of ``arch`` with
+    ``sm_count`` SMs, or ``None``: the call runs the deterministic program. This is the package's own planner
+    (``plan_atomic_gemm``), which its launches call with the device's architecture and SM count; it plans only the
+    weight gradients (both operands MN-major) of the rows its tables select."""
+    backend = _vendored_fast()[0]
+    plan, *_ = backend.plan_atomic_gemm(a, b, out, transposed_out=transposed_out, arch=arch, sm_count=sm_count)
     return None if plan is None else plan.template
 
 
@@ -406,21 +427,26 @@ def fast_projection_programs(
     """Which program :func:`batched_projection` runs under ``fast`` for ``num_heads`` heads of ``d_in -> d_out`` at
     ``tokens`` tokens on a device of ``arch`` (``sm_100a`` / ``sm_103a`` / ``sm_107a``) with ``sm_count`` SMs:
     ``{"forward": ..., "input_grad": ..., "weight_grad": ...}``, each the template of the non-deterministic package's
-    program, or ``None`` where it runs the deterministic program (the program and bits of ``det``). Needs torch, no
-    device: the package's planner is a function of the views' geometry, the architecture, the SM count and the token
-    count."""
+    program, or ``None`` where it runs the deterministic program (the program and bits of ``det``). The weight
+    gradient of a single-head ``out_in`` projection is planned as the package's weight-gradient entry point plans it
+    (the transposed-store ``X.T @ G``). Needs torch, no device: the package's planner is a function of the views'
+    geometry, the architecture, the SM count and the token count."""
     in_out = _in_out(weight_layout)
     check_projection_dims(d_in, d_out)
     _check_part(arch, sm_count)
     templates = []
 
-    def plan(a, b, out):
-        templates.append(_fast_k1_template(a, b, out, arch=arch, sm_count=sm_count))
+    def plan(a, b, out, transposed_out=False):
+        templates.append(_fast_k1_template(a, b, out, transposed_out=transposed_out, arch=arch, sm_count=sm_count))
+
+    def plan_wgrad(g2, x2, out):
+        # the package's weight-gradient entry point plans its program on the transposed-store X.T @ G
+        plan(x2.t(), g2, out, transposed_out=True)
 
     x, g, weight = _projection_views(num_heads, d_in, d_out, tokens, in_out)
     _forward(plan, x, weight, g, in_out)
     _dgrad(plan, g, weight, x, in_out)
-    _wgrad(plan, x, g, weight, in_out)
+    _wgrad(plan, plan_wgrad, x, g, weight, in_out)
     return dict(zip(OPERATIONS, templates))
 
 
