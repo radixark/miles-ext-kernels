@@ -207,12 +207,12 @@
         "cake_revision": "72d0af54b2ddd96cd9f931508e70999338e18cce",
         "files": {
           ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
-          "README.md": "35f36985807126809172bee8a82978d86e235a6e",
+          "README.md": "159a537b6d30c14b7abb8cb298c9b87007749b92",
           "__init__.py": "a50bca357f1cab463d29ae74724ca5da404836bd",
-          "build.json": "12c1e1ed868117d7e8d1b1c7ed6ad357de7602c7",
-          "cake_backend.py": "61ca575687ee53e2404883a423e357ef1580a1b1",
+          "build.json": "f8d4fb03265dbd786612ff4862e10ae15271ef06",
+          "cake_backend.py": "fa3b7eec023140d7110f74e8c2ab0c91cdf50c82",
           "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
-          "cake_jit.py": "e4c7edb557b3d0e004dfa9590407328a880c67ce",
+          "cake_jit.py": "795862b49caa6351ebe4b06abd86b3ea21f53fb8",
           "csrc/cake_dense_projection_det_gemm/.clang-format": "47a38a93f2dbdd6d944f9dddc3465e3fb65aec29",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_011c85b820ec0cf6863d_tpl_binding.cu": "009ce1c064c2c9ee905266733ced16e72986431c",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_02803e1d2393113c0f6c_binding.cu": "313730077e5e90dcc8e451611517725917fda69a",
@@ -231,6 +231,8 @@
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_0db65f3ddd780ed42d4d_kernel.cu": "42bc68f1b678ac85dee0d9083bfc2de211af6d94",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_0dd5420b570cabc144ab_binding.cu": "9b023f43c4a3f155f1bd959bf33c9066770876a8",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_0dd5420b570cabc144ab_kernel.cu": "74ae8427a74069975ccef992c5e05bec91cb2016",
+          "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_110305dea4b2b6b7d92b_binding.cu": "9cd967e310cf6d6fc87513b3333d4e3f0730709c",
+          "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_110305dea4b2b6b7d92b_kernel.cu": "8749c9d8f327bd2e3fa73bdc88bc49d6cf2dd98e",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_13790f025541d7d162a7_binding.cu": "ef3362f84e1d26657edcb9d2e6b928b847aca736",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_13790f025541d7d162a7_kernel.cu": "681f842a4c92177eb7682f706399f1ee492c0167",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_13d9310f37868a18eace_kernel.cu": "94a5dfa4d999aca4ae4c083bbd2ee2957891be2b",
@@ -298,6 +300,8 @@
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_7ef28d420de555e7a28d_kernel.cu": "8149c620a4b58419f81c0f5c69b83e4f123573e1",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_806927d101fe72fc1317_kernel.cu": "b90b18157a59810e08e4725fb1e2925fa6e3946e",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_82f698f67a1cca6e4291_kernel.cu": "7814671f06b91498500aba9645592d8958cb2a33",
+          "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_88c74947ca5e3a2f604e_binding.cu": "406f31d3de2045d27564b08823aac47ae5938d8f",
+          "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_88c74947ca5e3a2f604e_kernel.cu": "e5fa10749aeec7febe6d2852d35b012d7c5217ba",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_895f9ba7159bea07aedd_kernel.cu": "598007075cceb96fc04698600213101b4474c7dc",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_8e1f6805342f620cca8c_kernel.cu": "a88f9202f53fdbc9385e651d213d1e8832582d66",
           "csrc/cake_dense_projection_det_gemm/cake_dense_projection_det_gemm_9269f6841d7aeb58471c_binding.cu": "d36dbec443680b6f71a326220740cc5f26e6ccc2",
@@ -406,7 +410,7 @@
           "csrc/cake_ffi_checks.h": "43f6edf073a2ceec397925110b7418af437dcba6"
         },
         "source": {
-          "commit": "da118ebfdd5b54dfad95d09bffbba3b739ba27c2",
+          "commit": "f5ab85cc77edbd0257b0145eefe0113074dc6ee2",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_dense_gemm_det_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
@@ -416,12 +420,12 @@
         "cake_revision": "72d0af54b2ddd96cd9f931508e70999338e18cce",
         "files": {
           ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
-          "README.md": "846f9509bee7267cb2e49b7eecf1ddf4d63253f7",
+          "README.md": "85e0f10c557bf987363e24c8b6d9a32d5759b689",
           "__init__.py": "1ccabcbec70cb3905824b14511f94333e486447e",
-          "build.json": "0ccf1c2fa488301fc88c2b051a2c30fdf88e450b",
-          "cake_backend.py": "694b8e53704255e1f5c56b1443894025416bef58",
+          "build.json": "c5b29f21fa64a9aa84d7b18b7c9ecb3517c049f7",
+          "cake_backend.py": "58a3b235d1572aab3a25cb65d50771e22f717aa4",
           "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
-          "cake_jit.py": "36dcb49239de2a845fe0e6f78cc241204a4173f8",
+          "cake_jit.py": "e28afa1c9fb84f2c62d2d30e44e2e808d4b6c682",
           "csrc/cake_dense_projection_gemm/cake_dense_projection_gemm_16496106e8ac1c7b1048_binding.cu": "c7ec2d49d9d3bc7a4415c486d2ed5c2778e96adf",
           "csrc/cake_dense_projection_gemm/cake_dense_projection_gemm_16496106e8ac1c7b1048_kernel.cu": "7aa60ebeb96e7ed1e98350e541a72c8daf2166e0",
           "csrc/cake_dense_projection_gemm/cake_dense_projection_gemm_1d46f84995b7baec3e04_binding.cu": "4e1209df63b51bd3c0898f036f0595ae033e3178",
@@ -487,7 +491,7 @@
           "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c"
         },
         "source": {
-          "commit": "da118ebfdd5b54dfad95d09bffbba3b739ba27c2",
+          "commit": "f5ab85cc77edbd0257b0145eefe0113074dc6ee2",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_dense_gemm_nondet_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"

@@ -75,7 +75,7 @@ EXPECTED_WEIGHT_GRAD: dict[tuple[str, int], dict[str, dict[int, str]]] = {
         "dense-4096-32": _at(K1_N64, _without(FROM_128, 65536)),
         "dense-5120-64": _at(K1_N64, _without(FROM_128, 1001)),
         "router-e256-h4096": _at(SIMT_N128, (64, 128, 192)),
-        "router-e256-h5120": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL, (10240, 16384))},
+        "router-e256-h5120": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL, (10240, 16384, 20480))},
         "router-e256-h6144": _at(SIMT_N64, (64, 128, 192)),
     },
     ("sm_103a", 148): {
@@ -92,7 +92,7 @@ EXPECTED_WEIGHT_GRAD: dict[tuple[str, int], dict[str, dict[int, str]]] = {
         "dense-6144-128": _at(K1_N128, _without(FROM_128, 1001, 4096)),
         "router-e256-h4096": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL_TS, (20480, 32768, 49152))},
         "router-e256-h5120": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL_TS, (16384, 20480, 32768))},
-        "router-e256-h6144": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL_TS, (16384, 20480))},
+        "router-e256-h6144": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL_TS, (20480,))},
     },
     ("sm_103a", 160): {
         "dense-4096-32": _at(K1_N64, _without(FROM_128, 65536)),

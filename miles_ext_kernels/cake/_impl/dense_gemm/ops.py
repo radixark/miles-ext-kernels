@@ -472,13 +472,16 @@ def program_kind(template: str) -> str:
     """The GEMM kind a registered program of either package serves.
 
     ``"router"``: the K2 programs (``router_fp32_*``), the BF16x3 split (``split_fp32_*``) and the K1 programs with an
-    FP32 output (``_f32``; the router's forward is the only FP32-output K1 GEMM of these entry points).
+    FP32 output (``_f32``; the router's forward is the only FP32-output K1 GEMM of these entry points). The K1
+    programs are the ``dense_proj_*`` ones and the deterministic package's three-chain weight gradients
+    (``chain_det_gemm_*``).
     ``"projections"``: the other K1 programs (BF16 output) and the swapped few-token forwards (``swap_ab_*``).
     ``ValueError`` for a template of no known kind.
     """
     if template.startswith(("router_fp32_", "router_partials_", "split_fp32_")):
         return "router"
-    if template.startswith(("dense_proj_det_gemm_", "dense_proj_gemm_atomic_", "dense_proj_gemm_dsm_")):
+    k1 = ("dense_proj_det_gemm_", "dense_proj_gemm_atomic_", "dense_proj_gemm_dsm_", "chain_det_gemm_")
+    if template.startswith(k1):
         return "router" if "f32" in template.split("_") else "projections"
     if template.startswith("swap_ab_"):
         return "projections"
