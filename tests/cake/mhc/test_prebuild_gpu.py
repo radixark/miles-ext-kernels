@@ -5,8 +5,8 @@ compiles, whatever the variant, the token count or the call's other switches.
 coefficient and token-owner passes then run programs of their own, which compiled inside the call when prebuild was
 given the default count): a token-count sweep (0 to 65537, across the bands of the host rules), other epsilons,
 frozen parameters or input, a forward without autograd, checkpointed connections (the statistics replay), BF16
-parameters, a side stream, and the head. The checks build into library caches of their own, empty at the start of the
-module, so a library an earlier test built cannot hide one that prebuild leaves out.
+parameters, a side stream, and the head (each variant's own package). The checks build into library caches of their
+own, empty at the start of the module, so a library an earlier test built cannot hide one that prebuild leaves out.
 """
 
 import functools
@@ -97,6 +97,8 @@ def _on_side_stream(variant: str, **model) -> None:
 def _head(variant: str, *, hidden: int, T: int = 257) -> None:
     X = torch.randn(T, 4, hidden, device=_device()).to(torch.bfloat16).requires_grad_(True)
     Y = _ops().mhc_head(X)
+    expected = {"det": "CakeMHCHeadDetFunction", "fast": "CakeMHCHeadNondetFunction"}[variant]
+    assert Y.grad_fn._forward_cls.__name__ == expected  # the variant's own head package
     Y.backward(torch.ones_like(Y))
     torch.cuda.synchronize()
 

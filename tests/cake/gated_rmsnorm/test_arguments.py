@@ -21,8 +21,8 @@ from miles_ext_kernels.cake import gated_rmsnorm
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VARIANT = "--cake-gated-rmsnorm-variant"
-DET = "cake_rmsnorm_silu_gate_det_train_backend"
-FAST = "cake_rmsnorm_silu_gate_train_backend"
+DET = "cake_rmsnorm_silu_gate_det_train"
+FAST = "cake_rmsnorm_silu_gate_nondet_train"
 
 
 def _validated(argv: list[str], **miles_args) -> argparse.Namespace:
@@ -151,7 +151,7 @@ def test_the_op_imports_and_configures_without_torch():
 
 @pytest.fixture
 def ops(monkeypatch):
-    """The implementation with both packages replaced: ``calls`` records ``(package, deterministic keyword)``."""
+    """The implementation with both packages replaced: ``calls`` records the chosen package."""
     pytest.importorskip("torch")
     from miles_ext_kernels.cake._impl.gated_rmsnorm import ops
 
@@ -161,13 +161,13 @@ def ops(monkeypatch):
         calls.append((DET, None))
         return x
 
-    def fast(x, z, weight, eps, *, deterministic=True):
-        calls.append((FAST, deterministic))
+    def fast(x, z, weight, eps):
+        calls.append((FAST, None))
         return x
 
     packages = {
         "det": SimpleNamespace(cake_rmsnorm_silu_gate_det=det),
-        "fast": SimpleNamespace(cake_rmsnorm_silu_gate=fast),
+        "fast": SimpleNamespace(cake_rmsnorm_silu_gate_nondet=fast),
     }
     monkeypatch.setattr(ops, "_package", packages.__getitem__)
     monkeypatch.setattr(ops.config, "_warned", set())
@@ -193,7 +193,7 @@ def test_the_configured_variant_is_read_at_every_call(ops):
         cake.configure(cake_gated_rmsnorm_variant=variant)
         _call(ops)
 
-    assert ops.calls == [(FAST, False), (DET, None), (FAST, False)]
+    assert ops.calls == [(FAST, None), (DET, None), (FAST, None)]
 
 
 def test_fast_runs_det_under_torch_deterministic_algorithms(ops, caplog):
@@ -210,7 +210,7 @@ def test_fast_runs_det_under_torch_deterministic_algorithms(ops, caplog):
         torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
     _call(ops)
 
-    assert ops.calls == [(DET, None), (DET, None), (FAST, False)]
+    assert ops.calls == [(DET, None), (DET, None), (FAST, None)]
     warnings = [record.getMessage() for record in caplog.records if "gated_rmsnorm" in record.getMessage()]
     assert warnings == [
         "miles_ext_kernels.cake.gated_rmsnorm: the fast variant does not serve "

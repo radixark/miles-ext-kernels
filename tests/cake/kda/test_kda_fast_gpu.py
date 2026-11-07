@@ -1,13 +1,13 @@
 """The ``fast`` KDA variant (the vendored non-deterministic package) on one GPU: accuracy against the exact FP64
 recurrence, the forward / backward split and the checkpointed node, the backward of a saved set of either package,
-and the ``det`` run of a call with the in-kernel q / k L2 norm, which the package does not serve.
+and miles' call with the in-kernel q / k L2 norm, which the package runs with ``det``'s results.
 
-``fast`` gives no bit guarantee (in the raw gate mode it sums the parameter gradients in FP64 in no fixed order on
-SM100a / SM103a), so its results are gated by accuracy alone: every tensor within twice ``det``'s relative RMS error
-on the same inputs and call, against the same FP64 reference. Two gate modes, as the package takes them: ``g``, the
-activated FP32 gate, and ``raw``, the raw BF16 gate the kernels activate (``use_gate_in_kernel=True``); q / k
-L2-normalised by the caller. Needs an SM100a / SM103a / SM107a GPU, torch and tvm-ffi; the module first runs
-``cake.prebuild("kda", num_heads=12)``.
+``fast`` gives no bit guarantee of its own, so its results are gated by accuracy: every tensor within twice ``det``'s
+relative RMS error on the same inputs and call, against the same FP64 reference. Two gate modes, as the package takes
+them: ``g``, the activated FP32 gate, and ``raw``, the raw BF16 gate the kernels activate
+(``use_gate_in_kernel=True``); q / k L2-normalised by the caller. With the in-kernel L2 norm FlashInfer states
+``det``'s bits, which the last test checks. Needs an SM100a / SM103a / SM107a GPU, torch and tvm-ffi; the module first
+runs ``cake.prebuild("kda", num_heads=12)``.
 """
 
 import contextlib
@@ -167,7 +167,7 @@ def test_fast_forward_backward_split_and_checkpoint_match_the_reference(shape, m
     operands = [inputs[n].unsqueeze(0) for n in ("q", "k", "v", "g", "beta")]
     modes = _modes(inputs, mode)
     out, saved = kda.chunk_kda_fwd(*operands, inputs["cu_seqlens"], **modes)
-    assert type(saved).__name__ == "KdaChunkSaved"
+    assert type(saved).__name__ == "CakeKDANondetChunkSaved"
     _gate({"out": out.squeeze(0)}, want, budget)
     dout = inputs["dout"].unsqueeze(0)
     for set_ in (saved, None):  # the saved set, then the replay
@@ -197,18 +197,33 @@ def test_a_saved_set_is_read_by_the_package_that_wrote_it(mode):
     _gate(_grads(mode, grads), want, budget)
 
 
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("shape", [((300, 129, 500), 12), ((1000, 37, 300, 63), 64)], ids=_budgets.shape_id)
-def test_fast_runs_det_for_the_in_kernel_l2_norm_and_says_so_once(caplog, shape):
-    """miles' call (raw gate, in-kernel q / k L2 norm): ``fast`` runs ``det``, bit for bit, and logs it once."""
+def test_fast_runs_the_in_kernel_l2_norm_on_its_package_with_det_bits(caplog, shape, mode):
+    """The in-kernel q / k L2 norm in either gate mode (miles' call is the raw gate one): ``fast`` runs its own package
+    (its saved set), logs nothing, and gives ``det``'s bits on the autograd node, the saved-set backward and the
+    replay."""
     lengths, heads = shape
-    inputs = _inputs(lengths, heads, "raw")
+    inputs = _inputs(lengths, heads, mode)
     inputs["q"], inputs["k"] = raw_qk(lengths, heads, "cuda")
     with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
-        fast = [_run(inputs, "raw", l2n=True) for _ in range(2)]
+        fast = [_run(inputs, mode, l2n=True) for _ in range(2)]
+        operands = [inputs[n].unsqueeze(0) for n in ("q", "k", "v", "g", "beta")]
+        modes = {**_modes(inputs, mode), "use_qk_l2norm_in_kernel": True}
+        dout = inputs["dout"].unsqueeze(0)
+        out, saved = kda.chunk_kda_fwd(*operands, inputs["cu_seqlens"], **modes)
+        assert type(saved).__name__ == "CakeKDANondetChunkSaved"
+        split = []
+        for set_ in (saved, None):  # the saved set, then the replay
+            split.append(_grads(mode, kda.chunk_kda_bwd(*operands, inputs["cu_seqlens"], dout, saved=set_, **modes)))
     with _variant("det"):
-        det = _run(inputs, "raw", l2n=True)
+        det = _run(inputs, mode, l2n=True)
+        det_out, det_saved = kda.chunk_kda_fwd(*operands, inputs["cu_seqlens"], **modes)
+        det_split = _grads(mode, kda.chunk_kda_bwd(*operands, inputs["cu_seqlens"], dout, saved=det_saved, **modes))
 
     for got in fast:
         assert_bitwise(got, det)
-    messages = [record.getMessage() for record in caplog.records if record.name == "miles_ext_kernels"]
-    assert len(messages) == 1 and "in-kernel q / k L2 norm" in messages[0], messages
+    assert_bitwise({"out": out}, {"out": det_out})
+    for got in split:
+        assert_bitwise(got, det_split)
+    assert [record.getMessage() for record in caplog.records if record.name.startswith("miles_ext_kernels")] == []

@@ -29,7 +29,7 @@ queries.  Pure host metadata: nothing here reads the contents of a tensor or
 launches a kernel; the module imports ``dataclasses``, ``torch`` and
 ``torch.distributed`` only and is importable and testable on the CPU.
 
-Partition.  ``partition_det_kcp(cu_seqlens_global_cpu, world_size, layout, fragments=None)``
+Partition.  ``cake_gdn_det_train_kcp_partition(cu_seqlens_global_cpu, world_size, layout, fragments=None)``
 cuts the global token order (``cu_seqlens`` of the packed documents, CPU
 int64) into per-rank fragments ``(doc, offset in the document, length)``
 stored on every rank in document order, then offset order (the rank's local
@@ -46,7 +46,7 @@ recurrence starts from a carried state), one with a successor is
 *crossing-out* (it produces a summary).  Zero-length fragments are skipped by
 the chains.  The partition is built once and reused across layers.
 
-Context.  ``build_context_det_kcp(part, group, rank, device, conv_kernel_size=4)``
+Context.  ``cake_gdn_det_train_kcp_build_context(part, group, rank, device, conv_kernel_size=4)``
 derives, for one rank, the local ``cu_seqlens`` (int32 device; one local
 sequence per fragment), the device fragment table, the crossing slots, the
 chunk / sequence tables of the existing chunk-parallel stages (bitwise the
@@ -83,7 +83,7 @@ CTA per SM instead of the occ ``ceil`` (:data:`WAVE_FILL_N_FRAG_MAX`; a rank wit
 the cap, more than three fragments, or an empty longest fragment) keeps the
 earlier ``"occ"`` rule ``clamp(max(P_occ, P_chain), 1, ...)``.  ``"wave_fill1"``,
 ``"wave"``, ``"occ"``, ``"wave_fill"``, ``"chain_min"`` and ``"one"`` stay selectable
-through the keyword-only ``p_rule`` argument of :func:`build_context_det_kcp` (a test
+through the keyword-only ``p_rule`` argument of :func:`cake_gdn_det_train_kcp_build_context` (a test
 knob of the options object, never a default) for the A/B record.  ``"row_cost_lpt"``
 (selectable the same way) is the row rule whose wave-regime ranks take the argmin of
 the crossing-aware cost over their real fragment table, capped at the smallest ``P``
@@ -192,7 +192,7 @@ ROW_COST_LPT_MARGIN_PCT = ROW_COST_MARGIN_PCT["occ"]
 ROW_COST_LPT_ROW_MARGIN_PCT = 4
 # The shipped default of ``save_transfer`` (the design note §6.2) -- the merge owner
 # keeps its c1 receive tensor (and the home rank its M_seg at P > 1) for the backward instead of re-sending M_f^T in b1.
-# Default of the byte queries below and of ``cake_kcp.OptionsDetKcp``; ``False`` (the earlier recompute form) stays
+# Default of the byte queries below and of ``cake_kcp.CakeGDNDetKcpOptions``; ``False`` (the earlier recompute form) stays
 # selectable through the ``save_transfer`` argument; ``kcp_saved_bytes`` reports the delta.
 SAVE_TRANSFER_DEFAULT = True
 # Wave-aware P rule: per-CTA-step constants at one CTA per SM on GB300 (KDA, 64 heads; a GDN walk micro-benchmark refits them), in 10 ns
@@ -233,9 +233,9 @@ TABLE_NAMES = (
 COLLECTIVES = ("c1", "c2", "b1", "b2", "halo_fwd", "halo_bwd")
 TILE_B = 0  # half 0 of a c1 summary tile [2][128][128]: the offset B_f
 TILE_M = 1  # half 1: the transposed map M_f^T
-TILE_D = 0  # half 0 of a b1 pair tile [2][128][128]: the adjoint offset d_f (half 1 = the re-sent M_f^T, TILE_M)
-TILE_STRIDE_PLANE = 1  # kernel argument tile_stride: dense plane (c2 S_in, b2 dS_out, b1 offsets-only, carry, the P > 1 staging planes)
-TILE_STRIDE_PAIR = 2  # interleaved pair (c1 [B_f | M_f^T], b1 [d_f | M_f^T] with maps)
+TILE_D = 0  # the adjoint offset d_f opens each b1 owner block (the b1 buffers are dense planes; kept for the ABI names)
+TILE_STRIDE_PLANE = 1  # kernel argument tile_stride: dense plane (c2 S_in, b2 dS_out, both b1 forms, carry, the P > 1 staging planes)
+TILE_STRIDE_PAIR = 2  # interleaved pair (c1 [B_f | M_f^T])
 SUMMARY_TILE = 2 * TILE  # elements of one c1 summary tile of one head
 FLAG_CROSSING_IN = 1
 FLAG_CROSSING_OUT = 2
@@ -251,7 +251,7 @@ def _ceil_div(a: int, b: int) -> int:
 
 
 @dataclasses.dataclass(frozen=True)
-class FragmentDetKcp:
+class CakeGDNDetKcpFragment:
     """One fragment of the partition: ``[off, off + length)`` of document ``doc``, held by ``rank`` at local
     position ``slot`` (the rank's buffer order); ``prev`` / ``next`` are the ``(rank, slot)`` of the neighbours in
     the document chain (``None`` at a document start / end and for zero-length fragments, which the chain skips)."""
@@ -284,14 +284,14 @@ class FragmentDetKcp:
 
 
 @dataclasses.dataclass(frozen=True)
-class PartitionDetKcp:
+class CakeGDNDetKcpPartition:
     """The fragment tables of every rank (``fragments[rank][slot]``), the global ``cu_seqlens`` they cut and the
     layout that produced them (``"explicit"`` for a caller-given table)."""
 
     world_size: int
     layout: str
     cu_seqlens: tuple[int, ...]
-    fragments: tuple[tuple[FragmentDetKcp, ...], ...]
+    fragments: tuple[tuple[CakeGDNDetKcpFragment, ...], ...]
 
     @property
     def num_docs(self) -> int:
@@ -304,7 +304,7 @@ class PartitionDetKcp:
     def doc_length(self, doc: int) -> int:
         return self.cu_seqlens[doc + 1] - self.cu_seqlens[doc]
 
-    def fragment(self, rank: int, slot: int) -> FragmentDetKcp:
+    def fragment(self, rank: int, slot: int) -> CakeGDNDetKcpFragment:
         return self.fragments[rank][slot]
 
     def rank_tokens(self, rank: int) -> int:
@@ -327,7 +327,7 @@ class PartitionDetKcp:
 
     def chains(self) -> tuple[tuple[tuple[int, int], ...], ...]:
         """Per document the ``(rank, slot)`` of its non-empty fragments in offset order (the document chain)."""
-        by_doc: dict[int, list[FragmentDetKcp]] = {}
+        by_doc: dict[int, list[CakeGDNDetKcpFragment]] = {}
         for frs in self.fragments:
             for f in frs:
                 if f.length > 0:
@@ -427,12 +427,12 @@ def _as_cu_seqlens(cu_seqlens) -> tuple[int, ...]:
     if isinstance(cu_seqlens, torch.Tensor):
         if cu_seqlens.device.type != "cpu":
             raise ValueError(
-                "partition_det_kcp: cu_seqlens is CPU metadata (the partition reads no device tensor); "
+                "cake_gdn_det_train_kcp_partition: cu_seqlens is CPU metadata (the partition reads no device tensor); "
                 f"got a tensor on {cu_seqlens.device}"
             )
         if cu_seqlens.dim() != 1 or cu_seqlens.dtype not in (torch.int32, torch.int64):
             raise ValueError(
-                f"partition_det_kcp: cu_seqlens must be a 1-D int32 / int64 tensor, got {tuple(cu_seqlens.shape)} "
+                f"cake_gdn_det_train_kcp_partition: cu_seqlens must be a 1-D int32 / int64 tensor, got {tuple(cu_seqlens.shape)} "
                 f"{cu_seqlens.dtype}"
             )
         values = tuple(int(v) for v in cu_seqlens.tolist())
@@ -440,11 +440,13 @@ def _as_cu_seqlens(cu_seqlens) -> tuple[int, ...]:
         values = tuple(int(v) for v in cu_seqlens)
     if len(values) < 1 or values[0] != 0:
         raise ValueError(
-            f"partition_det_kcp: cu_seqlens must start with 0 and hold num_docs + 1 entries, got {values[:4]}..."
+            f"cake_gdn_det_train_kcp_partition: cu_seqlens must start with 0 and hold num_docs + 1 entries, got {values[:4]}..."
         )
     for a, b in zip(values, values[1:], strict=False):
         if b < a:
-            raise ValueError("partition_det_kcp: cu_seqlens must be non-decreasing")
+            raise ValueError(
+                "cake_gdn_det_train_kcp_partition: cu_seqlens must be non-decreasing"
+            )
     return values
 
 
@@ -492,13 +494,13 @@ def _validate_cut_points(cuts, length: int, pieces: int, doc: int) -> list[int]:
     values = [int(c) for c in cuts]
     if len(values) != pieces + 1 or values[0] != 0 or values[-1] != length:
         raise ValueError(
-            f"partition_det_kcp: cut_points[{doc}] must hold {pieces + 1} offsets from 0 to the document length {length}, "
+            f"cake_gdn_det_train_kcp_partition: cut_points[{doc}] must hold {pieces + 1} offsets from 0 to the document length {length}, "
             f"got {len(values)} entries {values[:3]}...{values[-2:]}"
         )
     for a, b in zip(values, values[1:], strict=False):
         if b < a:
             raise ValueError(
-                f"partition_det_kcp: cut_points[{doc}] must be non-decreasing"
+                f"cake_gdn_det_train_kcp_partition: cut_points[{doc}] must be non-decreasing"
             )
     return values
 
@@ -510,7 +512,7 @@ def _entries_zigzag_per_document(
     pieces = 2 * W
     if cut_points is not None and len(cut_points) != num_docs:
         raise ValueError(
-            f"partition_det_kcp: cut_points must give one list per document ({num_docs}), got {len(cut_points)}"
+            f"cake_gdn_det_train_kcp_partition: cut_points must give one list per document ({num_docs}), got {len(cut_points)}"
         )
     entries: list[tuple[int, int, int, int]] = []
     for d in range(num_docs):
@@ -543,28 +545,28 @@ def _explicit_entries(
             for y in frs:
                 if len(y) != 3:
                     raise ValueError(
-                        f"partition_det_kcp: fragments[{rank}] entries must be (doc, off, len), got {y!r}"
+                        f"cake_gdn_det_train_kcp_partition: fragments[{rank}] entries must be (doc, off, len), got {y!r}"
                     )
                 entries.append((int(y[0]), int(y[1]), int(y[2]), rank))
     else:
         for y in items:
             if not isinstance(y, (list, tuple)) or len(y) != 4:
                 raise ValueError(
-                    f"partition_det_kcp: flat fragments entries must be (doc, off, len, rank), got {y!r}"
+                    f"cake_gdn_det_train_kcp_partition: flat fragments entries must be (doc, off, len, rank), got {y!r}"
                 )
             entries.append((int(y[0]), int(y[1]), int(y[2]), int(y[3])))
     for doc, off, ln, rank in entries:
         if not 0 <= doc < num_docs:
             raise ValueError(
-                f"partition_det_kcp: fragment document {doc} out of range [0, {num_docs})"
+                f"cake_gdn_det_train_kcp_partition: fragment document {doc} out of range [0, {num_docs})"
             )
         if not 0 <= rank < W:
             raise ValueError(
-                f"partition_det_kcp: fragment rank {rank} out of range [0, {W})"
+                f"cake_gdn_det_train_kcp_partition: fragment rank {rank} out of range [0, {W})"
             )
         if ln < 0 or off < 0 or off + ln > cu[doc + 1] - cu[doc]:
             raise ValueError(
-                f"partition_det_kcp: fragment (doc {doc}, off {off}, len {ln}) does not fit document {doc} of "
+                f"cake_gdn_det_train_kcp_partition: fragment (doc {doc}, off {off}, len {ln}) does not fit document {doc} of "
                 f"{cu[doc + 1] - cu[doc]} tokens"
             )
     # every document covered exactly once by its non-empty fragments, offsets monotone
@@ -575,13 +577,13 @@ def _explicit_entries(
         for off, ln in parts:
             if off != pos:
                 raise ValueError(
-                    f"partition_det_kcp: document {d} is not covered exactly once (gap or overlap at offset {pos}, "
+                    f"cake_gdn_det_train_kcp_partition: document {d} is not covered exactly once (gap or overlap at offset {pos}, "
                     f"fragment starts at {off})"
                 )
             pos = off + ln
         if pos != n:
             raise ValueError(
-                f"partition_det_kcp: document {d} is covered up to {pos} of {n} tokens"
+                f"cake_gdn_det_train_kcp_partition: document {d} is covered up to {pos} of {n} tokens"
             )
     # the given per-rank order is the local buffer order: document then offset (ties: empty pieces keep their place)
     for rank in range(W):
@@ -589,7 +591,7 @@ def _explicit_entries(
         for a, b in zip(keys, keys[1:], strict=False):
             if b < a:
                 raise ValueError(
-                    f"partition_det_kcp: rank {rank}'s fragments must be listed in document then offset order "
+                    f"cake_gdn_det_train_kcp_partition: rank {rank}'s fragments must be listed in document then offset order "
                     f"(the local buffer order), got {a} before {b}"
                 )
     return entries
@@ -597,7 +599,7 @@ def _explicit_entries(
 
 def _finish(
     cu: tuple[int, ...], W: int, layout: str, entries: list[tuple[int, int, int, int]]
-) -> PartitionDetKcp:
+) -> CakeGDNDetKcpPartition:
     per_rank: list[list[tuple[int, int, int]]] = [[] for _ in range(W)]
     for doc, off, ln, rank in entries:
         per_rank[rank].append((doc, off, ln))
@@ -616,24 +618,24 @@ def _finish(
             )
     fragments = tuple(
         tuple(
-            FragmentDetKcp(doc, off, ln, r, s, prev.get((r, s)), nxt.get((r, s)))
+            CakeGDNDetKcpFragment(doc, off, ln, r, s, prev.get((r, s)), nxt.get((r, s)))
             for s, (doc, off, ln) in enumerate(frs)
         )
         for r, frs in enumerate(per_rank)
     )
-    return PartitionDetKcp(
+    return CakeGDNDetKcpPartition(
         world_size=W, layout=layout, cu_seqlens=cu, fragments=fragments
     )
 
 
-def partition_det_kcp(
+def cake_gdn_det_train_kcp_partition(
     cu_seqlens_global_cpu,
     world_size: int,
     layout: str = "contiguous",
     fragments=None,
     *,
     cut_points=None,
-) -> PartitionDetKcp:
+) -> CakeGDNDetKcpPartition:
     """The per-rank fragment tables of one packed batch (the KCP contract §3.1).
 
     ``cu_seqlens_global_cpu``: the packed documents' ``cu_seqlens`` (CPU int64 tensor or a sequence of ints);
@@ -646,19 +648,19 @@ def partition_det_kcp(
     W = int(world_size)
     if W < 1:
         raise ValueError(
-            f"partition_det_kcp: world_size must be >= 1, got {world_size}"
+            f"cake_gdn_det_train_kcp_partition: world_size must be >= 1, got {world_size}"
         )
     if fragments is not None:
         return _finish(cu, W, EXPLICIT_LAYOUT, _explicit_entries(cu, W, fragments))
     if layout not in LAYOUTS:
         raise ValueError(
-            f"partition_det_kcp: layout must be one of {LAYOUTS}, got {layout!r}"
+            f"cake_gdn_det_train_kcp_partition: layout must be one of {LAYOUTS}, got {layout!r}"
         )
     total = cu[-1]
     if layout == "contiguous":
         if cut_points is not None:
             raise ValueError(
-                "partition_det_kcp: cut_points apply to layout 'zigzag_per_document' only"
+                "cake_gdn_det_train_kcp_partition: cut_points apply to layout 'zigzag_per_document' only"
             )
         entries = _intervals_to_entries(
             cu, [(s, e, r) for r, (s, e) in enumerate(near_equal(total, W))]
@@ -666,7 +668,7 @@ def partition_det_kcp(
     elif layout == "zigzag":
         if cut_points is not None:
             raise ValueError(
-                "partition_det_kcp: cut_points apply to layout 'zigzag_per_document' only"
+                "cake_gdn_det_train_kcp_partition: cut_points apply to layout 'zigzag_per_document' only"
             )
         pieces = near_equal(total, 2 * W)
         bounds = []
@@ -875,7 +877,9 @@ def wave_rule_lpt_P(nc_frags: "list[int]", HV: int, sm_count: int) -> int:
     return best_P
 
 
-def row_tables(part: "PartitionDetKcp") -> tuple[tuple[tuple[int, bool], ...], ...]:
+def row_tables(
+    part: "CakeGDNDetKcpPartition",
+) -> tuple[tuple[tuple[int, bool], ...], ...]:
     """The row rule's input: per rank the ``(chunk count, crossing_out)`` of every fragment, in local order."""
     return tuple(
         tuple((_ceil_div(f.length, CHUNK), f.crossing_out) for f in frs)
@@ -1309,11 +1313,11 @@ MAX_HEAD_CONSUMERS = 3  # send-layout slots per head dpre row for conv_kernel_si
 # consecutive 1-token predecessors, e.g. the C3 row of record at layout D), so the table holds `halo` slots.
 
 
-def _halo_sources(part: PartitionDetKcp, halo: int):
+def _halo_sources(part: CakeGDNDetKcpPartition, halo: int):
     """Global halo sources.  ``hist[(rank, slot)][k]`` = ``(src_rank, src_slot, row_in_src)`` of history row ``k`` of a
     continuing fragment (``None`` before the document start); ``tail[(rank, slot)][m]`` = ``(succ_rank, succ_slot,
     head_row_k)`` of the successor token ``end + m`` of a fragment with a successor (``None`` past the document end)."""
-    chains: dict[int, list[FragmentDetKcp]] = {}
+    chains: dict[int, list[CakeGDNDetKcpFragment]] = {}
     for frs in part.fragments:
         for f in frs:
             if f.length > 0:
@@ -1321,7 +1325,7 @@ def _halo_sources(part: PartitionDetKcp, halo: int):
     for lst in chains.values():
         lst.sort(key=lambda f: f.off)
 
-    def owner(doc: int, t: int) -> FragmentDetKcp:
+    def owner(doc: int, t: int) -> CakeGDNDetKcpFragment:
         for g in chains[doc]:
             if g.off <= t < g.end:
                 return g
@@ -1356,7 +1360,7 @@ def _halo_sources(part: PartitionDetKcp, halo: int):
 
 
 def _halo_plan(
-    part: PartitionDetKcp, rank: int, halo: int, local_cu: tuple[int, ...]
+    part: CakeGDNDetKcpPartition, rank: int, halo: int, local_cu: tuple[int, ...]
 ) -> KcpHaloPlan:
     W = part.world_size
     hist, tail = _halo_sources(part, halo)
@@ -1417,7 +1421,7 @@ def _halo_plan(
                     free = [c for c in range(halo) if slots[c] == -1]
                     if not free:
                         raise ValueError(
-                            f"build_context_det_kcp: head row {e[2]} of fragment {e[1]} on rank {rank} has more than "
+                            f"cake_gdn_det_train_kcp_build_context: head row {e[2]} of fragment {e[1]} on rank {rank} has more than "
                             f"{halo} consumers; this cannot happen (a head token has at most {halo} consuming "
                             "predecessor fragments): the halo plan is inconsistent"
                         )
@@ -1457,19 +1461,24 @@ class KcpHeadPlan:
     addressing ``((h // Hg) * n + slot) * Hg + h % Hg`` is exact for every ``HV``; the padding is counted in that
     owner's splits, never read, and reported in ``pad_numel`` (elements per split; all zero for ``HV = 64``).
     ``full_groups`` (= no padding anywhere) and the explicit per-head tile tables are validation aids, not kernel ABI.
-    Buffer forms (the kernels' ``tile_stride`` argument per buffer is ``tile_stride``): c1 and the b1 buffer
-    with maps are interleaved PAIRS per ``(slot, head)`` — ``[B_f | M_f^T]`` (``TILE_B`` / ``TILE_M``) and
-    ``[d_f | M_f^T]`` (``TILE_D`` / ``TILE_M``; the ``M`` half of a document's last fragment is never written or
-    read); c2 (``S_in``), b2 (``dS_out``) and the offsets-only b1 buffer are dense planes.  Sender-side layout
-    ``[dst owner j][slot][hg < Hg]`` (pairs: ``[2][128][128]`` each), owner-side ``[src rank i][slot][hg]``.  Split
-    sizes are per peer rank in elements (FP32) of the flattened buffers; the buffer sizes are their sums (``numel``).
+    Buffer forms (the kernels' ``tile_stride`` argument per buffer is ``tile_stride``): c1 is interleaved PAIRS
+    per ``(slot, head)`` — ``[B_f | M_f^T]`` (``TILE_B`` / ``TILE_M``); c2 (``S_in``), b2 (``dS_out``) and both b1
+    forms are dense planes.  Sender-side layout ``[dst owner j][slot][hg < Hg]`` (pairs: ``[2][128][128]`` each),
+    owner-side ``[src rank i][slot][hg]``; the b1 buffer with maps holds per owner block the ``d_f`` plane of the
+    ``n_in`` crossing-in slots, then the ``M_f^T`` plane of the ``n_io`` maps that travel: ``[dst owner j][d: in_slot |
+    M: io_slot][hg]`` (owner side ``[src rank i][d: in_slot | M: io_slot][hg]``), where ``io_slot`` numbers the
+    rank's fragments that cross in AND out (``b1_m_index``; ``n_io_by_rank``) -- a document's last fragment has no
+    map to send, so every element of the b1 split is written.  Split sizes are per peer rank in elements (FP32) of
+    the flattened buffers; the buffer sizes are their sums (``numel``).
     Tile tables (units of ``TILE`` unless noted): ``out_tile[out_slot][h]`` (c1 send, units of ``SUMMARY_TILE``),
     ``h0_tile[in_slot][h]`` (``S_in`` = c2 receive), ``dht_tile[out_slot][h]`` (``dS_out`` = b2 receive),
-    ``b1_d_tile_d[in_slot][h]`` (offsets-only b1 send), ``b1_d_tile_dm[in_slot][h]`` / ``b1_m_tile_dm[in_slot][h]``
-    (the ``d_f`` and ``M_f^T`` halves of the b1 pair of a crossing-in fragment: ``2 * pair + TILE_D`` / ``+ TILE_M``).
+    ``b1_d_tile_d[in_slot][h]`` (offsets-only b1 send), ``b1_d_tile_dm[in_slot][h]`` / ``b1_m_tile_dm[io_slot][h]``
+    (the ``d_f`` tile of a crossing-in fragment and the ``M_f^T`` tile of a crossing-in-and-out fragment in the b1
+    buffer with maps).
     Segment tables of K1 / K2 / K3
     (``NSEG`` entries, segment ``p`` of fragment ``f`` is ``f * P + p``): ``h0_index`` (slot in ``S_in`` of segment 0
-    of a crossing-in fragment, else ``-1``), ``carry_index`` (slot in the forward carry buffer of segments ``>= 1``,
+    of a crossing-in fragment, else ``-1``), ``b1_m_index`` (``io_slot`` in the b1 map plane of segment 0 of a
+    fragment crossing in and out, else ``-1``), ``carry_index`` (slot in the forward carry buffer of segments ``>= 1``,
     ``f * (P - 1) + p - 1``, else ``-1``), ``dht_index`` / ``dcarry_index`` (the adjoint mirrors: last segment of a
     crossing-out fragment -> ``dS_out`` slot; segments ``< P - 1`` -> adjoint carry slot), ``out_index`` (``P = 1``:
     the c1 send element of a crossing-out fragment, else ``-1``; ``P > 1``: the staging slot ``= segment``),
@@ -1485,10 +1494,10 @@ class KcpHeadPlan:
     per element the element offsets (hg 0) of ``M^T`` and ``B`` in the c1 receive buffer (``fwd_m_off`` /
     ``fwd_b_off``) and of the produced ``S_in`` in the c2 send buffer (``fwd_out_off``); adjoint chains (document end
     -> start) with ``adj_d_off_d`` / ``adj_d_off_dm`` (``d_f`` in the b1 receive buffer without / with the re-sent
-    maps), ``adj_m_off_b1`` (``M^T`` in the b1 pair; ``-1`` for the document's last fragment, whose map is never
+    maps), ``adj_m_off_b1`` (``M^T`` in the b1 map plane; ``-1`` for the document's last fragment, whose map is never
     sent), ``adj_m_off_c1`` (``M^T`` in the c1 receive buffer: replay mode or ``save_transfer``) and ``adj_out_off``
     (``dS_out`` of the predecessor in the b2 send buffer).  ``hg_stride[table]`` is the element stride between
-    consecutive heads of each offset table (``SUMMARY_TILE`` in the pair buffers, ``TILE`` in the planes).  Every
+    consecutive heads of each offset table (``SUMMARY_TILE`` in the c1 pairs, ``TILE`` in the planes).  Every
     offset is ``-1`` or a non-negative multiple of 4 floats (checked here, before any launch).
     ``device_tables`` holds the int32 / int64 device copies of the tables the kernels read."""
 
@@ -1522,6 +1531,8 @@ class KcpHeadPlan:
     b1_d_tile_d: tuple[tuple[int, ...], ...]
     b1_d_tile_dm: tuple[tuple[int, ...], ...]
     b1_m_tile_dm: tuple[tuple[int, ...], ...]
+    b1_m_index: tuple[int, ...]
+    n_io_by_rank: tuple[int, ...]
     splits: dict[str, tuple[int, ...]]
     numel: dict[str, int]
     fwd_chain_doc: tuple[int, ...]
@@ -1576,7 +1587,7 @@ def _check_tile_offsets(name: str, values) -> None:
 
 
 def _build_head_plan(
-    ctx: ContextDetKcp, HV: int, *, P: int | None = None
+    ctx: CakeGDNDetKcpContext, HV: int, *, P: int | None = None
 ) -> KcpHeadPlan:
     part = ctx.partition
     W, r = part.world_size, ctx.rank
@@ -1604,10 +1615,25 @@ def _build_head_plan(
     pad_tiles = n_owners * Hg - HV
     n_in_by, n_out_by = ctx.n_in_by_rank, ctx.n_out_by_rank
     n_in, n_out = n_in_by[r], n_out_by[r]
+    # io_slot: the fragments of a rank that cross in AND out, in local order (their maps M_f travel on b1 with maps;
+    # a document's last fragment crosses in only and has no map to send)
+    io_slot_all = []
+    for rank_frs in part.fragments:
+        ios, k = [], 0
+        for f in rank_frs:
+            if f.crossing_in and f.crossing_out:
+                ios.append(k)
+                k += 1
+            else:
+                ios.append(-1)
+        io_slot_all.append(tuple(ios))
+    n_io_by = tuple(sum(1 for x in ios if x >= 0) for ios in io_slot_all)
+    n_io = n_io_by[r]
 
     # -- split sizes (elements) per peer: sender side [dst owner j][slot][hg < Hg_pad_j], owner side
-    # [src rank i][slot][hg].  c1 and b1-with-maps are interleaved pairs (SUMMARY_TILE per (slot, head));
-    # c2, b2 and the offsets-only b1 are dense planes (TILE).
+    # [src rank i][slot][hg].  c1 is interleaved pairs (SUMMARY_TILE per (slot, head)); c2, b2 and both b1 forms
+    # are dense planes (TILE); b1 with maps = the d_f plane of the n_in crossing-in slots + the M_f^T plane of the
+    # n_io slots whose map travels, per owner block.
     def _split_sizes(hg_owner, hg_self):
         return {
             "c1_send": tuple(n_out * hg_owner[j] * SUMMARY_TILE for j in range(W)),
@@ -1616,8 +1642,10 @@ def _build_head_plan(
             "c2_recv": tuple(n_in * hg_owner[j] * TILE for j in range(W)),
             "b1_send_d": tuple(n_in * hg_owner[j] * TILE for j in range(W)),
             "b1_recv_d": tuple(n_in_by[i] * hg_self * TILE for i in range(W)),
-            "b1_send_dm": tuple(n_in * hg_owner[j] * SUMMARY_TILE for j in range(W)),
-            "b1_recv_dm": tuple(n_in_by[i] * hg_self * SUMMARY_TILE for i in range(W)),
+            "b1_send_dm": tuple((n_in + n_io) * hg_owner[j] * TILE for j in range(W)),
+            "b1_recv_dm": tuple(
+                (n_in_by[i] + n_io_by[i]) * hg_self * TILE for i in range(W)
+            ),
             "b2_send": tuple(n_out_by[i] * hg_self * TILE for i in range(W)),
             "b2_recv": tuple(n_out * hg_owner[j] * TILE for j in range(W)),
         }
@@ -1650,11 +1678,17 @@ def _build_head_plan(
         j, hg = h // Hg, h % Hg
         return bases["b1_send_d"][j] // TILE + in_slot * Hg + hg
 
-    def b1_send_pair(
+    def b1_send_dm_tile(
         in_slot: int, h: int
-    ) -> int:  # units of SUMMARY_TILE, the b1 send pairs [d_f | M_f^T]
+    ) -> int:  # units of TILE, the d_f plane of the b1 send buffer with maps
         j, hg = h // Hg, h % Hg
-        return bases["b1_send_dm"][j] // SUMMARY_TILE + in_slot * Hg + hg
+        return bases["b1_send_dm"][j] // TILE + in_slot * Hg + hg
+
+    def b1_send_m_tile(
+        io_slot: int, h: int
+    ) -> int:  # units of TILE, the M_f^T plane behind the d_f plane of the owner block
+        j, hg = h // Hg, h % Hg
+        return bases["b1_send_dm"][j] // TILE + (n_in + io_slot) * Hg + hg
 
     # owner side: element offsets at hg 0 of the chain tables (used only when Hg_r > 0, where Hg_pad_r == Hg)
     def c1_recv_elem(src: int, out_slot: int) -> int:
@@ -1666,8 +1700,11 @@ def _build_head_plan(
     def b1_recv_d_elem(src: int, in_slot: int) -> int:
         return bases["b1_recv_d"][src] + in_slot * Hg * TILE
 
-    def b1_recv_pair_elem(src: int, in_slot: int) -> int:
-        return bases["b1_recv_dm"][src] + in_slot * Hg * SUMMARY_TILE
+    def b1_recv_dm_elem(src: int, in_slot: int) -> int:
+        return bases["b1_recv_dm"][src] + in_slot * Hg * TILE
+
+    def b1_recv_m_elem(src: int, io_slot: int) -> int:
+        return bases["b1_recv_dm"][src] + (n_in_by[src] + io_slot) * Hg * TILE
 
     def b2_send_elem(dst: int, out_slot: int) -> int:
         return bases["b2_send"][dst] + out_slot * Hg * TILE
@@ -1694,14 +1731,15 @@ def _build_head_plan(
         if f.crossing_in
     )
     b1_d_tile_dm = tuple(
-        tuple(2 * b1_send_pair(ctx.in_slot[f.slot], h) + TILE_D for h in range(HV))
+        tuple(b1_send_dm_tile(ctx.in_slot[f.slot], h) for h in range(HV))
         for f in mine
         if f.crossing_in
     )
+    io_slot = io_slot_all[r]
     b1_m_tile_dm = tuple(
-        tuple(2 * b1_send_pair(ctx.in_slot[f.slot], h) + TILE_M for h in range(HV))
+        tuple(b1_send_m_tile(io_slot[f.slot], h) for h in range(HV))
         for f in mine
-        if f.crossing_in
+        if io_slot[f.slot] >= 0
     )
 
     # -- segment plan and the K1 / K2 / K3 segment index tables
@@ -1733,10 +1771,12 @@ def _build_head_plan(
         [],
         [],
     )
+    b1_m_index = []
     for f in mine:
         for p in range(P):
             s = f.slot * P + p
             h0_index.append(ctx.in_slot[f.slot] if (p == 0 and f.crossing_in) else -1)
+            b1_m_index.append(io_slot[f.slot] if p == 0 else -1)
             carry_index.append(f.slot * (P - 1) + p - 1 if p >= 1 else -1)
             dht_index.append(
                 ctx.out_slot[f.slot] if (p == P - 1 and f.crossing_out) else -1
@@ -1801,11 +1841,11 @@ def _build_head_plan(
                 e, pred = frs[i], frs[i - 1]
                 in_s = ctx.in_slot_all[e.rank][e.slot]
                 adj_dd.append(b1_recv_d_elem(e.rank, in_s))
-                pair = b1_recv_pair_elem(e.rank, in_s)
-                adj_ddm.append(pair + TILE_D * TILE)
+                adj_ddm.append(b1_recv_dm_elem(e.rank, in_s))
                 if e.crossing_out:
                     out_s = ctx.out_slot_all[e.rank][e.slot]
-                    adj_mb1.append(pair + TILE_M * TILE)
+                    io_s = io_slot_all[e.rank][e.slot]
+                    adj_mb1.append(b1_recv_m_elem(e.rank, io_s))
                     adj_mc1.append(c1_recv_elem(e.rank, out_s) + TILE_M * TILE)
                 else:
                     adj_mb1.append(-1)
@@ -1832,8 +1872,8 @@ def _build_head_plan(
         "fwd_b_off": SUMMARY_TILE,
         "fwd_out_off": TILE,
         "adj_d_off_d": TILE,
-        "adj_d_off_dm": SUMMARY_TILE,
-        "adj_m_off_b1": SUMMARY_TILE,
+        "adj_d_off_dm": TILE,
+        "adj_m_off_b1": TILE,
         "adj_m_off_c1": SUMMARY_TILE,
         "adj_out_off": TILE,
     }
@@ -1841,7 +1881,7 @@ def _build_head_plan(
         "c1": TILE_STRIDE_PAIR,
         "c2": TILE_STRIDE_PLANE,
         "b1_d": TILE_STRIDE_PLANE,
-        "b1_dm": TILE_STRIDE_PAIR,
+        "b1_dm": TILE_STRIDE_PLANE,
         "b2": TILE_STRIDE_PLANE,
         "staging": TILE_STRIDE_PLANE,
         "carry": TILE_STRIDE_PLANE,
@@ -1870,6 +1910,7 @@ def _build_head_plan(
         {
             "seg_chunk_start": (seg_table, i32, None),
             "h0_index": (h0_index, i32, None),
+            "b1_m_index": (b1_m_index, i32, None),
             "carry_index": (carry_index, i32, None),
             "dht_index": (dht_index, i32, None),
             "dcarry_index": (dcarry_index, i32, None),
@@ -1926,6 +1967,8 @@ def _build_head_plan(
         b1_d_tile_d=b1_d_tile_d,
         b1_d_tile_dm=b1_d_tile_dm,
         b1_m_tile_dm=b1_m_tile_dm,
+        b1_m_index=tuple(b1_m_index),
+        n_io_by_rank=n_io_by,
         splits=splits,
         numel=numel,
         fwd_chain_doc=tuple(fwd_doc),
@@ -1966,10 +2009,10 @@ class KcpSequence:
         self.log.clear()
 
 
-_DEFAULT = object()  # ContextDetKcp: argument omitted
+_DEFAULT = object()  # CakeGDNDetKcpContext: argument omitted
 
 
-class ContextDetKcp:
+class CakeGDNDetKcpContext:
     """One rank's view of the partition: CPU ints / tuples plus small int32 device tables; built once, reused across
     layers; never reads a tensor's contents.
 
@@ -1992,7 +2035,7 @@ class ContextDetKcp:
     behaves as the frozen dataclass it was: the same constructor, ``dataclasses.FrozenInstanceError`` on attribute
     assignment, identity equality; ``_FIELDS`` lists the fields in constructor order."""
 
-    partition: PartitionDetKcp
+    partition: CakeGDNDetKcpPartition
     rank: int
     world_size: int
     group: object
@@ -2102,7 +2145,7 @@ class ContextDetKcp:
         return f"{type(self).__qualname__}({fields})"
 
     @property
-    def fragments(self) -> tuple[FragmentDetKcp, ...]:
+    def fragments(self) -> tuple[CakeGDNDetKcpFragment, ...]:
         return self.partition.fragments[self.rank]
 
     @property
@@ -2130,7 +2173,7 @@ class ContextDetKcp:
 
     def prepare(self, H_qk: int, HV: int, *, P: int | None = None):
         """The device-resident GDN table bundle of this context for the head pair, built once per
-        ``(HV, sm_count, P)`` key at first use (never at ``build_context_det_kcp``, which has no ``HV``, and
+        ``(HV, sm_count, P)`` key at first use (never at ``cake_gdn_det_train_kcp_build_context``, which has no ``HV``, and
         never per call).  ``HV`` must be a multiple of ``H_qk``.  Delegates to :func:`cake_tables.prepare`."""
         from . import (
             cake_tables,
@@ -2209,8 +2252,8 @@ def _device_of(device) -> torch.device:
     return device
 
 
-def build_context_det_kcp(
-    part: PartitionDetKcp,
+def cake_gdn_det_train_kcp_build_context(
+    part: CakeGDNDetKcpPartition,
     group,
     rank: int,
     device,
@@ -2218,8 +2261,8 @@ def build_context_det_kcp(
     *,
     sm_count: int | None = None,
     p_rule: str = P_RULE_DEFAULT,
-) -> ContextDetKcp:
-    """The :class:`ContextDetKcp` of ``rank`` (the KCP contract §3.1).
+) -> CakeGDNDetKcpContext:
+    """The :class:`CakeGDNDetKcpContext` of ``rank`` (the KCP contract §3.1).
 
     ``group`` is the caller's ``torch.distributed`` process group (or ``None`` on the CPU / in a single process);
     when a group is given and the default process group is initialized, its size and this process's rank are
@@ -2237,25 +2280,27 @@ def build_context_det_kcp(
     the row rules that lower ``"row_cost_lpt"``'s ``P`` (:func:`kcp_plan_row`), all kept for the A/B record); the public API
     never selects a rule other than the default.
     """
-    if not isinstance(part, PartitionDetKcp):
+    if not isinstance(part, CakeGDNDetKcpPartition):
         raise TypeError(
-            "build_context_det_kcp: part must be the PartitionDetKcp of partition_det_kcp()"
+            "cake_gdn_det_train_kcp_build_context: part must be the CakeGDNDetKcpPartition of cake_gdn_det_train_kcp_partition()"
         )
     W = part.world_size
     rank = int(rank)
     if not 0 <= rank < W:
-        raise ValueError(f"build_context_det_kcp: rank {rank} out of range [0, {W})")
+        raise ValueError(
+            f"cake_gdn_det_train_kcp_build_context: rank {rank} out of range [0, {W})"
+        )
     if group is not None and dist.is_available() and dist.is_initialized():
         gw, gr = dist.get_world_size(group), dist.get_rank(group)
         if gw != W or gr != rank:
             raise ValueError(
-                f"build_context_det_kcp: the process group has world_size {gw} / rank {gr}, the partition and the call "
+                f"cake_gdn_det_train_kcp_build_context: the process group has world_size {gw} / rank {gr}, the partition and the call "
                 f"say {W} / {rank}"
             )
     halo = int(conv_kernel_size) - 1
     if halo < 0:
         raise ValueError(
-            f"build_context_det_kcp: conv_kernel_size must be >= 1, got {conv_kernel_size}"
+            f"cake_gdn_det_train_kcp_build_context: conv_kernel_size must be >= 1, got {conv_kernel_size}"
         )
     device = _device_of(device)
     if sm_count is None:
@@ -2267,17 +2312,17 @@ def build_context_det_kcp(
     sm_count = int(sm_count)
     if sm_count < 1:
         raise ValueError(
-            f"build_context_det_kcp: sm_count must be >= 1, got {sm_count}"
+            f"cake_gdn_det_train_kcp_build_context: sm_count must be >= 1, got {sm_count}"
         )
     if p_rule not in P_RULES:
         raise ValueError(
-            f"build_context_det_kcp: p_rule must be one of {P_RULES}, got {p_rule!r}"
+            f"cake_gdn_det_train_kcp_build_context: p_rule must be one of {P_RULES}, got {p_rule!r}"
         )
     mine = part.fragments[rank]
     n_frag = len(mine)
     if n_frag > MAX_FRAGS:
         raise ValueError(
-            f"build_context_det_kcp: rank {rank} holds {n_frag} fragments; the kernels' tables admit at most {MAX_FRAGS}"
+            f"cake_gdn_det_train_kcp_build_context: rank {rank} holds {n_frag} fragments; the kernels' tables admit at most {MAX_FRAGS}"
         )
     local_cu = part.local_cu_seqlens(rank)
     T_r = local_cu[-1]
@@ -2349,7 +2394,7 @@ def build_context_det_kcp(
         name: uploaded[name]
         for name in ("hist_row_off", "tail_row_off", "head_row_off", "hist_index")
     }
-    return ContextDetKcp(
+    return CakeGDNDetKcpContext(
         partition=part,
         rank=rank,
         world_size=W,
@@ -2413,18 +2458,18 @@ __all__ = [
     "TILE",
     "TILE_B",
     "TILE_M",
-    "ContextDetKcp",
-    "FragmentDetKcp",
+    "CakeGDNDetKcpContext",
+    "CakeGDNDetKcpFragment",
     "KcpHaloPlan",
     "KcpHeadPlan",
-    "PartitionDetKcp",
+    "CakeGDNDetKcpPartition",
     "KcpSegmentPlan",
     "KcpSequence",
-    "build_context_det_kcp",
+    "cake_gdn_det_train_kcp_build_context",
     "chunk_geometry",
     "chunk_tables",
     "head_groups",
-    "partition_det_kcp",
+    "cake_gdn_det_train_kcp_partition",
     "kcp_plan",
     "near_equal",
     "owner_of_head",
@@ -2441,10 +2486,3 @@ __all__ = [
     "wave_rule_lpt_cost_10ns",
     "wave_rule_lpt_P",
 ]
-
-# Compatibility aliases: the pre-rename names bound to the same objects (not in ``__all__``).
-KcpContext = ContextDetKcp
-KcpFragment = FragmentDetKcp
-KcpPartition = PartitionDetKcp
-build_kcp_context = build_context_det_kcp
-kcp_partition = partition_det_kcp

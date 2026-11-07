@@ -12,14 +12,19 @@ shared by every token and head::
     rstd = 1 / sqrt(mean(x^2) + eps)                     # FP32
     y    = bf16(((x * rstd) * weight) * silu(z))         # FP32, one rounding
 
-``det`` runs FlashInfer's deterministic package (``_vendor/cake_rmsnorm_silu_gate_det_train_backend``): the weight
+``det`` runs FlashInfer's deterministic package (``_vendor/cake_rmsnorm_silu_gate_det_train``): the weight
 gradient is summed in FP32 per CTA chunk and in FP64 across the chunks in an order fixed by the row count, so it is
-bitwise reproducible. ``fast`` runs the non-deterministic package (``_vendor/cake_rmsnorm_silu_gate_train_backend``):
+bitwise reproducible. ``fast`` runs the non-deterministic package (``_vendor/cake_rmsnorm_silu_gate_nondet_train``):
 the same forward arithmetic (``y`` is ``det``'s bits) and a one-kernel backward whose ``dx`` and ``dz`` are ``det``'s
-bits and whose CTAs add their FP64 column sums with atomics, so the weight gradient may differ between runs, always
-within ``det``'s bound ``|dw| * 2^-7 + sum|terms| * 2^-20``. ``fast`` serves every call ``det`` serves; while
-``torch.use_deterministic_algorithms(True)`` is in effect, which its backward refuses, a call runs ``det`` and logs it
-once.
+bits. Above 256 rows its threads fold the weight-gradient terms of at most 16 rows at a time in FP32 into FP64 column
+sums, and its CTAs add those sums to FP64 accumulators with atomics; on sm_100a from 800 and on sm_103a from 700 rows
+per SM up to 12000, the backward keeps the folded runs and a CTA's column sums as FP32 two-sum pairs (a sum and its
+rounding error) instead, converted to FP64 once per column for the atomic add (flashinfer-ai/flashinfer#8840 and
+#8785). The order of those additions depends on scheduling, so the weight gradient may differ between runs, within
+``det``'s bound ``|dw| * 2^-7 + sum|terms| * 2^-20`` while the gate, the terms and the sums are FP32 normal numbers or
+zero. Up to 256 rows one cluster of 16 CTAs adds its CTAs' FP32 partials in a fixed order in FP64, the same bits on
+every call. ``fast`` serves every call ``det`` serves; while ``torch.use_deterministic_algorithms(True)`` is in
+effect, which its backward refuses, a call runs ``det`` and logs it once.
 
 A call reads the configured variant (``miles_ext_kernels.cake.configure``) when its forward runs; its backward runs
 the same package. :func:`prebuild` builds the libraries of both packages for a device, so no call compiles.
@@ -40,7 +45,7 @@ __all__ = ["check_supported", "prebuild", "release", "rmsnorm_silu_gate"]
 OP = "gated_rmsnorm"
 HEAD_DIM = 128
 # the vendored package of each variant
-PACKAGES = {"det": "cake_rmsnorm_silu_gate_det_train_backend", "fast": "cake_rmsnorm_silu_gate_train_backend"}
+PACKAGES = {"det": "cake_rmsnorm_silu_gate_det_train", "fast": "cake_rmsnorm_silu_gate_nondet_train"}
 
 _BACKEND = "--linear-attention-output-norm-backend cake"
 
@@ -82,7 +87,7 @@ def check_supported(
 ) -> None:
     """Raise ``ValueError`` unless the Cake kernels run this gated output norm on ``device`` (default: the current
     CUDA device): a SiLU gate, rows of 128, a BF16 weight without bias, compute capability 10.0, 10.3 or 10.7;
-    ``RuntimeError`` when the toolkit cannot build the device's kernels (SM107a needs CUDA 13.4 or newer)."""
+    ``RuntimeError`` when the toolkit cannot build the device's kernels (they need CUDA 13.4 or newer)."""
     if activation != "silu":
         raise ValueError(
             f"{_BACKEND} computes RMSNorm(x) * w * SiLU(z), but this model gates its output norm with "
@@ -102,7 +107,8 @@ def prebuild(*, device=None, max_workers: int | None = None) -> list[Path]:
     (default: the current CUDA device); returns their cache paths. Idempotent.
 
     Every route of both packages on that architecture is built: the forwards and backwards of every row-count tier
-    (short, regular, mid, long) and both weight-gradient dtypes, so no call of any shape compiles afterwards.
+    (short, regular, mid, long, extra-long) and both weight-gradient dtypes, so no call of any shape compiles
+    afterwards.
     ``NotImplementedError`` for an unsupported device, ``RuntimeError`` for a toolkit too old for it.
     """
     arch = loader.device_arch(device)
@@ -139,4 +145,4 @@ def rmsnorm_silu_gate(x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor, ep
     package = _package(variant)
     if variant == "det":
         return package.cake_rmsnorm_silu_gate_det(x, z, weight, eps)
-    return package.cake_rmsnorm_silu_gate(x, z, weight, eps, deterministic=False)
+    return package.cake_rmsnorm_silu_gate_nondet(x, z, weight, eps)

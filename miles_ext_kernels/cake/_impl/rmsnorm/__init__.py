@@ -8,7 +8,7 @@ The implementation of ``miles_ext_kernels.cake.rmsnorm``: its entry points, ``pr
 
 from miles_ext_kernels.cake._runtime import loader
 
-loader.install_op("rmsnorm")  # both packages build through the runtime's loader; fast runs det's for det calls
+loader.install_op("rmsnorm")  # both packages build through the runtime's loader; each variant runs its own package
 
 from .ops import (  # noqa: E402
     ZeroCenteredRMSNorm,

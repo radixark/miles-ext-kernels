@@ -13,21 +13,21 @@ or an FLA ``FLACPContext``.  ``K = V = 128``, ``HV % H == 0`` (grouped value hea
 ``repeat_interleave``), BF16 q/k/v.  A call reads the variant (``config.variant("gdn")``) and
 ``--cake-gdn-recompute-state`` when it runs; the backward uses what its forward read.  It runs:
 
-=============================================  =========================  =========================
-call                                           det                        fast
-=============================================  =========================  =========================
-no ``cp_context``                              ``cake_gdn_det_train``     ``cake_gdn_train``
-a ``KcpContext``                               ``cake_gdn_det_train_kcp`` ``cake_gdn_train_kcp``
-an FLA context, or a ``KcpContext`` call the   ``cake_gdn_fla_cp_det``    ``cake_gdn_fla_cp_det``
-KCP packages do not serve                                                 (logged once)
-=============================================  =========================  =========================
+=============================================  ==========================  =============================
+call                                           det                         fast
+=============================================  ==========================  =============================
+no ``cp_context``                              ``cake_gdn_det_train``      ``cake_gdn_nondet_train``
+a ``KcpContext``                               ``cake_gdn_det_train_kcp``  ``cake_gdn_nondet_train_kcp``
+an FLA context, or a ``KcpContext`` call the   ``cake_gdn_fla_cp_det``     ``cake_gdn_fla_cp_det``
+KCP packages do not serve                                                  (logged once)
+=============================================  ==========================  =============================
 
-* ``cake_gdn_det_train`` (``chunk_gated_delta_rule_det``): both passes repeat bit for bit call to call (no atomic on a
-  value, a fixed reduction order, a launch plan that is a pure function of the layout and the device).
-* ``cake_gdn_train``: within the det package's accuracy budgets.
-* ``cake_gdn_det_train_kcp`` (``chunk_gdn_det_kcp``): bit for bit run to run for a fixed partition; ``cake_gdn_train_kcp``
-  (``chunk_gdn_kcp``) within its accuracy budgets.  Their contract: FP32 g and beta (a BF16 beta is cast exactly, and
-  autograd rounds the FP32 ``dbeta`` back), no initial or final state.
+* ``cake_gdn_det_train`` (``cake_gdn_det``): both passes repeat bit for bit call to call (no atomic on a value, a fixed
+  reduction order, a launch plan that is a pure function of the layout and the device).
+* ``cake_gdn_nondet_train`` (``cake_gdn_nondet``): within the det package's accuracy budgets.
+* ``cake_gdn_det_train_kcp`` (``cake_gdn_det_kcp``): bit for bit run to run for a fixed partition;
+  ``cake_gdn_nondet_train_kcp`` (``cake_gdn_nondet_kcp``) within its accuracy budgets.  Their contract: FP32 g and beta
+  (a BF16 beta is cast exactly, and autograd rounds the FP32 ``dbeta`` back), no initial or final state.
 * ``cake_gdn_fla_cp_det``: the det kernels with FLA's context parallelism, generated from the flash-linear-attention
   v0.5.2 ``chunk_gated_delta_rule`` dataflow (chunk 64, K = V = 128, in-kernel q/k L2 normalisation, FLA's
   context-parallel state passing): register-MMA kernels with FP32 inter-chunk state carriers, BF16 hand-offs at the
@@ -107,8 +107,9 @@ HEAD_DIM = 128
 REG_SCAN_CONFIGS = ((32, 2), (32, 1), (64, 1))
 # Tests may pin a scan configuration of the generated kernels; production always derives it from shape and device.
 FORCED_SCAN_CONFIG: tuple[int, int] | None = None
-# Options of the KCP packages' calls (``OptionsDetKcp`` / ``OptionsKcp`` fields, e.g. ``segments`` or the torch
-# emulation ``backend="fake"``) for tests and experiments; production passes none and runs the packages' defaults.
+# Options of the KCP packages' calls (``CakeGDNDetKcpOptions`` / ``CakeGDNNondetKcpOptions`` fields, e.g. ``segments``
+# or the torch emulation ``backend="fake"``) for tests and experiments; production passes none and runs the packages'
+# defaults.
 KCP_OPTIONS: dict[str, Any] | None = None
 
 
@@ -2086,16 +2087,17 @@ def _no_tokens(q, k, v, g, beta, initial_state, output_final_state, cu_seqlens):
 # name -> the package under ``_vendor/``
 _PACKAGES = {
     "det": "cake_gdn_det_train",
-    "fast": "cake_gdn_train",
+    "fast": "cake_gdn_nondet_train",
     "det_kcp": "cake_gdn_det_train_kcp",
-    "fast_kcp": "cake_gdn_train_kcp",
+    "fast_kcp": "cake_gdn_nondet_train_kcp",
 }
 
 
 @cache
 def _package(name: str):
     """The vendored package ``name`` with the runtime loader installed: ``det`` is ``cake_gdn_det_train``, ``fast``
-    ``cake_gdn_train``, ``det_kcp`` ``cake_gdn_det_train_kcp`` and ``fast_kcp`` ``cake_gdn_train_kcp``."""
+    ``cake_gdn_nondet_train``, ``det_kcp`` ``cake_gdn_det_train_kcp`` and ``fast_kcp``
+    ``cake_gdn_nondet_train_kcp``."""
     try:
         return loader.load_package(_PACKAGES[name])
     except KeyError:
@@ -2154,8 +2156,8 @@ def _vendored_call(
         "save_state": _save_state(),
     }
     if variant == "det":
-        return package.chunk_gated_delta_rule_det(q, k, v, g, beta, **kwargs)
-    return package.chunk_gated_delta_rule(q, k, v, g, beta, **kwargs, deterministic=False)
+        return package.cake_gdn_det(q, k, v, g, beta, **kwargs)
+    return package.cake_gdn_nondet(q, k, v, g, beta, **kwargs)
 
 
 # --------------------------------------------------------------------------- #
@@ -2235,8 +2237,8 @@ def _kcp_apply(variant: str, q, k, v, g, beta, scale: float, use_qk_l2norm: bool
         "options": None if KCP_OPTIONS is None else dict(KCP_OPTIONS),
     }
     if variant == "det":
-        return package.chunk_gdn_det_kcp(q, k, v, g, beta, ctx, **kwargs)
-    return package.chunk_gdn_kcp(q, k, v, g, beta, ctx, deterministic=False, **kwargs)
+        return package.cake_gdn_det_kcp(q, k, v, g, beta, ctx, **kwargs)
+    return package.cake_gdn_nondet_kcp(q, k, v, g, beta, ctx, **kwargs)
 
 
 def kcp_chunk_gated_delta_rule(
@@ -2253,11 +2255,11 @@ def kcp_chunk_gated_delta_rule(
     """The KCP package of the configured variant on this rank's tokens of ``kcp_context``; returns the output.
 
     ``det`` runs ``cake_gdn_det_train_kcp`` (bit for bit run to run for a fixed partition), ``fast``
-    ``cake_gdn_train_kcp`` (within the det package's accuracy budgets).  The operands are this rank's tokens in the
-    context's local order (``kcp_context.num_tokens``, local sequences ``kcp_context.cu_seqlens``): q / k ``[1, T_r, H,
-    128]``, v ``[1, T_r, HV, 128]`` BF16 with ``HV % H == 0``, g ``[1, T_r, HV]`` (FP32), beta ``[1, T_r, HV]`` after the
-    sigmoid (BF16 or FP32).  No initial or final state.  Unlike :func:`chunk_gated_delta_rule` it runs the KCP package
-    only: a call the package does not serve raises.
+    ``cake_gdn_nondet_train_kcp`` (within the det package's accuracy budgets).  The operands are this rank's tokens in
+    the context's local order (``kcp_context.num_tokens``, local sequences ``kcp_context.cu_seqlens``): q / k ``[1,
+    T_r, H, 128]``, v ``[1, T_r, HV, 128]`` BF16 with ``HV % H == 0``, g ``[1, T_r, HV]`` (FP32), beta ``[1, T_r, HV]``
+    after the sigmoid (BF16 or FP32).  No initial or final state.  Unlike :func:`chunk_gated_delta_rule` it runs the
+    KCP package only: a call the package does not serve raises.
     """
     if not isinstance(kcp_context, KcpContext):
         raise TypeError(f"kcp_context must be a KcpContext (build_kcp_context), not {type(kcp_context).__name__}")
@@ -2444,7 +2446,7 @@ def chunk_gated_delta_rule(
     ``packed_seq_params.cu_seqlens_host``, or a CPU tensor) selects the exact per-layout chunk table that
     every layer of the micro-batch shares; without it the table is built on the device per call.
 
-    Without a ``cp_context``, ``det`` runs ``cake_gdn_det_train`` and ``fast`` ``cake_gdn_train``.  Under any
+    Without a ``cp_context``, ``det`` runs ``cake_gdn_det_train`` and ``fast`` ``cake_gdn_nondet_train``.  Under any
     ``cp_context`` the contract is FLA's: ``initial_state`` and ``output_final_state`` are rejected, and the context's
     boundaries replace ``cu_seqlens`` / ``cu_seqlens_cpu``.  With a
     :class:`~miles_ext_kernels.cake._impl.gdn.kcp.KcpContext` the operands are this rank's tokens of it and the call runs
@@ -2510,7 +2512,7 @@ def prebuild(*, device: Any = None, max_workers: int | None = None) -> list[Path
     returns no call compiles one of them.  One exception: the third-party Triton kernels that a caller-supplied FLA
     ``cp_context`` runs (FLA's own context-parallel pre-processing) are not prewarmed; they compile in FLA on their
     first call.  ``NotImplementedError`` for a device other than SM100a / SM103a / SM107a, ``RuntimeError`` when the
-    toolkit is too old for the device (SM107a: CUDA 13.4).  Returns the cache paths.
+    toolkit is older than CUDA 13.4.  Returns the cache paths.
     """
     arch = loader.device_arch(device)
     paths: list[Path] = []

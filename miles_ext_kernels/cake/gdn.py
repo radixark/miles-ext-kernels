@@ -39,8 +39,8 @@ OP = OpSpec(
         "cake_gdn_det_train",
         "cake_gdn_det_train_kcp",
         "cake_gdn_fla_cp_det",
-        "cake_gdn_train",
-        "cake_gdn_train_kcp",
+        "cake_gdn_nondet_train",
+        "cake_gdn_nondet_train_kcp",
     ),
     exports=("KcpContext", "build_kcp_context", "chunk_gated_delta_rule", "kcp_chunk_gated_delta_rule"),
     flags=(

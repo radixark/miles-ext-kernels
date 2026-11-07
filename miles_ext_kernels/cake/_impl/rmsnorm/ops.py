@@ -13,22 +13,24 @@ The kernels return the weight gradient in FP32; autograd rounds it into the para
 TE's norm it accepts ``sequence_parallel``, which, when given, it sets on the weight (Megatron all-reduces the gradient
 of such a parameter across the tensor-parallel ranks), builds on the meta device and has ``reset_parameters``.
 
-Both variants go through FlashInfer's non-deterministic package (``_vendor/cake_rmsnorm_train_backend``):
-``deterministic=True`` runs its deterministic sibling (``_vendor/cake_rmsnorm_det_train_backend``), whose backward is,
-per token-count window, a main kernel and a fixed-order reduce (``dw`` bitwise reproducible for a given token count
-and SM count) or, at the smallest token counts on SM100a / SM103a, one kernel that sums each ``dw`` column in a fixed
-row order (``dw`` bitwise reproducible for a given token count on any SM count); ``deterministic=False`` runs the same
-forward programs and, per token-count window, a single-kernel backward whose CTAs add their ``dw`` sums with FP64
-atomics (``dw`` not bitwise reproducible; ``dx`` reproducible, within one BF16 ulp of ``det``'s), a column-task kernel
-at the smallest token counts, or ``det``'s kernel pair. A forward reads the configured variant
-(``--cake-rmsnorm-variant`` through ``miles_ext_kernels.configure``; ``det`` when unconfigured) when it runs, and its
-backward runs the same one. ``fast`` serves every hidden size ``det`` serves; it runs ``det``, logged once, while
-``torch.use_deterministic_algorithms(True)`` is in effect, which the non-deterministic package refuses.
+``det`` runs FlashInfer's deterministic package (``_vendor/cake_rmsnorm_det_train``), whose backward is, per
+token-count window, a main kernel and a fixed-order reduce (``dw`` bitwise reproducible for a given token count and SM
+count) or, at the smallest token counts, one kernel that sums each ``dw`` column in a fixed row order (``dw`` bitwise
+reproducible for a given token count on any SM count). ``fast`` runs the non-deterministic package
+(``_vendor/cake_rmsnorm_nondet_train``): the same forward programs and, per token-count window, a single-kernel
+backward whose CTAs add their ``dw`` sums into workspace sums in the order they finish (``dw`` not bitwise
+reproducible; ``dx`` reproducible, within one BF16 ulp of ``det``'s) or ``det``'s kernel pair, both rendered in that
+package. A forward reads the configured variant (``--cake-rmsnorm-variant`` through ``miles_ext_kernels.configure``;
+``det`` when unconfigured) when it runs, and its backward runs the same one. ``fast`` serves every hidden size ``det``
+serves; it runs ``det``, logged once, while ``torch.use_deterministic_algorithms(True)`` is in effect, under which the
+non-deterministic package's backward raises. The backward of a ``fast`` forward that ran outside that setting stays
+``fast``: if it runs while the setting is in effect, the package raises (under ``warn_only=True`` it warns once and
+runs ``fast``).
 
 Only hidden sizes with FP32-weight routes in both packages run (:func:`supported_hidden_sizes`); the module raises at
 construction for any other. The kernels pick a program per token-count window: :func:`prebuild` builds every program
-of both variants for one hidden size, so that no call compiles; constructing the module builds nothing. SM107a needs a
-CUDA 13.4 or newer toolkit to build its kernels.
+of both variants for one hidden size, so that no call compiles; constructing the module builds nothing. Every
+architecture needs a CUDA 13.4 or newer toolkit to build its kernels.
 
 On SM107a, hidden size 4096 also launches programs with more shared memory per block than the standard opt-in
 (232448 B): ``det``'s backward above 4096 tokens and ``fast``'s from 4097 to 24064 tokens. They run in CUDA 13.4's
@@ -66,7 +68,7 @@ _OP = "rmsnorm"
 _SELECTOR = "--linear-attention-input-norm cake"
 _KERNELS = "the Cake RMSNorm kernels"
 # the packages of the deterministic and the non-deterministic kernels, in this order
-_PACKAGES = ("cake_rmsnorm_det_train_backend", "cake_rmsnorm_train_backend")
+_PACKAGES = ("cake_rmsnorm_det_train", "cake_rmsnorm_nondet_train")
 # CUDA 13.4's oversized shared-memory mode: the binding of a program above the standard opt-in sets it on the kernel
 # (cudaFuncAttributeSharedMemoryMode) before the launch. A runtime older than 13.4 rejects the attribute
 # ("cudaFuncSetAttribute failed: invalid argument"); a driver without the mode reports no oversized ceiling.
@@ -79,8 +81,8 @@ _CU_DEVICE_ATTRIBUTE_MAX_OVERSIZED_SHARED_MEMORY_PER_BLOCK = 150
 
 @functools.cache
 def _packages() -> tuple[ModuleType, ModuleType]:
-    """``(det, fast)``: the vendored packages, building their libraries through the runtime's loader. ``fast`` imports
-    ``det`` as its sibling for ``deterministic=True``."""
+    """``(det, fast)``: the vendored packages, building their libraries through the runtime's loader. Each runs its own
+    kernels only."""
     det, fast = map(loader.load_package, _PACKAGES)
     return det, fast
 
@@ -199,7 +201,7 @@ def _check_shared_memory(arch: str, hidden_size: int, index: int, cuda_major: in
 def _check_device(hidden_size: int, device: Any) -> str:
     """The architecture of the CUDA ``device``, checked to serve ``hidden_size`` and its kernels to build with the
     toolkit and launch in this process: ``NotImplementedError`` for another architecture, ``ValueError`` for a hidden
-    size it does not serve, ``RuntimeError`` for a toolkit too old to build it (SM107a needs CUDA 13.4) or a width
+    size it does not serve, ``RuntimeError`` for a toolkit older than CUDA 13.4 or a width
     whose oversized shared-memory programs this process cannot launch (SM107a at 4096 needs a CUDA 13.4 runtime)."""
     arch = loader.device_arch(device)
     supported = supported_hidden_sizes(arch)
@@ -236,7 +238,7 @@ def check_supported(hidden_size: int, device: Any = None) -> None:
 
     The hidden size is checked first (``ValueError``), so a process without CUDA gets that error too; then the device:
     ``NotImplementedError`` without CUDA or for an architecture other than SM100a / SM103a / SM107a, ``RuntimeError``
-    when the toolkit cannot build its kernels (SM107a needs CUDA 13.4 or newer) or the process cannot launch the
+    when the toolkit cannot build its kernels (they need CUDA 13.4 or newer) or the process cannot launch the
     programs of that width in the oversized shared-memory mode (SM107a at 4096 needs a CUDA 13.4 or newer runtime).
     """
     hidden_size = int(hidden_size)
@@ -292,12 +294,13 @@ def zero_centered_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e
     ``x``'s shape. The first call of a width on a CUDA device runs :func:`check_supported` for them, so a width this
     process cannot launch raises its ``RuntimeError`` before any launch.
     """
-    deterministic = _variant() == "det"
+    variant = _variant()
     hidden = x.shape[-1]
     if x.is_cuda:
         _check_call(x.device.index, hidden)
-    _, fast = _packages()
-    y = fast.cake_rmsnorm(x.reshape(-1, hidden), 1.0 + weight.float(), eps, deterministic=deterministic)
+    det, fast = _packages()
+    rows, scale = x.reshape(-1, hidden), 1.0 + weight.float()
+    y = det.cake_rmsnorm_det(rows, scale, eps) if variant == "det" else fast.cake_rmsnorm_nondet(rows, scale, eps)
     return y.view(x.shape)
 
 

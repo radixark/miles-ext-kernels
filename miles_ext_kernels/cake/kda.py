@@ -13,16 +13,16 @@ ranks of a process group. Two variants, read when a call runs:
 
 * ``det`` (``cake_kda_det_train``, ``cake_kda_det_train_kcp``): fixed-order reductions, no atomics; the same inputs
   give the same bits.
-* ``fast`` (``cake_kda_train``, ``cake_kda_train_kcp``, FlashInfer's ``deterministic=False``): with the activated
-  gate its backward runs other gate-gradient programs than ``det`` on some rows; with the raw gate its parameter
-  gradients are reduced in FP64 in no fixed order on SM100a / SM103a. It has no in-kernel q / k L2 norm: such a call
-  runs ``det`` and says so once.
+* ``fast`` (``cake_kda_nondet_train``, ``cake_kda_nondet_train_kcp``): with the activated gate and without the
+  in-kernel q / k L2 norm its backward runs other gate-gradient programs than ``det`` on some rows, so ``dg`` may
+  differ from ``det``'s by FP32 rounding. With the raw gate or the in-kernel L2 norm it gives ``det``'s results bit
+  for bit.
 
 miles selects the op with ``--kda-backend cake`` (under ``--use-miles-ext-kernels``), builds the libraries when a
 layer is built (``miles_ext_kernels.cake.prebuild("kda", num_heads=...)``) and calls :func:`chunk_kda` in its
-forward. Every miles call takes the in-kernel q / k L2 norm, which only ``det`` serves, so miles may choose ``det``
-only: ``--cake-kda-variant`` is hidden and carries ``det`` to every process (a ``fast`` choice would change no
-program miles runs). Direct callers choose either variant with ``miles_ext_kernels.configure(cake_kda_variant=...)``.
+forward. Every miles call takes the raw gate and the in-kernel q / k L2 norm, where ``fast`` gives ``det``'s results,
+so miles keeps ``det`` for KDA in this release: ``--cake-kda-variant`` is hidden and carries ``det`` to every
+process. Direct callers choose either variant with ``miles_ext_kernels.configure(cake_kda_variant=...)``.
 
 Importing this module imports neither torch nor the implementation; the entry points load on first access.
 """
@@ -54,10 +54,11 @@ OP = OpSpec(
     name="kda",
     summary="packed KDA chunked training, forward + backward, K = V = 128, 1 to 64 heads, context parallelism",
     variants=("det", "fast"),
-    # miles' calls take the in-kernel q / k L2 norm, which fast does not serve: fast would run det's programs
+    # miles keeps det for KDA in this release: its calls (raw gate, in-kernel q / k L2 norm) give det's results under
+    # fast too
     cli_variants=("det",),
     selected_by=(("kda_backend", "cake"),),
-    packages=("cake_kda_det_train", "cake_kda_det_train_kcp", "cake_kda_train", "cake_kda_train_kcp"),
+    packages=("cake_kda_det_train", "cake_kda_det_train_kcp", "cake_kda_nondet_train", "cake_kda_nondet_train_kcp"),
     exports=(
         "DEFAULT_SCALE",
         "MAX_HEADS",

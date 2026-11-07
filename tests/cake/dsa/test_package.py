@@ -1,5 +1,6 @@
 """The three vendored DSA packages as the op uses them (torch-free): every det stage on every architecture, the
-architectures and toolkits each package builds for, and the CUDA 13.4 floor of SM107a whatever a package records."""
+architectures and toolkits each package records, and the runtime's CUDA 13.4 floor on every architecture whatever a
+package records."""
 
 import json
 import sys
@@ -13,12 +14,13 @@ from miles_ext_kernels.cake._runtime import loader
 
 VENDOR = Path(vendor.__file__).resolve().parent
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-FLOOR = {"sm_100a": "12.8", "sm_103a": "12.9", "sm_107a": "13.4"}
+# the min_cuda each det library records (the runtime builds every architecture with CUDA 13.4 or newer)
+RECORDED = {"sm_100a": "12.8", "sm_103a": "12.9", "sm_107a": "13.4"}
 # libraries per architecture of each package
 LIBRARIES = {
-    "cake_dsa_indexer_det": {"sm_100a": 52, "sm_103a": 52, "sm_107a": 53},
+    "cake_dsa_indexer_det_train": {"sm_100a": 65, "sm_103a": 73, "sm_107a": 61},
     "cake_dsa_sparse_det": {"sm_100a": 43, "sm_103a": 43, "sm_107a": 43},
-    "cake_dsa_train": {"sm_100a": 14, "sm_103a": 14, "sm_107a": 14},
+    "cake_dsa_sparse_attention_nondet_train": {"sm_100a": 14, "sm_103a": 14, "sm_107a": 14},
 }
 
 FAKE_NVCC = """#!@PYTHON@
@@ -43,7 +45,11 @@ def _libraries(package: str, arch: str) -> list[dict]:
 
 
 def test_the_op_ships_the_three_packages_both_variants_and_its_options():
-    assert dsa.OP.packages == ("cake_dsa_indexer_det", "cake_dsa_sparse_det", "cake_dsa_train")
+    assert dsa.OP.packages == (
+        "cake_dsa_indexer_det_train",
+        "cake_dsa_sparse_det",
+        "cake_dsa_sparse_attention_nondet_train",
+    )
     assert dsa.OP.variants == ("det", "fast")
     assert dsa.OP.selected_by == (("dsa_attention_backend", "cake"),)
     assert [flag.name for flag in dsa.OP.flags] == ["--cake-dsa-bwd-workspace-bytes", "--cake-dsa-lazy-build"]
@@ -67,7 +73,7 @@ def test_the_det_version_has_one_library_per_stage_and_architecture():
         assert record["arches"] == ["sm_100a", "sm_103a"], stage
         entries = {arch: by_name[f"{record['name']}_{arch}"] for arch in ARCHES}
         for arch, entry in entries.items():
-            assert entry["arch"] == arch and entry["min_cuda"] == FLOOR[arch], (stage, arch)
+            assert entry["arch"] == arch and entry["min_cuda"] == RECORDED[arch], (stage, arch)
         # SM107a compiles the SM103a sources (for compute_107a)
         assert entries["sm_107a"]["sources"] == entries["sm_103a"]["sources"], stage
     assert any("compute_107a" in flag for flag in build["arch_flags"]["sm_107a"])
@@ -94,12 +100,12 @@ def nvcc(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("package", sorted(LIBRARIES))
 def test_sm107a_needs_cuda_13_4_whatever_the_package_records(package, nvcc):
-    """nvcc 13.0 to 13.3 cannot compile compute_107a; the fast package's build.json records 13.0 for SM107a."""
+    """nvcc 13.0 to 13.3 cannot compile compute_107a; every package's build.json records 13.4 for SM107a."""
     fake = nvcc("13.0.88")
     names = [entry["name"] for entry in _libraries(package, "sm_107a")]
     recorded = {entry["min_cuda"] for entry in _libraries(package, "sm_107a")}
 
-    assert recorded == ({"13.0"} if package == "cake_dsa_train" else {"13.4"})
+    assert recorded == {"13.4"}
     for name in names[:2]:
         with pytest.raises(RuntimeError, match=r"needs CUDA 13\.4 or newer"):
             loader.prebuild_libraries(package, [name])
@@ -107,10 +113,12 @@ def test_sm107a_needs_cuda_13_4_whatever_the_package_records(package, nvcc):
 
 
 @pytest.mark.parametrize("package", sorted(LIBRARIES))
-def test_sm103a_needs_cuda_12_9(package, nvcc):
-    fake = nvcc("12.8.93")
-    name = _libraries(package, "sm_103a")[0]["name"]
-
-    with pytest.raises(RuntimeError, match=r"needs CUDA 12\.9 or newer"):
-        loader.prebuild_libraries(package, [name])
+def test_sm100a_and_sm103a_need_cuda_13_4(package, nvcc):
+    """CUDA 13.4 is the runtime's floor on every architecture, above the 12.8 / 12.9 the SM100a / SM103a entries
+    record."""
+    fake = nvcc("13.0.88")
+    for arch in ("sm_100a", "sm_103a"):
+        name = _libraries(package, arch)[0]["name"]
+        with pytest.raises(RuntimeError, match=rf"for {arch} needs CUDA 13\.4 or newer"):
+            loader.prebuild_libraries(package, [name])
     assert not fake.with_name("compiled").exists()

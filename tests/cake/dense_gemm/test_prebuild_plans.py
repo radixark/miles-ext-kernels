@@ -19,7 +19,7 @@ pytest.importorskip("tvm_ffi")
 
 from miles_ext_kernels.cake._impl.dense_gemm import ops  # noqa: E402
 
-DET, FAST = "dense_projection_det_gemm", "dense_projection_gemm"
+DET, FAST = "cake_dense_gemm_det_train", "cake_dense_gemm_nondet_train"
 PARTS = (
     ("sm_100a", 148),
     ("sm_100a", 152),
@@ -49,6 +49,7 @@ TOKENS = sorted(
     }
 )
 # name -> (heads, d_in, d_out, weight layout): miles' projections and two single-head rows fast plans on some parts
+# (a single-head out_in weight gradient is a call of the packages' weight-gradient entry points)
 PROJECTIONS = {
     **{f"glm5-q-absorb-h{h}": (h, 192, 512, "in_out") for h in (8, 16, 64)},
     **{f"glm5-value-h{h}": (h, 512, 256, "out_in") for h in (8, 16, 64)},
@@ -69,10 +70,12 @@ class _Planner:
         self.det_backend, self.det_jit = ops._vendored()
         _, self.fast_jit = ops._vendored_fast()
 
-    def k1(self, a, b, out, variant: str) -> tuple[str, str]:
+    def k1(self, a, b, out, variant: str, transposed_out: bool = False) -> tuple[str, str]:
         """The K1 call ``gemm(a, b, out)`` of ``variant`` (the convenience path of either package)."""
         if variant == "fast":
-            template = ops._fast_k1_template(a, b, out, arch=self.arch, sm_count=self.sm_count)
+            template = ops._fast_k1_template(
+                a, b, out, transposed_out=transposed_out, arch=self.arch, sm_count=self.sm_count
+            )
             if template is not None:
                 return FAST, self.fast_jit.select_module(self.arch, template)
         backend = self.det_backend
@@ -84,10 +87,23 @@ class _Planner:
                 template = backend.swap_ab_template(batches, rows, cols, self.sm_count, self.arch)
                 if template is not None:
                     return DET, self.det_jit.select_module(self.arch, template)
-        planned, *_ = backend.plan_dense_projection_det_gemm(
-            a, b, out, sm_count=self.sm_count, l2_bytes=L2_BYTES, arch=self.arch
+        planned, *_ = backend.cake_dense_gemm_det_train_projection_plan(
+            a, b, out, sm_count=self.sm_count, l2_bytes=L2_BYTES, transposed_out=transposed_out, arch=self.arch
         )
         return DET, self.det_jit.select_module(self.arch, planned.template)
+
+    def wgrad(self, g, x, out, variant: str) -> tuple[str, str]:
+        """The weight-gradient call ``wgrad(G, X, out)`` of ``variant``: the non-deterministic package's program on
+        the transposed-store ``X.T @ G`` where its planner takes the row, else the deterministic package's program
+        in the orientation of its ``wgrad_views``."""
+        if variant == "fast":
+            template = ops._fast_k1_template(
+                x.t(), g, out, transposed_out=True, arch=self.arch, sm_count=self.sm_count
+            )
+            if template is not None:
+                return FAST, self.fast_jit.select_module(self.arch, template)
+        a, b, transposed = self.det_backend.wgrad_views(g, x, arch=self.arch, out_f32=out.dtype == torch.float32)
+        return self.k1(a, b, out, "det", transposed_out=transposed)
 
     def k2(self, a, b, out, variant: str) -> tuple[str, str]:
         """The K2 call ``out = a @ b`` of ``variant``."""
@@ -95,7 +111,7 @@ class _Planner:
             template = ops._fast_k2_template(a, b, out, arch=self.arch, sm_count=self.sm_count)
             if template is not None:
                 return FAST, self.fast_jit.select_module(self.arch, template)
-        planned, *_ = self.det_backend.plan_router_fp32_det_gemm(a, b, out)
+        planned, *_ = self.det_backend.cake_dense_gemm_det_train_router_plan(a, b, out)
         return DET, self.det_jit.select_module(self.arch, planned.template)
 
     def library(self, package: str, module: str) -> str:
@@ -110,10 +126,13 @@ def _projection_launches(planner: _Planner, shape, tokens: int, variant: str) ->
     def gemm(a, b, out):
         launched.add(planner.k1(a, b, out, variant))
 
+    def wgrad(g2, x2, out):
+        launched.add(planner.wgrad(g2, x2, out, variant))
+
     x, g, weight = ops._projection_views(heads, d_in, d_out, tokens, in_out)
     ops._forward(gemm, x, weight, g, in_out)
     ops._dgrad(gemm, g, weight, x, in_out)
-    ops._wgrad(gemm, x, g, weight, in_out)
+    ops._wgrad(gemm, wgrad, x, g, weight, in_out)
     return launched
 
 

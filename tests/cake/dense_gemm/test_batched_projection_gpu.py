@@ -177,7 +177,7 @@ def test_shapes_outside_the_kernel_contract_are_refused():
 
 
 # ---------------------------------------------------------------------------
-# Cases of the vendored package's own tests (tests/experimental/test_cake_dense_projection_det_gemm.py at the
+# Cases of the vendored package's own tests (tests/experimental/test_cake_dense_gemm_det_train.py at the
 # vendored commit), on its prepared launches.
 # ---------------------------------------------------------------------------
 
@@ -242,7 +242,7 @@ def test_mla_batched_rows_match_fp64_reference(row, op):
     if "buf" in v:
         v["buf"].fill_(float("nan"))  # the rope part of the slot must keep its sentinel
         untouched = v["buf"][..., FI_MLA_ROWS[row]["D_in"] :]
-    prepared = backend.prepare_dense_projection_det_gemm(v["A"], v["B"], v["out"])
+    prepared = backend.cake_dense_gemm_det_train_projection_prepare(v["A"], v["B"], v["out"])
     out = prepared.launch()
     torch.cuda.synchronize()
     assert out is v["out"] and prepared.plan.L == 64
@@ -259,7 +259,7 @@ def test_strided_views_and_storage_offsets_match_fp64_reference():
     W = (torch.randn(N + 16, K, generator=gen, device="cuda") * K**-0.5).to(torch.bfloat16)[16:]
     out_buf = torch.full((T + 3, N + 24), float("nan"), device="cuda", dtype=torch.bfloat16)
     out = out_buf[3:, 8 : 8 + N]
-    backend.prepare_dense_projection_det_gemm(A, W.t(), out).launch()
+    backend.cake_dense_gemm_det_train_projection_prepare(A, W.t(), out).launch()
     torch.cuda.synchronize()
     _check(out, torch.matmul(A.double(), W.double().t()))
     assert bool(torch.isnan(out_buf[:3].float()).all()) and bool(torch.isnan(out_buf[3:, :8].float()).all())
@@ -270,7 +270,7 @@ def test_strided_views_and_storage_offsets_match_fp64_reference():
     Gs = torch.randn(T, Nf, generator=gen, device="cuda").to(torch.bfloat16)
     out_t_buf = torch.full((Nf, K + 8), float("nan"), device="cuda", dtype=torch.float32)
     out_t = out_t_buf[:, :K]
-    prepared = backend.prepare_projection_det_wgrad(Gs, A, out_t)
+    prepared = backend.cake_dense_gemm_det_train_projection_wgrad_prepare(Gs, A, out_t)
     assert prepared.plan.transposed_out
     prepared.launch()
     torch.cuda.synchronize()
@@ -289,7 +289,7 @@ def test_batched_rows_satisfy_the_kernel_output_layout_predicate():
         for op in ("fwd", "dgrad", "wgrad"):
             for T in (1001, 16231):
                 v = _fi_mla_views(row, op, T, device="meta")
-                plan, _, _, out3 = backend.plan_dense_projection_det_gemm(
+                plan, _, _, out3 = backend.cake_dense_gemm_det_train_projection_plan(
                     v["A"], v["B"], v["out"], sm_count=152, l2_bytes=L2_BYTES, arch="sm_100a"
                 )
                 ldo, out_l = backend._out_strides(out3)
@@ -301,7 +301,7 @@ def test_batched_rows_satisfy_the_kernel_output_layout_predicate():
     assert checked == 12
     # the interleaved store of the qabs input gradient (D = 192 of a 256-wide slot): the second form, with equality
     v = _fi_mla_views("qabs", "dgrad", 33, device="meta")
-    plan, _, _, out3 = backend.plan_dense_projection_det_gemm(
+    plan, _, _, out3 = backend.cake_dense_gemm_det_train_projection_plan(
         v["A"], v["B"], v["out"], sm_count=152, l2_bytes=L2_BYTES
     )
     ldo, out_l = backend._out_strides(out3)

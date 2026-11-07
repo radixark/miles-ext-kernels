@@ -4,25 +4,29 @@ Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
 Single-rank packed KDA chunked training on the vendored Cake packages ``cake_kda_det_train`` (``det``) and
-``cake_kda_train`` (``fast``), SM100a / SM103a / SM107a; the op's :func:`prebuild` and :func:`release`.
+``cake_kda_nondet_train`` (``fast``), SM100a / SM103a / SM107a; the op's :func:`prebuild` and :func:`release`.
 
-:func:`chunk_kda`, :func:`chunk_kda_fwd` and :func:`chunk_kda_bwd` are FlashInfer's entry points
-(``chunk_kda_det*`` of the deterministic package, ``chunk_kda*(deterministic=False)`` of the other) without its API
-logging: they default ``scale`` to ``128 ** -0.5`` and forward every keyword to the ``cake_backend`` of the package of
-the call, which checks the operands, plans the launches from the host scalars alone and runs them on the current
-stream.
+:func:`chunk_kda`, :func:`chunk_kda_fwd` and :func:`chunk_kda_bwd` are FlashInfer's entry points (``cake_kda_det``,
+``cake_kda_det_train_forward`` and ``cake_kda_det_train_backward`` of the deterministic package, ``cake_kda_nondet``,
+``cake_kda_nondet_train_forward`` and ``cake_kda_nondet_train_backward`` of the other) without its API logging: they
+default ``scale`` to ``128 ** -0.5`` and forward every keyword to the ``cake_backend`` of the package of the call,
+which checks the operands, plans the launches from the host scalars alone and runs them on the current stream. The
+entries of both packages take the operands and keywords passed here and return their outputs and gradients in the
+same form.
 
-The package of a call: ``config.variant("kda")`` when the forward runs (``det`` unless configured), except that a
-``fast`` call with ``use_qk_l2norm_in_kernel=True``, which the ``fast`` package refuses, runs ``det`` and says so
-once (``config.warn_runs_det``). The autograd node's backward is its forward's package; :func:`chunk_kda_bwd` takes
-the package of the forward that wrote ``saved`` (the variant of the call for ``saved=None``, the replay).
+The package of a call: ``config.variant("kda")`` when the forward runs (``det`` unless configured), in every gate
+and L2 norm mode. The autograd node's backward is its forward's package; :func:`chunk_kda_bwd` takes the package of
+the forward that wrote ``saved`` (the variant of the call for ``saved=None``, the replay).
 
 * ``det``: every result is bit-identical across repeated calls on the same inputs (fixed-order reductions, no
   atomics), on the same GPU model and SM count, toolkit and build.
-* ``fast``: in the activated-gate mode (``use_gate_in_kernel=False``) its backward adds the ``q * dq`` term of the
-  gate gradient in the GLM intra program on the rows its registry lists, so ``dg`` may differ from ``det``'s by FP32
-  rounding; in the raw gate mode its parameter-gradient reduce runs in FP64 in no fixed order on SM100a / SM103a
-  (about one FP32 ulp from run to run). Every other result is ``det``'s programs.
+* ``fast``: in the activated-gate mode (``use_gate_in_kernel=False``) without the in-kernel L2 norm its backward adds
+  the ``q * dq`` term of the gate gradient in the GLM intra program on the rows its registry lists, so ``dg`` may
+  differ from ``det``'s by FP32 rounding. In the raw gate mode, and with the in-kernel L2 norm in either gate mode,
+  every result is ``det``'s, bit for bit (FlashInfer's contract for these modes).
+
+Neither variant reads ``torch.use_deterministic_algorithms``: no launch of either package reduces in an unordered
+order, so neither raises PyTorch's non-determinism alert.
 
 Operands, one packed batch of ``S`` tokens in ``num_docs`` documents with ``H`` heads (1 to 64): ``q, k, v`` BF16
 ``[1, S, H, 128]`` (the batch axis is optional; outputs take the rank of the inputs), ``g`` the gate ``[1, S, H,
@@ -60,7 +64,7 @@ import torch
 
 from miles_ext_kernels.cake._runtime import config, loader
 from miles_ext_kernels.cake._vendor.cake_kda_det_train import cake_backend as det_backend
-from miles_ext_kernels.cake._vendor.cake_kda_train import cake_backend as fast_backend
+from miles_ext_kernels.cake._vendor.cake_kda_nondet_train import cake_backend as fast_backend
 
 __all__ = [
     "DEFAULT_SCALE",
@@ -80,13 +84,11 @@ OP = "kda"
 # miles_ext_kernels.cake._vendor: the vendored packages are its subpackages
 _VENDOR = det_backend.__name__.rsplit(".", 2)[0]
 # The packages of the op: the single-rank ones and the context-parallel ones, det first.
-PACKAGES = ("cake_kda_det_train", "cake_kda_det_train_kcp", "cake_kda_train", "cake_kda_train_kcp")
+PACKAGES = ("cake_kda_det_train", "cake_kda_det_train_kcp", "cake_kda_nondet_train", "cake_kda_nondet_train_kcp")
 # The default scale of the kernels' contract: head_dim ** -0.5 with head dimension 128.
 DEFAULT_SCALE = 128**-0.5
 # The head counts the kernels are validated for (per call, so per tensor-parallel rank).
 MAX_HEADS = 64
-# A fast call the fast package does not serve, logged once (config.warn_runs_det).
-L2N_RUNS_DET = "the in-kernel q / k L2 norm (use_qk_l2norm_in_kernel=True)"
 
 
 def _nvcc_version() -> str | None:
@@ -117,16 +119,6 @@ def check_heads(num_heads: Any) -> int:
     return heads
 
 
-def call_variant(use_qk_l2norm_in_kernel: object) -> str:
-    """The package a call of this mode runs: ``config.variant("kda")``, except that a ``fast`` call asking for the
-    in-kernel q / k L2 norm (anything but ``False``, which the ``fast`` package refuses) runs ``det``, logged once."""
-    variant = config.variant(OP)
-    if variant == "fast" and use_qk_l2norm_in_kernel is not False:
-        config.warn_runs_det(OP, L2N_RUNS_DET)
-        return "det"
-    return variant
-
-
 def seam(v: torch.Tensor, beta: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``v`` dense and ``beta`` BF16 and dense, as the kernels read them (differentiable: autograd casts the
     gradient of ``beta`` back to its dtype); other operands are left to the packages' checks."""
@@ -136,9 +128,7 @@ def seam(v: torch.Tensor, beta: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
 
 
 def _modes(scale, use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel) -> dict[str, Any]:
-    """The keywords of a call, the same for either package: the ``fast`` package refuses
-    ``use_qk_l2norm_in_kernel`` other than ``False`` (``ValueError``), which only a backward of a ``fast`` saved set
-    can hand it here (a ``fast`` call with the norm runs ``det``, :func:`call_variant`)."""
+    """The keywords of a call, the same for either package."""
     return dict(
         scale=DEFAULT_SCALE if scale is None else scale,
         use_gate_in_kernel=use_gate_in_kernel,
@@ -170,9 +160,9 @@ def chunk_kda(
     check_heads(int(v.shape[-2]))
     v, beta = seam(v, beta)
     modes = _modes(scale, use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel)
-    if call_variant(use_qk_l2norm_in_kernel) == "fast":
-        return fast_backend.chunk_kda(q, k, v, g, beta, cu_seqlens, deterministic=False, **modes)
-    return det_backend.chunk_kda_det(q, k, v, g, beta, cu_seqlens, **modes)
+    if config.variant(OP) == "fast":
+        return fast_backend.cake_kda_nondet(q, k, v, g, beta, cu_seqlens, **modes)
+    return det_backend.cake_kda_det(q, k, v, g, beta, cu_seqlens, **modes)
 
 
 def chunk_kda_fwd(
@@ -196,11 +186,13 @@ def chunk_kda_fwd(
     check_heads(int(v.shape[-2]))
     v, beta = seam(v, beta)
     modes = _modes(scale, use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel)
-    if call_variant(use_qk_l2norm_in_kernel) == "fast":
-        return fast_backend.chunk_kda_fwd(
-            q, k, v, g, beta, cu_seqlens, save_for_backward=save_for_backward, deterministic=False, **modes
+    if config.variant(OP) == "fast":
+        return fast_backend.cake_kda_nondet_train_forward(
+            q, k, v, g, beta, cu_seqlens, save_for_backward=save_for_backward, **modes
         )
-    return det_backend.chunk_kda_det_fwd(q, k, v, g, beta, cu_seqlens, save_for_backward=save_for_backward, **modes)
+    return det_backend.cake_kda_det_train_forward(
+        q, k, v, g, beta, cu_seqlens, save_for_backward=save_for_backward, **modes
+    )
 
 
 def chunk_kda_bwd(
@@ -222,24 +214,21 @@ def chunk_kda_bwd(
 ) -> tuple[torch.Tensor, ...]:
     """The backward alone, from the forward's operands and modes: ``(dq, dk, dv, dbeta, dg)``, and ``(dq, dk, dv,
     dbeta, dg, dA_log, ddt_bias)`` with ``use_gate_in_kernel=True``; ``dbeta`` in ``beta``'s dtype. It runs the
-    package of the forward that wrote ``saved`` (a ``fast`` set with ``use_qk_l2norm_in_kernel`` other than ``False``,
-    a mode its forward did not run, is a ``ValueError`` of that package); ``saved=None`` replays the forward
-    (checkpoint replay) in the package of the call, and under ``det`` gives the same bits as the saved-set
+    package of the forward that wrote ``saved`` (a saved set is read by its own package only); ``saved=None`` replays
+    the forward (checkpoint replay) in the package of the call, and under ``det`` gives the same bits as the saved-set
     backward."""
     check_heads(int(v.shape[-2]))
     beta_dtype = beta.dtype
     v, beta = seam(v, beta)
     modes = _modes(scale, use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel)
     if saved is None:
-        variant = call_variant(use_qk_l2norm_in_kernel)
+        variant = config.variant(OP)
     else:
-        variant = "fast" if isinstance(saved, fast_backend.KdaChunkSaved) else "det"
+        variant = "fast" if isinstance(saved, fast_backend.CakeKDANondetChunkSaved) else "det"
     if variant == "fast":
-        grads = fast_backend.chunk_kda_bwd(
-            q, k, v, g, beta, cu_seqlens, dout, saved=saved, deterministic=False, **modes
-        )
+        grads = fast_backend.cake_kda_nondet_train_backward(q, k, v, g, beta, cu_seqlens, dout, saved=saved, **modes)
     else:
-        grads = det_backend.chunk_kda_det_bwd(q, k, v, g, beta, cu_seqlens, dout, saved=saved, **modes)
+        grads = det_backend.cake_kda_det_train_backward(q, k, v, g, beta, cu_seqlens, dout, saved=saved, **modes)
     grads = list(grads)
     grads[3] = grads[3].to(beta_dtype)
     return tuple(grads)
@@ -292,7 +281,7 @@ def release() -> None:
     in use, its captured CUDA graphs with their memory pools."""
     for backend in (det_backend, fast_backend):
         _clear(backend, "_entry_pool", "_entry_lock")
-    for package in ("cake_kda_det_train_kcp", "cake_kda_train_kcp"):
+    for package in ("cake_kda_det_train_kcp", "cake_kda_nondet_train_kcp"):
         kcp = sys.modules.get(f"{_VENDOR}.{package}.cake_kcp")
         if kcp is not None:
             kcp.graph_cache_clear()

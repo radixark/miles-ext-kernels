@@ -1,11 +1,12 @@
 """The kernel roles of the vendored MoK package against its build manifest, without a device (torch-free).
 
 ``sources.json`` names every kernel role with its architectures and library stem, ``build.json`` every library the
-package can build. Checked: each role has one library per architecture and the manifest no other, so ``prebuild``
-selects among exactly the libraries a run can load; no library asks for a newer toolkit than the loader's ``MIN_CUDA``
-names for its architecture; and every use of ``cvt.rn.satfinite.e4m3x2.bf16x2`` (which the CUDA 13.0 ptxas rejects) in
-the MXFP8 sources sits under the CUDA 13.1 guard with the FP32 fallback, so CUDA 13.0 builds every SM100a and SM103a
-library.
+package can build. Checked: each role has one library per architecture it names (every architecture, the MXFP8
+forward's multimacro programs SM107a only) and the manifest no other, so ``prebuild`` selects among exactly the
+libraries a run can load; no library asks for a newer toolkit than the loader's ``MIN_CUDA`` names for its
+architecture; and every use of ``cvt.rn.satfinite.e4m3x2.bf16x2`` (which the CUDA 13.0 ptxas rejects) in the MXFP8
+sources sits under the CUDA 13.1 guard with the FP32 fallback, the vendored sources' own rule (the runtime builds with
+CUDA 13.4 or newer, so it never takes the fallback).
 """
 
 import json
@@ -36,18 +37,23 @@ def _version(text: str) -> tuple[int, int]:
     return int(major), int(minor)
 
 
-def test_every_role_is_built_for_every_architecture(roles):
-    assert len(roles) == 48
+def test_every_role_is_built_for_its_architectures(roles):
+    assert len(roles) == 50
     for role, record in roles.items():
-        assert sorted(record["arches"]) == ARCHES, role
+        arches = ["sm_107a"] if role.endswith("_multimacro") else ARCHES
+        assert sorted(record["arches"]) == arches, role
         assert record["library"] == f"cake_mok_{role}", role
+    assert sorted(role for role in roles if role.endswith("_multimacro")) == [
+        "forward_mxfp8_clamped_multimacro",
+        "forward_mxfp8_multimacro",
+    ]
 
 
 @pytest.mark.parametrize("arch", ARCHES)
 def test_the_roles_are_exactly_the_manifest_libraries(roles, manifest, arch):
     libraries = {entry["name"]: entry for entry in manifest["libraries"] if entry["arch"] == arch}
 
-    assert {f"{record['library']}_{arch}" for record in roles.values()} == set(libraries)
+    assert {f"{record['library']}_{arch}" for record in roles.values() if arch in record["arches"]} == set(libraries)
 
 
 @pytest.mark.parametrize("arch", ARCHES)

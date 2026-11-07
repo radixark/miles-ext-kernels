@@ -29,7 +29,7 @@ def test_the_op_is_selected_by_the_cake_input_norm_and_declares_both_packages():
     assert rmsnorm.OP.name == "rmsnorm" and "rmsnorm" in cake.OPS
     assert rmsnorm.OP.selected_by == (("linear_attention_input_norm", "cake"),)
     assert rmsnorm.OP.variants == ("det", "fast") and rmsnorm.OP.cli_choices == ("det", "fast")
-    assert rmsnorm.OP.packages == ("cake_rmsnorm_det_train_backend", "cake_rmsnorm_train_backend")
+    assert rmsnorm.OP.packages == ("cake_rmsnorm_det_train", "cake_rmsnorm_nondet_train")
     assert rmsnorm.OP.flags == ()
 
 

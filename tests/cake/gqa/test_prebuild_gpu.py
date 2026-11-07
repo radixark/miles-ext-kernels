@@ -96,7 +96,7 @@ from miles_ext_kernels import cake
 from miles_ext_kernels.cake import gqa
 from miles_ext_kernels.cake._impl.gqa import ops
 from miles_ext_kernels.cake._runtime import loader
-from miles_ext_kernels.cake._vendor.cake_gqa_train import cake_build
+from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_build
 
 loaded = []
 load_library = cake_build.load_library

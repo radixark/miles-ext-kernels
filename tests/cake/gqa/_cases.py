@@ -13,7 +13,7 @@ import torch
 
 from miles_ext_kernels.cake import gqa
 from miles_ext_kernels.cake._impl.gqa import ops
-from miles_ext_kernels.cake._vendor.cake_gqa_train import cake_backend
+from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_backend
 
 D = 256
 SCALE = D**-0.5  # the default, as miles runs it
@@ -70,7 +70,7 @@ def run(x, *, max_seqlen_k: int | None = None, softmax_scale: float | None = SCA
     q, k, v = (x[t].clone().requires_grad_() for t in ("q", "k", "v"))
     out = gqa.varlen_gqa_attention(q, k, v, x["cu_q"], x["cu_k"], max_seqlen_k=bound, softmax_scale=softmax_scale)
     out.backward(x["dout"])
-    _, lse = cake_backend.gqa_attention_fwd(
+    _, lse = cake_backend.cake_gqa_nondet_train_forward(
         x["q"],
         x["k"],
         x["v"],

@@ -3,9 +3,9 @@
 ``cake_jit`` (the registry, the grids and the scratch layout; it imports only ``typing``) is loaded by path, so neither
 torch nor the vendored package's loader is imported; ``MIN_CUDA`` comes from the torch-free runtime. Checked: every
 stage ``ops.STAGES`` launches has exactly one library per target architecture, which the oldest toolkit the runtime
-accepts for that architecture builds (``MIN_CUDA``: CUDA 12.8 for SM100a, 12.9 for SM103a, 13.4 for SM107a); the
-forward grid covers every tile; the backward grid covers the key blocks of ``max_seqlen_k`` and no more (the
-``max_seqlen_k`` contract), or of ``T_k`` without it; the backward scratch is aligned and sized.
+accepts for that architecture builds (``MIN_CUDA``: CUDA 13.4 on every architecture); the forward grid covers every
+tile; the backward grid covers the key blocks of ``max_seqlen_k`` and no more (the ``max_seqlen_k`` contract), or of
+``T_k`` without it; the backward scratch is aligned and sized.
 """
 
 import ast
@@ -19,7 +19,7 @@ import pytest
 from miles_ext_kernels.cake import MIN_CUDA
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PACKAGE_DIR = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "cake_gqa_train"
+PACKAGE_DIR = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "cake_gqa_nondet_train"
 OPS = REPO_ROOT / "miles_ext_kernels" / "cake" / "_impl" / "gqa" / "ops.py"
 # ops.STAGES, the forward and the BF16 dK / dV backward, which is the path the entry point runs
 STAGES = ("fwd", "bwd_pre", "bwd_bf16", "bwd_post")

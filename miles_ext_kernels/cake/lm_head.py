@@ -106,7 +106,7 @@ OP = OpSpec(
     summary="chunked LM-head selected-token log-probabilities, forward + backward, BF16 hidden rows and weight",
     variants=("det", "fast"),
     selected_by=(("log_probs_backend", "cake"),),
-    packages=("cake_lm_head_det_loss", "cake_lm_head_loss"),
+    packages=("cake_lm_head_det_train", "cake_lm_head_nondet_train"),
     exports=("log_probs",),
     flags=(
         Flag(

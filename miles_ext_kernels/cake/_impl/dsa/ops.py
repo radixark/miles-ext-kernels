@@ -13,10 +13,11 @@ Public surface (all layouts of :mod:`.layouts`):
   - ``det``: the DSA det version (``cake_dsa_sparse_det``, launched through :mod:`.kernels`). Every gradient is
     bit-reproducible run to run: no floating-point atomics, and the key-side gradients are reduced from per-slot FP32
     partials in an order fixed by the indices.
-  - ``fast``: FlashInfer's Cake DSA training kernels (``cake_dsa_train``) for 64 local query heads, ``d_v = 512`` with
-    a 64-channel RoPE tail or none, and no attention sink. ``dq`` is bit-reproducible; ``dkv`` is accumulated with FP32
-    ``red.global`` atomics, so its summation order changes from run to run. A call ``fast`` does not serve
-    (:func:`fast_unserved_reason`) runs ``det`` and says so once per reason.
+  - ``fast``: FlashInfer's Cake DSA training kernels (``cake_dsa_sparse_attention_nondet_train``) for 64 local query
+    heads, ``d_v = 512`` with a 64-channel RoPE tail or none, and no attention sink. ``dq`` is bit-reproducible;
+    ``dkv`` is accumulated with FP32 ``red.global`` atomics, so its summation order changes from run to run. A call
+    ``fast`` does not serve (:func:`fast_unserved_reason`) runs ``det`` and says so once per reason; so does every call
+    while ``torch.use_deterministic_algorithms(True)`` is in effect, which the FlashInfer backward refuses.
 
 * :func:`indexer_logits`, :func:`select_topk`, :func:`indexer_topk_scores`, :func:`lightning_indexer` -- the
   deterministic indexer pipeline over a caller-supplied top-k callable (:func:`torch_topk` by default), with an
@@ -67,6 +68,10 @@ FAST_HEADS = 64
 FAST_D_V = 512
 FAST_D_ROPE = 64
 
+# Why a fast call runs det while torch's deterministic algorithms are enabled: the FlashInfer backward raises PyTorch's
+# alert then (its dkv sums use atomics).
+_DETERMINISTIC_ALGORITHMS = "calls under torch.use_deterministic_algorithms(True)"
+
 TopkFn = Callable[[torch.Tensor, int], torch.Tensor]
 
 # (program, architecture) whose fast libraries are built (by the first fast call, or by prebuild)
@@ -80,7 +85,7 @@ _FAST_WARM: set[tuple[str, str]] = set()
 
 def check_device(device=None) -> str:
     """The architecture tag of ``device`` (``sm_100a`` / ``sm_103a`` / ``sm_107a``); raises ``NotImplementedError``
-    elsewhere, and ``RuntimeError`` when the toolkit cannot build the device's kernels (SM107a needs CUDA 13.4)."""
+    elsewhere, and ``RuntimeError`` when the toolkit cannot build the device's kernels (CUDA 13.4 or newer)."""
     if not torch.cuda.is_available():
         raise NotImplementedError("the Cake DSA kernels need a CUDA device (SM100a, SM103a or SM107a)")
     arch = device_arch(device)
@@ -103,8 +108,9 @@ def fast_unserved_reason(heads: int, d_qk: int, d_v: int, *, has_sink: bool, num
 
 @functools.cache
 def _fast_backend():
-    """``(cake_build, cake_jit, cake_backend)`` of the vendored FlashInfer package ``cake_dsa_train``."""
-    package = loader.load_package("cake_dsa_train").__name__
+    """``(cake_build, cake_jit, cake_backend)`` of the vendored FlashInfer package
+    ``cake_dsa_sparse_attention_nondet_train``."""
+    package = loader.load_package("cake_dsa_sparse_attention_nondet_train").__name__
     from importlib import import_module
 
     return tuple(import_module(f"{package}.{name}") for name in ("cake_build", "cake_jit", "cake_backend"))
@@ -179,7 +185,7 @@ def release() -> None:
     """Drop the cached FlashInfer bindings (with their workspaces) and the loaded det stages."""
     import sys
 
-    backend = sys.modules.get(f"{loader.load_package('cake_dsa_train').__name__}.cake_backend")
+    backend = sys.modules.get(f"{loader.load_package('cake_dsa_sparse_attention_nondet_train').__name__}.cake_backend")
     if backend is not None:
         backend.BINDING_CACHE.clear()
     native.release()
@@ -443,7 +449,7 @@ def _fast_sparse_attention(q, kv, indices, sm_scale: float, layout: str, num_seg
     program = _fast_program(q_flat.shape[-1])
     _fast_first_call(program, device_arch(q_flat.device))
     if program == cake_jit.PROGRAM:
-        out = backend.dsa_sparse_attention(
+        out = backend.cake_dsa_sparse_attention_nondet(
             q_flat[..., :FAST_D_V],
             q_flat[..., FAST_D_V:],
             kv_flat[:, :FAST_D_V],
@@ -453,7 +459,7 @@ def _fast_sparse_attention(q, kv, indices, sm_scale: float, layout: str, num_seg
             num_segments=num_segments,
         )
     else:
-        out = backend.dsa_sparse_attention_nope(
+        out = backend.cake_dsa_sparse_attention_nondet_nope(
             q_flat, kv_flat, idx_flat, softmax_scale=sm_scale, num_segments=num_segments
         )
     return meta.rows_to_layout(out)
@@ -486,7 +492,8 @@ def sparse_attention(
             backward plans its key-range passes from it; the results do not depend on it.
 
     Returns the BF16 attention output ``[..., H, d_v]`` in the input layout. The variant is the configured one
-    (``det`` unless configured); a call ``fast`` does not serve (:func:`fast_unserved_reason`) runs ``det``.
+    (``det`` unless configured); a call ``fast`` does not serve (:func:`fast_unserved_reason`) runs ``det``, and so
+    does a ``fast`` call while ``torch.use_deterministic_algorithms(True)`` is in effect.
     """
     sm_scale = _check_scale(sm_scale)
     if q.dtype != torch.bfloat16 or kv.dtype != torch.bfloat16:
@@ -499,6 +506,8 @@ def sparse_attention(
         reason = fast_unserved_reason(
             int(q.shape[-2]), int(q.shape[-1]), int(d_v), has_sink=attn_sink is not None, num_kv=int(num_kv)
         )
+        if reason is None and torch.are_deterministic_algorithms_enabled():
+            reason = _DETERMINISTIC_ALGORITHMS
         if reason is None:
             return _fast_sparse_attention(q, kv, indices, sm_scale, layout, segments)
         config.warn_runs_det(OP, reason)

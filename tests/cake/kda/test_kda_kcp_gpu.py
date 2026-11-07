@@ -3,11 +3,12 @@
 
 For each process-group size and partition layout one set of worker processes (``_kcp_worker.py``) runs every case:
 ``det`` in miles' call (raw gate, in-kernel q / k L2 norm, FP32 ``beta``) and in the activated-gate mode, ``fast`` in
-the activated and the raw gate modes, and miles' call under ``fast``, which runs ``det``. The ragged documents cross
-the rank boundaries. Checked here: the shards put together match the exact FP64 recurrence of the whole batch within
-twice the relative RMS error of the single-rank ``det`` call of the same batch and mode (per tensor), a ``det`` rank's
-repeated step is bit-identical, the raw gate's parameter gradients reduced with ``reduce_gate_param_grads_kcp`` are
-the same bits on every rank, and ``fast`` with the in-kernel L2 norm gives ``det``'s bits. Needs 4 SM100a / SM103a /
+the activated and the raw gate modes, and miles' call under ``fast``, which runs the non-deterministic package. The
+ragged documents cross the rank boundaries. Checked here: the shards put together match the exact FP64 recurrence of
+the whole batch within twice the relative RMS error of the single-rank ``det`` call of the same batch and mode (per
+tensor), a ``det`` rank's repeated step is bit-identical, the raw gate's parameter gradients reduced with
+``reduce_gate_param_grads_kcp`` are the same bits on every rank, and ``fast`` with the in-kernel L2 norm writes the
+non-deterministic package's saved set and gives ``det``'s bits. Needs 4 SM100a / SM103a /
 SM107a GPUs of one node (the 2-rank groups run on 2), torch, tvm-ffi and NCCL; the module first runs
 ``cake.prebuild("kda", num_heads=12)`` in the test process, so the ranks only load the libraries.
 """
@@ -150,10 +151,11 @@ def test_kcp_matches_the_exact_fp64_reference_and_repeats_bit_for_bit(tmp_path_f
     _, mode, _ = _kcp_worker.CASES[case]
     records = [saved["cases"][case] for saved in ranks]
 
-    if _kcp_worker.runs_det(case):
+    if _kcp_worker.det_bits(case):
         assert [record["repeat_differs"] for record in records] == [[]] * world
     if case == "fast-l2n":
         assert [record["det_differs"] for record in records] == [[]] * world
+        assert [record["saved_type"] for record in records] == ["CakeKDANondetKcpSaved"] * world
     if mode == "raw":
         # one sum in rank order: the same bits on every rank
         params = [{n: record["result"][n] for n in ("dA_log", "ddt_bias")} for record in records]

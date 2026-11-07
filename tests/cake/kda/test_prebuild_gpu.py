@@ -4,7 +4,7 @@ the path (autograd node, explicit forward and backward, saved set, replay, check
 points. Each route of :data:`ROUTES` runs once per variant under ``no_build`` (``helpers.check_prebuild``).
 
 Needs an SM100a / SM103a / SM107a GPU, torch and tvm-ffi. A cold cache builds every library of the architecture
-(188 / 186 / 189 on SM100a / SM103a / SM107a): minutes, once per toolkit and machine.
+(216 / 218 / 216 on SM100a / SM103a / SM107a): minutes, once per toolkit and machine.
 """
 
 import os
@@ -25,7 +25,7 @@ from ._reference_l2n import raw_qk  # noqa: E402
 pytestmark = requires_arch("sm_100a", "sm_103a", "sm_107a")
 
 HEADS = 12
-LIBRARIES = {"sm_100a": 188, "sm_103a": 186, "sm_107a": 189}
+LIBRARIES = {"sm_100a": 216, "sm_103a": 218, "sm_107a": 216}
 LEAVES = ("q", "k", "v", "g", "beta")
 
 

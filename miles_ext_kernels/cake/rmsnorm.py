@@ -23,7 +23,7 @@ OP = OpSpec(
     summary="zero-centred RMSNorm x * rstd * (1 + w), forward + backward, BF16 activations",
     variants=("det", "fast"),
     selected_by=(("linear_attention_input_norm", "cake"),),
-    packages=("cake_rmsnorm_det_train_backend", "cake_rmsnorm_train_backend"),
+    packages=("cake_rmsnorm_det_train", "cake_rmsnorm_nondet_train"),
     exports=("ZeroCenteredRMSNorm", "check_supported", "supported_hidden_sizes", "zero_centered_rmsnorm"),
 )
 

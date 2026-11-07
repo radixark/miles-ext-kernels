@@ -1,6 +1,7 @@
-"""The arguments of the KDA op (torch-free): ``--cake-kda-variant`` is hidden and carries ``det`` (miles' calls take
-the in-kernel q / k L2 norm, which the ``fast`` package does not serve), the settings ``--kda-backend cake`` rejects
-at startup, the variants a direct caller configures, and an import without torch."""
+"""The arguments of the KDA op (torch-free): ``--cake-kda-variant`` is hidden and carries ``det`` (miles keeps
+``det`` for KDA in this release: its calls take the raw gate and the in-kernel q / k L2 norm, where ``fast`` gives
+``det``'s results), the settings ``--kda-backend cake`` rejects at startup, the variants a direct caller configures,
+and an import without torch."""
 
 import argparse
 import os

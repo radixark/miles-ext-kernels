@@ -121,8 +121,8 @@ def test_a_variant_configured_after_a_call_runs_at_the_next_call_without_buildin
         y_det.backward(g)
         torch.cuda.synchronize()
 
-    assert type(y_det.grad_fn).__name__ == "CakeGroupedDetMmBackward"
-    assert type(y_fast.grad_fn).__name__ == "CakeGroupedMmBackward"
+    assert type(y_det.grad_fn).__name__ == "CakeMoEGroupedGemmDetFunctionBackward"
+    assert type(y_fast.grad_fn).__name__ == "CakeMoEGroupedGemmNondetFunctionBackward"
 
 
 def test_prebuild_builds_every_program_the_planner_binds():
@@ -133,16 +133,13 @@ def test_prebuild_builds_every_program_the_planner_binds():
     shapes += [(list(K512_SIZES), *K512_SHAPE), ([16400, 16400], 4096, 4096), ([9000, 9000], 4096, 2048)]
     shapes += [(_uneven(rows, 8, rows), 4096, 2048) for rows in (1, 255, 3000, 33000, 140000)]
     launched = set()
-    for variant, mode, det in (("det", {}, "det_"), ("fast", {"deterministic": False}, "")):
+    for variant, mode in (("det", "det"), ("fast", "nondet")):
         backend, jit = ops._module(variant, "cake_backend"), ops._module(variant, "cake_jit")
-        prepare = {op: getattr(backend, f"prepare_grouped_{det}gemm_{op}") for op in ("fwd", "dgrad", "wgrad")}
+        name = f"cake_moe_grouped_gemm_{mode}_train_prepare_"
+        prepare = {op: getattr(backend, name + op) for op in ("forward", "dgrad", "wgrad")}
         for sizes, n, k in shapes:
             x, w, g, offs = _cases.inputs(sizes, n, k, seed=SEED)
-            for launch in (
-                prepare["fwd"](x, w, offs, **mode),
-                prepare["dgrad"](g, w, offs, **mode),
-                prepare["wgrad"](g, x, offs, **mode),
-            ):
+            for launch in (prepare["forward"](x, w, offs), prepare["dgrad"](g, w, offs), prepare["wgrad"](g, x, offs)):
                 for stage in launch.stages:
                     binding = jit.stage_binding(launch.record_name, stage, ARCH)
                     launched.add(jit.library_name(binding["program"], ARCH, binding["specializations"]))

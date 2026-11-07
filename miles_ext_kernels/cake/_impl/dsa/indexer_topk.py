@@ -3,8 +3,8 @@ Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
-Deterministic DSA lightning-indexer top-k: FlashInfer's Cake package ``cake_dsa_indexer_det`` (built by the runtime
-loader) on SM100a / SM103a / SM107a.
+Deterministic DSA lightning-indexer top-k: FlashInfer's Cake package ``cake_dsa_indexer_det_train`` (built by the
+runtime loader) on SM100a / SM103a / SM107a.
 
 :func:`dsa_indexer_det_topk` scores every visible key of every query and selects the exact top-k in one call, without
 a ``[T, T_kv]`` logits matrix::
@@ -34,7 +34,7 @@ indexer backward (:func:`.ops.indexer_backward`); this call itself has no autogr
   call takes it from torch's caching allocator; a caller-owned uint8 buffer of at least that size may be reused across
   calls on one stream. No call synchronizes with the host.
 
-The package picks one of its 52 (SM100a / SM103a) or 53 (SM107a) programs per call from ``T``, ``T_kv``, ``S``,
+The package picks one of its 65 (SM100a), 73 (SM103a) or 61 (SM107a) programs per call from ``T``, ``T_kv``, ``S``,
 ``ratio``, ``top_k`` and the SM count, so a new token count mid-run can reach a program not used before. Every library
 of the architecture is therefore built ahead: by ``prebuild("dsa", ..., index_heads=32)``, else by the first call on the
 architecture, unless ``--cake-dsa-lazy-build`` leaves each to its first launch.
@@ -70,7 +70,7 @@ HEAD_DIM = 128
 MAX_TOP_K = 4096
 DEFAULT_TOP_K = 2048
 
-PACKAGE = "cake_dsa_indexer_det"
+PACKAGE = "cake_dsa_indexer_det_train"
 _WHAT = "the Cake DSA indexer top-k kernels"
 # architectures whose libraries are built (by the first call, or by prebuild)
 _WARM: set[str] = set()
@@ -139,7 +139,7 @@ def dsa_indexer_det_topk_workspace_size(
     """
     _arch(device)
     return int(
-        _backend().dsa_indexer_det_workspace_size(
+        _backend().cake_dsa_indexer_det_train_topk_workspace_size(
             num_queries, num_keys, num_segments, top_k=top_k, ratio=ratio, device=device
         )
     )
@@ -189,7 +189,7 @@ def dsa_indexer_det_topk(
     _first_call(arch)
     # the launches go to the inputs' device, whichever device is current
     with torch.cuda.device(index_q.device):
-        return _backend().dsa_indexer_det_topk(
+        return _backend().cake_dsa_indexer_det_train_topk(
             index_q.contiguous(),
             index_k,
             weights.to(torch.float32).contiguous(),

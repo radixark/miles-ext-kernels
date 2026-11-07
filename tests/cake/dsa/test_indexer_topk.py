@@ -15,7 +15,7 @@ import miles_ext_kernels.cake._vendor as vendor  # noqa: E402
 from miles_ext_kernels import cake  # noqa: E402
 from miles_ext_kernels.cake._impl.dsa import indexer_topk  # noqa: E402
 
-VENDOR = Path(vendor.__file__).resolve().parent / "cake_dsa_indexer_det"
+VENDOR = Path(vendor.__file__).resolve().parent / "cake_dsa_indexer_det_train"
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 
 
@@ -44,7 +44,7 @@ def test_the_geometry_constants_are_the_vendored_backends():
     pytest.importorskip("tvm_ffi")
     backend = indexer_topk._backend()
 
-    assert backend.__name__ == "miles_ext_kernels.cake._vendor.cake_dsa_indexer_det.cake_backend"
+    assert backend.__name__ == "miles_ext_kernels.cake._vendor.cake_dsa_indexer_det_train.cake_backend"
     assert (backend.NUM_HEADS, backend.HEAD_DIM, backend.MAX_TOP_K, backend.DEFAULT_TOP_K) == (
         indexer_topk.HEADS,
         indexer_topk.HEAD_DIM,
@@ -62,7 +62,7 @@ def test_prebuild_names_every_library_the_package_builds_for_the_architecture(ar
     names = indexer_topk.library_names(arch)
 
     assert names == sorted(entries)
-    assert len(names) == (53 if arch == "sm_107a" else 52)
+    assert len(names) == {"sm_100a": 65, "sm_103a": 73, "sm_107a": 61}[arch]
 
 
 @pytest.mark.parametrize(
@@ -104,7 +104,7 @@ def stub_package(monkeypatch):
     """The wrapper on a fake SM100a device: records the libraries it builds and the arguments it hands the package."""
     built, calls = [], []
     backend = types.SimpleNamespace(
-        dsa_indexer_det_topk=lambda *args, **kwargs: calls.append((args, kwargs)) or ("indices", "scores")
+        cake_dsa_indexer_det_train_topk=lambda *args, **kwargs: calls.append((args, kwargs)) or ("indices", "scores")
     )
     monkeypatch.setattr(indexer_topk, "_WARM", set())
     monkeypatch.setattr(indexer_topk, "_arch", lambda device: "sm_100a")
