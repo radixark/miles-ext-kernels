@@ -316,7 +316,7 @@ def test_the_prebuild_routes_reach_every_program(arch):
 def test_release_drops_the_packages_host_plans(monkeypatch):
     cleared = []
     fast = ops._package("fast")
-    monkeypatch.setattr(fast, "plan_cache_clear", lambda: cleared.append("fast plans"))
+    monkeypatch.setattr(fast, "cake_causal_conv1d_nondet_train_plan_cache_clear", lambda: cleared.append("fast plans"))
     clears = {
         "det": (
             "cake_causal_conv1d_det_train_kcp_host_cache_clear",

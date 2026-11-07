@@ -210,7 +210,7 @@ def prebuild(*, device=None, max_workers: int | None = None, weight_dtype: torch
 def release() -> None:
     """Drop the packages' host plans (single-rank rows, context-parallel host tables and graphs); the next call of
     each plans again. The libraries stay loaded."""
-    _package("fast").plan_cache_clear()  # the det package keeps no plans
+    _package("fast").cake_causal_conv1d_nondet_train_plan_cache_clear()  # the det package keeps no plans
     for variant in PACKAGES:
         kcp = _KCP_MODULES.get(variant)
         if kcp is not None:

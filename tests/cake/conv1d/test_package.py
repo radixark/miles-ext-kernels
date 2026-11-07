@@ -14,7 +14,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VENDORED = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "VENDORED.json"
-FI_COMMIT = "d45c5a9f59f99a93c6818e4933b48b6bb5c0e2e3"
+FI_COMMIT = "9e1857b0879495b31eaee48c8c9b82807e08051b"
 FI_PATHS = {
     "cake_causal_conv1d_det_train": "flashinfer/experimental/cake/cake_causal_conv1d_det_train",
     "cake_causal_conv1d_nondet_train": "flashinfer/experimental/cake/cake_causal_conv1d_nondet_train",
