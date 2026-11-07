@@ -2113,7 +2113,7 @@
           "csrc/cake_lm_head_det_loss/cake_lm_head_det_loss_e03bef31303e0675324f_kernel.cu": "649d99846d011397ca162f29e28121cc7683b407"
         },
         "source": {
-          "commit": "e6e0d4ed7a4148de4921de051cf815467c448df9",
+          "commit": "915eeed2126daf5f1f7055d204670d91a501d145",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_lm_head_det_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
@@ -2259,7 +2259,7 @@
           "csrc/cake_lm_head_loss/cake_lm_head_loss_ffbb5726e9d16ea2787e_kernel.cu": "7b17acdbadf4fccb56911527d7fb24951c314f78"
         },
         "source": {
-          "commit": "e6e0d4ed7a4148de4921de051cf815467c448df9",
+          "commit": "915eeed2126daf5f1f7055d204670d91a501d145",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_lm_head_nondet_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
