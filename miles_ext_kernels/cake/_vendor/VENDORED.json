@@ -2337,10 +2337,10 @@
         "cake_revision": "51e449ba5c586be875ff9ab47da84c236c4b875e",
         "files": {
           ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
-          "__init__.py": "4abddc3b3293f97caec158701778cfcfd9eef14d",
-          "build.json": "fe18500c3104ee2023096feb77fc2a19d90eeece",
+          "__init__.py": "d24193ff12a1bf7d459e0de48601d86573ae845d",
+          "build.json": "26f65fef2fb5e2e84354b47a1172b1dedda49f1b",
           "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
-          "cake_jit.py": "cadd614fb76909ff8ae4aca22b88d3c2c4ab68c2",
+          "cake_jit.py": "64897deefd08de63115ea4d7ac976e673f1f9718",
           "csrc/.clang-format": "b2e079af75b8a1afb66c4c91bb7eb35b8c9d3a6d",
           "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c",
           "csrc/cake_mhc_det_train_bwd_prepare__t128_binding.cu": "771878c1d345d128e4b8071679f104b493ca2e6e",
@@ -2381,6 +2381,8 @@
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_fadd_binding.cu": "3de8ff9a758bf16f07e716506e91072c7533a8a5",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_fadd_dpl_binding.cu": "732aafc94839daa071216a33bcc4a04ce2d06aae",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_fadd_dpl_kernel.cu": "20d74585ad39c24c80077f7af92d7b3ef09cf5fa",
+          "csrc/cake_mhc_det_train_bwd_reduce__wpu4_fadd_dpl_trows_binding.cu": "ae523b8216e3a3b3f5a18a0f5c9ae45f26206cc4",
+          "csrc/cake_mhc_det_train_bwd_reduce__wpu4_fadd_dpl_trows_kernel.cu": "1f7d04807bb9f63b006d82203864eec413f3c4a2",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_fadd_kernel.cu": "4d82f403576dd50f00cf4e2959d80ac114aa28ab",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows_binding.cu": "a7a0de373bbcc86ce141eeb0c2677d11102fa105",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_fadd_trows_kernel.cu": "b2275158490169cec59dad06970c58b0e54cd5d7",
@@ -2392,6 +2394,8 @@
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_spred_binding.cu": "90f86d71e9612d351cc99511ddc78e26a08d0c0f",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_spred_dpl_binding.cu": "db5214ce49cc2f16846e1a933c9a8fcf6bad17a8",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_spred_dpl_kernel.cu": "df8a7242daea17823a0f03d5dd554e8a67a1441e",
+          "csrc/cake_mhc_det_train_bwd_reduce__wpu4_spred_dpl_trows_binding.cu": "c533616225faae0fc45137617491717a8d091f28",
+          "csrc/cake_mhc_det_train_bwd_reduce__wpu4_spred_dpl_trows_kernel.cu": "b0fedb7fe7f7c5169c1cc559fef8642d02e5aa80",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_spred_kernel.cu": "ba52f339859662148dc421e8740e259333d72974",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_spred_trows_binding.cu": "0c4730b44186382b3caecb1d75cdefbeaddc8a62",
           "csrc/cake_mhc_det_train_bwd_reduce__wpu4_spred_trows_kernel.cu": "c4b26bc089b8a44aabf31ba655c7edf2a085f31a",
@@ -2583,7 +2587,7 @@
           "csrc/cake_mhc_det_train_fwd_map_kernel.cu": "f6f226d72872cd6f56c57bf92433a8630abf10db"
         },
         "source": {
-          "commit": "ab63ff3afd8bbb74fe69ace64de706c4addb54c7",
+          "commit": "3bc3b4351f1da01d2613f36d429602da9a6c8c17",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_mhc_det_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
@@ -2607,7 +2611,7 @@
           "csrc/cake_mhc_det_train_head_fwd_kernel.cu": "364fb26e66e9a2ec82d44e60c762dbea8667e07c"
         },
         "source": {
-          "commit": "ab63ff3afd8bbb74fe69ace64de706c4addb54c7",
+          "commit": "3bc3b4351f1da01d2613f36d429602da9a6c8c17",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_mhc_head_det_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
@@ -2813,7 +2817,7 @@
           "csrc/cake_mhc_train_fwd_map_kernel.cu": "5efe8900122b7e92c10bac4488983aeaf0464336"
         },
         "source": {
-          "commit": "ab63ff3afd8bbb74fe69ace64de706c4addb54c7",
+          "commit": "3bc3b4351f1da01d2613f36d429602da9a6c8c17",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_mhc_nondet_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"

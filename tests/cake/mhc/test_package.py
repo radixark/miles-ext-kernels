@@ -73,17 +73,27 @@ SM_COUNTS = {"sm_100a": {148}, "sm_103a": {148, 152, 160}, "sm_107a": {208, 212,
 
 def _token_counts(jit) -> list[int]:
     counts = {1, 2, 3, 7, 8, 9, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1000, 1023, 1024, 1025, 2047, 2048, 2049}
-    counts |= {4095, 4096, 4097, 8191, 8192, 8193, 14927, 14928, 16263, 16384, 16385, 32768, 32769, 65536, 65537}
+    counts |= {4095, 4096, 4097, 7168, 7169, 7680, 7681, 8191, 8192, 8193, 14927, 14928, 15590, 15591, 16132, 16133}
+    counts |= {16263, 16264, 16384, 16385, 32768, 32769, 65536, 65537}
     counts |= {131072, 262144, 1 << 20}
     counts |= {T for T in jit.RULES_T_VALUES if T >= 1}  # the host rules hold for T >= 1; T = 0 launches nothing
     return sorted(counts)
+
+
+def _call_paths(jit) -> list[dict]:
+    """The call paths the host rules choose programs for: the forward, the backward from saved statistics and the
+    backward after a replayed forward (a package whose ``selected_modules`` takes no ``path`` has one rule set)."""
+    if "path" not in inspect.signature(jit.selected_modules).parameters:
+        return [{}]
+    return [{}, *({"path": path} for path in jit.PDL_PATHS)]
 
 
 @pytest.mark.parametrize("package", [DET, FAST])
 @pytest.mark.parametrize(("arch", "hidden"), CASES)
 @pytest.mark.parametrize("sinkhorn_iters", [20, 7])
 def test_prebuild_covers_the_programs_of_every_token_count(package, arch, hidden, sinkhorn_iters):
-    """Every program the host rules select for a call, at any token count, is a library prebuild builds."""
+    """Every program the host rules select for a call, at any token count and on any call path, is a library prebuild
+    builds."""
     jit = getattr(ops, {DET: "_det", FAST: "_fast"}[package]).cake_jit
     built = set(ops.libraries(arch, hidden, sinkhorn_iters)[package])
     sm_counts = SM_COUNTS[arch] | {sm_count for board, sm_count in jit.RULES_BOARDS if board == arch}
@@ -92,12 +102,13 @@ def test_prebuild_covers_the_programs_of_every_token_count(package, arch, hidden
     for sm_count in sorted(sm_counts):
         for T in _token_counts(jit):
             for kind in jit.KINDS:
-                for record in jit.selected_modules(
-                    arch, hidden, kind, rows=T, sm_count=sm_count, sinkhorn_iters=sinkhorn_iters
-                ):
-                    if jit.library_name(record, arch) not in built:
-                        missing.add((sm_count, T, kind, record))
-    assert not missing, sorted(missing)[:10]
+                for path in _call_paths(jit):
+                    for record in jit.selected_modules(
+                        arch, hidden, kind, rows=T, sm_count=sm_count, sinkhorn_iters=sinkhorn_iters, **path
+                    ):
+                        if jit.library_name(record, arch) not in built:
+                            missing.add((sm_count, T, kind, path.get("path"), record))
+    assert not missing, sorted(missing, key=str)[:10]
 
 
 @pytest.mark.parametrize(

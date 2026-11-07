@@ -18,7 +18,7 @@ from miles_ext_kernels.cake._runtime import loader
 
 VENDOR = Path(cake.__file__).resolve().parent / "_vendor"
 DET, FAST, HEAD = "cake_mhc_det_train", "cake_mhc_nondet_train", "cake_mhc_head_det_train"
-FI_COMMIT = "ab63ff3afd8bbb74fe69ace64de706c4addb54c7"
+FI_COMMIT = "3bc3b4351f1da01d2613f36d429602da9a6c8c17"
 FI_PATHS = {
     DET: "flashinfer/experimental/cake/cake_mhc_det_train",
     FAST: "flashinfer/experimental/cake/cake_mhc_nondet_train",
