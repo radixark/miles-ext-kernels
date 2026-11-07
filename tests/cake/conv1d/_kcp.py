@@ -38,8 +38,16 @@ CONTEXT_BUILDERS = {
         "cake_gdn_nondet_train_kcp_partition",
         "cake_gdn_nondet_train_kcp_build_context",
     ),
-    "kda-det": ("miles_ext_kernels.cake._vendor.cake_kda_det_train_kcp", "partition_det_kcp", "build_context_det_kcp"),
-    "kda-fast": ("miles_ext_kernels.cake._vendor.cake_kda_train_kcp", "partition_kcp", "build_context_kcp"),
+    "kda-det": (
+        "miles_ext_kernels.cake._vendor.cake_kda_det_train_kcp",
+        "cake_kda_det_train_kcp_partition",
+        "cake_kda_det_train_kcp_build_context",
+    ),
+    "kda-fast": (
+        "miles_ext_kernels.cake._vendor.cake_kda_nondet_train_kcp",
+        "cake_kda_nondet_train_kcp_partition",
+        "cake_kda_nondet_train_kcp_build_context",
+    ),
 }
 
 

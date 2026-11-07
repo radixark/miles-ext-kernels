@@ -4,7 +4,8 @@ Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
 Context-parallel (KCP) packed KDA chunked training on the vendored Cake packages ``cake_kda_det_train_kcp``
-(``det``) and ``cake_kda_train_kcp`` (``fast``), SM100a / SM103a / SM107a.
+(``det``) and ``cake_kda_nondet_train_kcp`` (``fast``), SM100a / SM103a / SM107a. Each needs its single-rank sibling
+(``cake_kda_det_train`` / ``cake_kda_nondet_train``), which it imports by name from the same parent package.
 
 The packed batch of one step is split over the ranks of a ``torch.distributed`` process group, and the per-document
 state recurrences cross the rank boundaries exactly::
@@ -22,11 +23,10 @@ and ``v`` made dense as there). Every rank of the group calls the same entry poi
 collectives run inside them.
 
 A partition and a context hold no variant: a context serves the calls of both packages. Each call runs the package
-of the call (``config.variant("kda")``; a ``fast`` call with the in-kernel q / k L2 norm, which the ``fast`` package
-refuses, runs ``det`` and says so once); :func:`chunk_kda_bwd_kcp` runs the package that wrote ``saved``. ``det``
-gives the same bits for the same inputs, partition and process group. ``fast``: in the activated-gate mode its ``dg``
-may differ from ``det``'s by FP32 rounding; in the raw gate mode its parameter partial sums are FP64 sums in no fixed
-order on SM100a / SM103a.
+of the call (``config.variant("kda")``, in every gate and L2 norm mode); :func:`chunk_kda_bwd_kcp` runs the package
+that wrote ``saved``. ``det`` gives the same bits for the same inputs, partition and process group. ``fast``: in the
+activated-gate mode without the in-kernel L2 norm its ``dg`` may differ from ``det``'s by FP32 rounding; in the raw
+gate mode and with the in-kernel L2 norm every result, the parameter partial sums included, is ``det``'s.
 
 In the raw gate mode the gradients of ``A_log`` / ``dt_bias`` are this rank's partial sums (the gradients through its
 own tokens): sum them over the group like the gradients of any replicated parameter, or with
@@ -42,6 +42,8 @@ from importlib import import_module
 from typing import Any
 
 import torch
+
+from miles_ext_kernels.cake._runtime import config
 
 from . import ops
 
@@ -67,12 +69,11 @@ def _det_plan() -> Any:
 
 def _fast_kcp() -> Any:
     """``cake_kcp`` of the non-deterministic context-parallel package."""
-    return import_module(f"{ops._VENDOR}.cake_kda_train_kcp.cake_kcp")
+    return import_module(f"{ops._VENDOR}.cake_kda_nondet_train_kcp.cake_kcp")
 
 
 def _gate(use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel) -> dict[str, Any]:
-    """The mode keywords of a call, the same for either package (the ``fast`` package refuses
-    ``use_qk_l2norm_in_kernel`` other than ``False``: see ``ops._modes``)."""
+    """The mode keywords of a call, the same for either package."""
     return dict(
         use_gate_in_kernel=use_gate_in_kernel,
         A_log=A_log,
@@ -95,7 +96,9 @@ def partition_kcp(
     tensor or a sequence). ``layout``: ``"contiguous"`` (equal token shares in order), ``"zigzag"`` or
     ``"zigzag_per_document"``; ``fragments`` gives an explicit table instead, and ``cut_points`` (per document the
     ``2 * world_size + 1`` cut offsets) applies to ``"zigzag_per_document"``. The same object on every rank."""
-    return _det_plan().partition_det_kcp(cu_seqlens_global_cpu, world_size, layout, fragments, cut_points=cut_points)
+    return _det_plan().cake_kda_det_train_kcp_partition(
+        cu_seqlens_global_cpu, world_size, layout, fragments, cut_points=cut_points
+    )
 
 
 def build_context_kcp(
@@ -115,7 +118,7 @@ def build_context_kcp(
     history rows of the causal convolution cross the rank boundaries. ``heads`` (an int or a sequence) derives those
     head counts' plans now; ``stream`` takes the context's one asynchronous table copy (default: the current stream of
     ``device``), so a pack can be prepared while the previous one runs. No collective runs here."""
-    return _det_plan().build_context_det_kcp(
+    return _det_plan().cake_kda_det_train_kcp_build_context(
         part, group, rank, device, conv_kernel_size, sm_count=sm_count, heads=heads, stream=stream
     )
 
@@ -144,9 +147,9 @@ def chunk_kda_kcp(
     ops.check_heads(int(v.shape[-2]))
     v, beta = ops.seam(v, beta)
     gate = _gate(use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel)
-    if ops.call_variant(use_qk_l2norm_in_kernel) == "fast":
-        return _fast_kcp().chunk_kda_kcp(q, k, v, g, beta, ctx, scale=scale, deterministic=False, **gate, **options)
-    return _det_kcp().chunk_kda_det_kcp(q, k, v, g, beta, ctx, scale=scale, **gate, **options)
+    if config.variant(ops.OP) == "fast":
+        return _fast_kcp().cake_kda_nondet_kcp(q, k, v, g, beta, ctx, scale=scale, **gate, **options)
+    return _det_kcp().cake_kda_det_kcp(q, k, v, g, beta, ctx, scale=scale, **gate, **options)
 
 
 def chunk_kda_fwd_kcp(
@@ -172,9 +175,9 @@ def chunk_kda_fwd_kcp(
     v, beta = ops.seam(v, beta)
     gate = _gate(use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel)
     common = dict(scale=scale, save_for_backward=save_for_backward, **gate)
-    if ops.call_variant(use_qk_l2norm_in_kernel) == "fast":
-        return _fast_kcp().chunk_kda_fwd_kcp(q, k, v, g, beta, ctx, deterministic=False, **common, **options)
-    return _det_kcp().chunk_kda_det_fwd_kcp(q, k, v, g, beta, ctx, **common, **options)
+    if config.variant(ops.OP) == "fast":
+        return _fast_kcp().cake_kda_nondet_train_kcp_forward(q, k, v, g, beta, ctx, **common, **options)
+    return _det_kcp().cake_kda_det_train_kcp_forward(q, k, v, g, beta, ctx, **common, **options)
 
 
 def chunk_kda_bwd_kcp(
@@ -198,22 +201,20 @@ def chunk_kda_bwd_kcp(
     """The context-parallel backward alone, from the forward's operands and modes: ``(dq, dk, dv, dbeta, dg)``, and
     ``(dq, dk, dv, dbeta, dg, dA_log, ddt_bias)`` in the raw gate mode (``dA_log`` / ``ddt_bias`` this rank's partial
     sums); ``dbeta`` in ``beta``'s dtype. It runs the package that wrote ``saved`` (a saved set is read by its own
-    package only; a ``fast`` set with ``use_qk_l2norm_in_kernel`` other than ``False``, a mode its forward did not
-    run, is a ``ValueError`` of that package); ``saved=None`` replays the forward, its exchanges included, in the
-    package of the call."""
+    package only); ``saved=None`` replays the forward, its exchanges included, in the package of the call."""
     ops.check_heads(int(v.shape[-2]))
     beta_dtype = beta.dtype
     v, beta = ops.seam(v, beta)
     gate = _gate(use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel)
     common = dict(saved=saved, scale=scale, **gate)
     if saved is None:
-        variant = ops.call_variant(use_qk_l2norm_in_kernel)
+        variant = config.variant(ops.OP)
     else:
-        variant = "fast" if isinstance(saved, _fast_kcp().SavedKcp) else "det"
+        variant = "fast" if isinstance(saved, _fast_kcp().CakeKDANondetKcpSaved) else "det"
     if variant == "fast":
-        grads = _fast_kcp().chunk_kda_bwd_kcp(q, k, v, g, beta, ctx, dout, deterministic=False, **common, **options)
+        grads = _fast_kcp().cake_kda_nondet_train_kcp_backward(q, k, v, g, beta, ctx, dout, **common, **options)
     else:
-        grads = _det_kcp().chunk_kda_det_bwd_kcp(q, k, v, g, beta, ctx, dout, **common, **options)
+        grads = _det_kcp().cake_kda_det_train_kcp_backward(q, k, v, g, beta, ctx, dout, **common, **options)
     grads = list(grads)
     grads[3] = grads[3].to(beta_dtype)
     return tuple(grads)
@@ -226,4 +227,4 @@ def reduce_gate_param_grads_kcp(
     group, then a sum in FP32 in rank order, so every rank gets the same bits whatever the collective's algorithm (an
     all-reduce does not fix its summation order). For the partial sums of either variant. Every rank of the group
     calls it with the same shapes."""
-    return _det_kcp().reduce_gate_param_grads_det_kcp(ctx, dA_log, ddt_bias)
+    return _det_kcp().cake_kda_det_train_kcp_reduce_gate_param_grads(ctx, dA_log, ddt_bias)
