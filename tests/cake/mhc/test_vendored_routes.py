@@ -17,12 +17,12 @@ from miles_ext_kernels.cake import mhc
 from miles_ext_kernels.cake._runtime import loader
 
 VENDOR = Path(cake.__file__).resolve().parent / "_vendor"
-DET, FAST, HEAD = "cake_mhc_det_train_backend", "cake_mhc_train_backend", "cake_mhc_det_train_head_backend"
-FI_COMMIT = "c5db8d3ccd3fa3842812280f7f208718dc0b8610"
+DET, FAST, HEAD = "cake_mhc_det_train", "cake_mhc_nondet_train", "cake_mhc_head_det_train"
+FI_COMMIT = "ab63ff3afd8bbb74fe69ace64de706c4addb54c7"
 FI_PATHS = {
-    DET: "flashinfer/cake_mhc_det_train_backend",
-    FAST: "flashinfer/experimental/cake/cake_mhc_train_backend",
-    HEAD: "flashinfer/cake_mhc_det_train_head_backend",
+    DET: "flashinfer/experimental/cake/cake_mhc_det_train",
+    FAST: "flashinfer/experimental/cake/cake_mhc_nondet_train",
+    HEAD: "flashinfer/experimental/cake/cake_mhc_head_det_train",
 }
 # the hidden sizes every route (and the head) serves on each architecture
 HIDDEN_BY_ARCH = {"sm_100a": mhc._HIDDEN_SIZES, "sm_103a": mhc._HIDDEN_SIZES, "sm_107a": (4096,)}

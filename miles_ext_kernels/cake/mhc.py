@@ -43,9 +43,9 @@ OP = OpSpec(
     variants=("det", "fast"),
     selected_by=(("mhc_backend", "cake"),),
     packages=(
-        "cake_mhc_det_train_backend",
-        "cake_mhc_det_train_head_backend",
-        "cake_mhc_train_backend",
+        "cake_mhc_det_train",
+        "cake_mhc_head_det_train",
+        "cake_mhc_nondet_train",
     ),
     exports=(
         "HIDDEN_SIZES",

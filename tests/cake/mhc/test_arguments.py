@@ -27,9 +27,9 @@ def test_the_op_declares_both_variants_the_selector_and_the_packages():
     assert mhc.OP.selected_by == (("mhc_backend", "cake"),)
     assert mhc.OP.variant_flag == FLAG and mhc.OP.flags == ()
     assert set(mhc.OP.packages) == {
-        "cake_mhc_det_train_backend",
-        "cake_mhc_det_train_head_backend",
-        "cake_mhc_train_backend",
+        "cake_mhc_det_train",
+        "cake_mhc_head_det_train",
+        "cake_mhc_nondet_train",
     }
     assert mhc.__all__ == ["OP", *mhc.OP.exports]
     assert {"mhc_prepare", "mhc_finish", "mhc_head", "is_supported", "HIDDEN_SIZES"} <= set(dir(mhc))

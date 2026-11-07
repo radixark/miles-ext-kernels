@@ -17,7 +17,7 @@ from miles_ext_kernels.cake import mhc  # noqa: E402
 from miles_ext_kernels.cake._impl.mhc import ops  # noqa: E402
 from miles_ext_kernels.cake._runtime import config, workspace  # noqa: E402
 
-DET, FAST, HEAD = "cake_mhc_det_train_backend", "cake_mhc_train_backend", "cake_mhc_det_train_head_backend"
+DET, FAST, HEAD = "cake_mhc_det_train", "cake_mhc_nondet_train", "cake_mhc_head_det_train"
 HIDDEN_BY_ARCH = {"sm_100a": (4096, 5120, 7168), "sm_103a": (4096, 5120, 7168), "sm_107a": (4096,)}
 CASES = [(arch, hidden) for arch, sizes in HIDDEN_BY_ARCH.items() for hidden in sizes]
 
@@ -182,7 +182,7 @@ def test_prepare_hands_the_kernels_fp32_parameters(monkeypatch):
 
 def test_each_call_runs_the_variant_configured_when_it_runs(monkeypatch):
     det = _record(monkeypatch, ops._det, "cake_mhc_det_train_prepare")
-    fast = _record(monkeypatch, ops._fast, "cake_mhc_train_prepare")
+    fast = _record(monkeypatch, ops._fast, "cake_mhc_nondet_train_prepare")
     X, fn, scale, base = _inputs(torch.float32)
 
     def runs(**constants):
@@ -192,21 +192,21 @@ def test_each_call_runs_the_variant_configured_when_it_runs(monkeypatch):
     cake.configure(argparse.Namespace(deterministic_mode=True))
     assert runs() == "cake_mhc_det_train_prepare"
     miles_ext_kernels.configure({"cake_mhc_variant": "fast"})
-    assert runs(rms_eps=1e-6, hc_eps=1e-5, sinkhorn_iters=7) == "cake_mhc_train_prepare"
+    assert runs(rms_eps=1e-6, hc_eps=1e-5, sinkhorn_iters=7) == "cake_mhc_nondet_train_prepare"
     cake.configure()
     assert runs() == "cake_mhc_det_train_prepare"
 
-    assert fast[0][1] == {"rms_eps": 1e-6, "hc_eps": 1e-5, "sinkhorn_iters": 7, "deterministic": False}
+    assert fast[0][1] == {"rms_eps": 1e-6, "hc_eps": 1e-5, "sinkhorn_iters": 7}
     assert det[0][1] == {"rms_eps": ops.RMS_EPS, "hc_eps": ops.HC_EPS, "sinkhorn_iters": ops.SINKHORN_ITERS}
 
 
 def test_the_variant_comes_from_the_configuration_only(monkeypatch):
     """torch's deterministic algorithms no longer turn fast into det (the fast backward raises torch's alert)."""
-    _record(monkeypatch, ops._fast, "cake_mhc_train_prepare")
+    _record(monkeypatch, ops._fast, "cake_mhc_nondet_train_prepare")
     cake.configure(cake_mhc_variant="fast")
     torch.use_deterministic_algorithms(True)
     try:
-        assert ops.mhc_prepare(*_inputs(torch.float32))[0] == "cake_mhc_train_prepare"
+        assert ops.mhc_prepare(*_inputs(torch.float32))[0] == "cake_mhc_nondet_train_prepare"
     finally:
         torch.use_deterministic_algorithms(False)
 
@@ -215,9 +215,7 @@ def test_finish_runs_the_package_of_the_handle_and_refuses_another(monkeypatch):
     finished = []
     monkeypatch.setattr(ops._det, "cake_mhc_det_train_finish", lambda X, B, handle: finished.append(("det", handle)))
     monkeypatch.setattr(
-        ops._fast,
-        "cake_mhc_train_finish",
-        lambda X, B, handle, deterministic: finished.append(("fast", deterministic)),
+        ops._fast, "cake_mhc_nondet_train_finish", lambda X, B, handle: finished.append(("fast", handle))
     )
     det_handle = ops._det._MHCTrainHandle(ops._det._MHCTrainState(), ())
     fast_handle = ops._fast._MHCTrainHandle(ops._fast._MHCTrainState(), ())
@@ -225,7 +223,7 @@ def test_finish_runs_the_package_of_the_handle_and_refuses_another(monkeypatch):
     cake.configure(cake_mhc_variant="fast")  # the handle decides, not the configuration
     ops.mhc_finish(None, None, det_handle)
     ops.mhc_finish(None, None, fast_handle)
-    assert finished == [("det", det_handle), ("fast", False)]
+    assert finished == [("det", det_handle), ("fast", fast_handle)]
     with pytest.raises(TypeError, match="handle must be the handle mhc_prepare returned, not object"):
         ops.mhc_finish(None, None, object())
 

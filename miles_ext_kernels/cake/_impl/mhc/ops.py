@@ -25,16 +25,16 @@ FP32 gradient rounded once). ``T`` is a run-time scalar (``T == 0`` launches not
 
 The kernels are three vendored FlashInfer packages:
 
-* ``cake_mhc_det_train_backend`` (``det``): forward, and a backward whose ``dfn`` / ``dscale`` / ``dbase`` are
-  fixed-order reductions, bitwise reproducible for a token count on a device.
-* ``cake_mhc_train_backend`` (``fast``): copies of the ``det`` forward programs (the same bits) and a backward that
+* ``cake_mhc_det_train`` (``det``): forward, and a backward whose ``dfn`` / ``dscale`` / ``dbase`` are fixed-order
+  reductions, bitwise reproducible for a token count on a device.
+* ``cake_mhc_nondet_train`` (``fast``): copies of the ``det`` forward programs (the same bits) and a backward that
   adds the ``dfn`` partial of every (column slab, token chunk) unit with FP32 atomics, so only the summation order of
   ``dfn`` varies from run to run (each element within ``P <= 32`` FP32 roundings of the fixed-order sum of its
   per-chunk partials). ``dX`` is the ``det`` bits; ``dscale`` / ``dbase`` are the ``det`` package's per-CTA
   reduction, whose low-order bits differ from ``det`` at hidden 4096 above 14927 tokens (``det`` sums them over
   8-token group rows there).
-* ``cake_mhc_det_train_head_backend``: the model head's stream mean, bit for bit torch's BF16 ``X.mean(dim=1)`` and
-  its gradient (one program for both variants).
+* ``cake_mhc_head_det_train``: the model head's stream mean, bit for bit torch's BF16 ``X.mean(dim=1)`` and its
+  gradient (one program for both variants).
 
 Variant. :func:`mhc_prepare` reads ``config.variant("mhc")`` when it runs: ``det`` unless ``configure`` set
 ``fast`` (``validate_args`` resolves miles' default to ``fast`` and deterministic mode to ``det``). The handle it
@@ -66,9 +66,9 @@ from typing import Any
 import torch
 
 from miles_ext_kernels.cake._runtime import config, loader, workspace
-from miles_ext_kernels.cake._vendor import cake_mhc_det_train_backend as _det
-from miles_ext_kernels.cake._vendor import cake_mhc_det_train_head_backend as _head
-from miles_ext_kernels.cake._vendor import cake_mhc_train_backend as _fast
+from miles_ext_kernels.cake._vendor import cake_mhc_det_train as _det
+from miles_ext_kernels.cake._vendor import cake_mhc_head_det_train as _head
+from miles_ext_kernels.cake._vendor import cake_mhc_nondet_train as _fast
 
 __all__ = [
     "HC_EPS",
@@ -159,8 +159,8 @@ def is_supported(device: Any, hidden: int | None = None) -> bool:
         return False
     return (
         _det.is_cake_mhc_det_train_supported(device, hidden)
-        and _fast.is_cake_mhc_train_supported(device, hidden)
-        and _head.is_cake_mhc_det_train_head_supported(device, hidden)
+        and _fast.is_cake_mhc_nondet_train_supported(device, hidden)
+        and _head.is_cake_mhc_head_det_train_supported(device, hidden)
     )
 
 
@@ -189,15 +189,8 @@ def mhc_prepare(
     """
     fn, scale, base = _fp32(fn), _fp32(scale), _fp32(base)
     if config.variant(_OP) == "fast":
-        return _fast.cake_mhc_train_prepare(
-            X,
-            fn,
-            scale,
-            base,
-            rms_eps=rms_eps,
-            hc_eps=hc_eps,
-            sinkhorn_iters=sinkhorn_iters,
-            deterministic=False,
+        return _fast.cake_mhc_nondet_train_prepare(
+            X, fn, scale, base, rms_eps=rms_eps, hc_eps=hc_eps, sinkhorn_iters=sinkhorn_iters
         )
     return _det.cake_mhc_det_train_prepare(
         X, fn, scale, base, rms_eps=rms_eps, hc_eps=hc_eps, sinkhorn_iters=sinkhorn_iters
@@ -212,7 +205,7 @@ def mhc_finish(X: torch.Tensor, B: torch.Tensor, handle: Any) -> torch.Tensor:
     ``dX`` of the prepare node. A reentrant checkpoint region holds both calls or starts after the prepare.
     """
     if isinstance(handle, _fast._MHCTrainHandle):
-        return _fast.cake_mhc_train_finish(X, B, handle, deterministic=False)
+        return _fast.cake_mhc_nondet_train_finish(X, B, handle)
     if isinstance(handle, _det._MHCTrainHandle):
         return _det.cake_mhc_det_train_finish(X, B, handle)
     raise TypeError(f"handle must be the handle mhc_prepare returned, not {type(handle).__name__}")
@@ -221,7 +214,7 @@ def mhc_finish(X: torch.Tensor, B: torch.Tensor, handle: Any) -> torch.Tensor:
 def mhc_head(X: torch.Tensor) -> torch.Tensor:
     """Autograd-enabled head: BF16 ``Y = X.mean(dim=1)`` ``[T, H]`` of the four streams ``X`` ``[T, 4, H]``, and its
     gradient, bit for bit torch's."""
-    return _head.cake_mhc_det_train_head(X)
+    return _head.cake_mhc_head_det(X)
 
 
 def _run_time(jit: ModuleType, record: str) -> bool:
@@ -263,9 +256,9 @@ def libraries(arch: str, hidden: int, sinkhorn_iters: int) -> dict[str, tuple[st
         raise ValueError(f"the Cake mHC kernels run the hidden sizes {tuple(sorted(served))} on {arch}, not {hidden}")
     head = _head.cake_jit
     return {
-        "cake_mhc_det_train_backend": _route_libraries(_det.cake_jit, arch, hidden, sinkhorn_iters),
-        "cake_mhc_train_backend": _route_libraries(_fast.cake_jit, arch, hidden, sinkhorn_iters),
-        "cake_mhc_det_train_head_backend": tuple(
+        "cake_mhc_det_train": _route_libraries(_det.cake_jit, arch, hidden, sinkhorn_iters),
+        "cake_mhc_nondet_train": _route_libraries(_fast.cake_jit, arch, hidden, sinkhorn_iters),
+        "cake_mhc_head_det_train": tuple(
             head.library_name(head.ROLES[role], arch) for role in ("head_fwd", "head_bwd")
         ),
     }
