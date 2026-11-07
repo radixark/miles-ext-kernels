@@ -1695,7 +1695,7 @@
           "csrc/cake_kda_det_train_f92b256cccc2c9007554_kernel.cu": "cafc1d6025971837ef91cb83eb01a9c0950fed73"
         },
         "source": {
-          "commit": "8480055a1737e353518be1b38eb06728ad5ab9da",
+          "commit": "f5ab85cc77edbd0257b0145eefe0113074dc6ee2",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_kda_det_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
@@ -1711,7 +1711,7 @@
           "build.json": "3bbf1dd408011417dcd18842db0e1f3ab322dc5f",
           "build.test.json": "8db94ceaec536986c1ee1ce4eb4696d2ecb8c2e3",
           "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
-          "cake_kcp.py": "c5714e3d4a8d7e21527c61c8fdc0899faa30b55b",
+          "cake_kcp.py": "50fe15deafb5fe3706e73e4a1d70dc26bb8f9db8",
           "cake_kcp_jit.py": "82f044f105298154935925d62cf0c94173643b84",
           "cake_kcp_plan.py": "3e103c29d236794a09c62260a4ec48c5a6e97759",
           "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c",
@@ -1761,7 +1761,7 @@
           "csrc/cake_kda_det_train_f227dd21f1f3cb464b29_kernel.cu": "f087ee99edae701a0c2b9c6e0f7a2370f53cf1ed"
         },
         "source": {
-          "commit": "8480055a1737e353518be1b38eb06728ad5ab9da",
+          "commit": "f5ab85cc77edbd0257b0145eefe0113074dc6ee2",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_kda_det_train_kcp",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
@@ -1999,7 +1999,7 @@
           "csrc/cake_kda_train_fc369dcf6d01dd9a7417_kernel.cu": "472af8a18b4501c4790f5239de0bc1a79ce9d0e3"
         },
         "source": {
-          "commit": "8480055a1737e353518be1b38eb06728ad5ab9da",
+          "commit": "f5ab85cc77edbd0257b0145eefe0113074dc6ee2",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_kda_nondet_train",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
@@ -2066,7 +2066,7 @@
           "csrc/cake_kda_train_f227dd21f1f3cb464b29_kernel.cu": "38028ac433b8f46cc5ba896abd571762971b81e3"
         },
         "source": {
-          "commit": "8480055a1737e353518be1b38eb06728ad5ab9da",
+          "commit": "f5ab85cc77edbd0257b0145eefe0113074dc6ee2",
           "kind": "flashinfer",
           "path": "flashinfer/experimental/cake/cake_kda_nondet_train_kcp",
           "repo": "https://github.com/flashinfer-ai/flashinfer"
