@@ -16,7 +16,7 @@ ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 FLOOR = {"sm_100a": "12.8", "sm_103a": "12.9", "sm_107a": "13.4"}
 # libraries per architecture of each package
 LIBRARIES = {
-    "cake_dsa_indexer_det_train": {"sm_100a": 62, "sm_103a": 62, "sm_107a": 57},
+    "cake_dsa_indexer_det_train": {"sm_100a": 65, "sm_103a": 73, "sm_107a": 61},
     "cake_dsa_sparse_det": {"sm_100a": 43, "sm_103a": 43, "sm_107a": 43},
     "cake_dsa_sparse_attention_nondet_train": {"sm_100a": 14, "sm_103a": 14, "sm_107a": 14},
 }
@@ -98,12 +98,12 @@ def nvcc(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("package", sorted(LIBRARIES))
 def test_sm107a_needs_cuda_13_4_whatever_the_package_records(package, nvcc):
-    """nvcc 13.0 to 13.3 cannot compile compute_107a; the fast package's build.json records 13.0 for SM107a."""
+    """nvcc 13.0 to 13.3 cannot compile compute_107a; every package's build.json records 13.4 for SM107a."""
     fake = nvcc("13.0.88")
     names = [entry["name"] for entry in _libraries(package, "sm_107a")]
     recorded = {entry["min_cuda"] for entry in _libraries(package, "sm_107a")}
 
-    assert recorded == ({"13.0"} if package == "cake_dsa_sparse_attention_nondet_train" else {"13.4"})
+    assert recorded == {"13.4"}
     for name in names[:2]:
         with pytest.raises(RuntimeError, match=r"needs CUDA 13\.4 or newer"):
             loader.prebuild_libraries(package, [name])

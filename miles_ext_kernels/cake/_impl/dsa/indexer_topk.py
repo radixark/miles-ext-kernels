@@ -34,7 +34,7 @@ indexer backward (:func:`.ops.indexer_backward`); this call itself has no autogr
   call takes it from torch's caching allocator; a caller-owned uint8 buffer of at least that size may be reused across
   calls on one stream. No call synchronizes with the host.
 
-The package picks one of its 62 (SM100a / SM103a) or 57 (SM107a) programs per call from ``T``, ``T_kv``, ``S``,
+The package picks one of its 65 (SM100a), 73 (SM103a) or 61 (SM107a) programs per call from ``T``, ``T_kv``, ``S``,
 ``ratio``, ``top_k`` and the SM count, so a new token count mid-run can reach a program not used before. Every library
 of the architecture is therefore built ahead: by ``prebuild("dsa", ..., index_heads=32)``, else by the first call on the
 architecture, unless ``--cake-dsa-lazy-build`` leaves each to its first launch.

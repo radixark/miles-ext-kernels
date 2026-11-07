@@ -62,7 +62,7 @@ def test_prebuild_names_every_library_the_package_builds_for_the_architecture(ar
     names = indexer_topk.library_names(arch)
 
     assert names == sorted(entries)
-    assert len(names) == (57 if arch == "sm_107a" else 62)
+    assert len(names) == {"sm_100a": 65, "sm_103a": 73, "sm_107a": 61}[arch]
 
 
 @pytest.mark.parametrize(
