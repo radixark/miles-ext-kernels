@@ -5,7 +5,8 @@ https://www.apache.org/licenses/LICENSE-2.0
 
 The ragged BF16 MoE grouped GEMM miles calls (SM100a / SM103a / SM107a), on two vendored FlashInfer packages whose
 libraries the runtime's loader builds and loads (SM107a with a CUDA 13.4 or newer toolkit):
-``_vendor/cake_moe_grouped_det_gemm`` (``det``) and ``_vendor/cake_moe_grouped_gemm`` (``fast``).
+``_vendor/cake_moe_grouped_gemm_det_train`` (``det``) and ``_vendor/cake_moe_grouped_gemm_nondet_train``
+(``fast``).
 
 :func:`grouped_mm` is ``torch._grouped_mm(x, w.transpose(-2, -1), offs=offs)`` for ``x [sum_m, K]``, ``w [E, N, K]``
 and the int32 cumulative row ends ``offs [E]`` of the groups, differentiable in ``x`` and ``w``. The kernels read
@@ -19,7 +20,7 @@ of 512 and at least 4096 rows per group on average), adds the split tail of its 
 instead of a second, ordered reduction launch, so those tiles may differ in the last bit run to run. Every forward reads
 the configured variant (``config.variant``); its backward runs the package of its forward. Under
 ``torch.use_deterministic_algorithms(True)`` a ``fast`` call runs ``det`` and logs it once (``config.warn_runs_det``):
-the ``fast`` weight gradient raises torch's non-determinism alert there.
+a ``fast`` weight gradient with that unordered tail raises torch's non-determinism alert there.
 
 32-bit addressing. The kernels address each output with 32-bit element offsets: ``sum_m * N`` (the output),
 ``sum_m * K`` (the input gradient) and ``E * N * K`` (the weight gradient) must stay at most ``2**31 - 1``.
@@ -58,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 _OP = "moe_grouped_gemm"
 # the vendored package of each variant
-_PACKAGES = {"det": "cake_moe_grouped_det_gemm", "fast": "cake_moe_grouped_gemm"}
+_PACKAGES = {"det": "cake_moe_grouped_gemm_det_train", "fast": "cake_moe_grouped_gemm_nondet_train"}
 # miles_ext_kernels.cake._vendor
 _VENDOR = f"{__name__.rsplit('._impl.', 1)[0]}._vendor"
 _WHAT = "the Cake MoE grouped GEMM"
@@ -156,8 +157,8 @@ def grouped_mm(x: torch.Tensor, w: torch.Tensor, offs: torch.Tensor) -> torch.Te
         config.warn_runs_det(_OP, _DETERMINISTIC_ALGORITHMS)
         variant = "det"
     if variant == "det":
-        return _module("det", "cake_autograd").cake_grouped_det_mm(x, w, offs)
-    return _module("fast", "cake_autograd").cake_grouped_mm(x, w, offs, deterministic=False)
+        return _module("det", "cake_autograd").cake_moe_grouped_gemm_det(x, w, offs)
+    return _module("fast", "cake_autograd").cake_moe_grouped_gemm_nondet(x, w, offs)
 
 
 def _library_names(variant: str, arch: str) -> list[str]:

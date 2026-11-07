@@ -8,8 +8,9 @@ Ragged BF16 MoE grouped GEMM for SM100a / SM103a / SM107a: the expert projection
 ``torch._grouped_mm`` computes them.
 
 Two variants. ``det`` reduces every output in a fixed order: the output and both gradients repeat bit for bit.
-``fast`` runs the same forward and input-gradient programs (the same bits) and a weight gradient that, where it picks
-the 512-wide k tile, adds the split tail of its last wave with unordered FP32 reductions.
+``fast`` gives ``det``'s forward and input-gradient bits (on SM100a its input gradient can take an L2 evict-first twin
+of ``det``'s program) and a weight gradient that, where it picks the 512-wide k tile, adds the split tail of its last
+wave with unordered FP32 reductions.
 
 miles selects the op with ``--moe-grouped-gemm-backend cake`` under ``--train-backend torchtitan``, and the variant
 with ``--cake-moe-grouped-gemm-variant``. The kernels address their outputs with 32-bit element offsets:
@@ -37,7 +38,7 @@ OP = OpSpec(
     summary="ragged BF16 MoE grouped GEMM of the routed experts, forward + input and weight gradients",
     variants=("det", "fast"),
     selected_by=(("moe_grouped_gemm_backend", "cake"),),
-    packages=("cake_moe_grouped_det_gemm", "cake_moe_grouped_gemm"),
+    packages=("cake_moe_grouped_gemm_det_train", "cake_moe_grouped_gemm_nondet_train"),
     exports=("check_grouped_dims", "grouped_mm", "max_grouped_rows"),
     validate=_validate,
 )
