@@ -142,15 +142,19 @@ def test_prebuild_returns_every_library_and_is_idempotent():
 
 def test_a_variant_configured_after_the_module_was_built_runs_at_its_next_call_without_a_build(monkeypatch):
     """Reviewer item: configure(det), construct, call, configure(fast): the next call compiled fast's programs."""
-    fast = loader.load_package("cake_rmsnorm_train_backend")
-    original = fast.cake_rmsnorm
-    flags = []
+    det = loader.load_package("cake_rmsnorm_det_train")
+    fast = loader.load_package("cake_rmsnorm_nondet_train")
+    ran = []
 
-    def record(*args, **kwargs):
-        flags.append(kwargs["deterministic"])
-        return original(*args, **kwargs)
+    def recorder(variant, original):
+        def record(*args, **kwargs):
+            ran.append(variant)
+            return original(*args, **kwargs)
 
-    monkeypatch.setattr(fast, "cake_rmsnorm", record)
+        return record
+
+    monkeypatch.setattr(det, "cake_rmsnorm_det", recorder("det", det.cake_rmsnorm_det))
+    monkeypatch.setattr(fast, "cake_rmsnorm_nondet", recorder("fast", fast.cake_rmsnorm_nondet))
     cake.prebuild("rmsnorm", hidden_size=2048)
     x, w, dy = _inputs(4096, 2048)
     with no_build():
@@ -159,7 +163,7 @@ def test_a_variant_configured_after_the_module_was_built_runs_at_its_next_call_w
         norm(x.detach().requires_grad_()).backward(dy)
         cake.configure(cake_rmsnorm_variant="fast")
         norm(x.detach().requires_grad_()).backward(dy)
-    assert flags == [True, False]
+    assert ran == ["det", "fast"]
 
 
 _FRESH_PROCESS = """

@@ -31,21 +31,29 @@ SUPPORTED = (256, 512, 1536, 2048, 4096, 5120, 6144)
 UNSUPPORTED = (1024, 2560, 3072)
 
 
-def _fast_package():
-    return loader.load_package("cake_rmsnorm_train_backend")
+def _packages():
+    """``(det, fast)``: the vendored packages of the two variants."""
+    return loader.load_package("cake_rmsnorm_det_train"), loader.load_package("cake_rmsnorm_nondet_train")
 
 
 @pytest.fixture
 def calls(monkeypatch):
-    """The ``deterministic`` flag of every kernel call; each call returns its input rows instead of launching."""
+    """The variant of every kernel call (``"det"``: the det package's autograd entry, ``"fast"``: the nondet
+    package's); each call returns its input rows instead of launching. The stand-ins replace existing entries only and
+    take no ``deterministic`` keyword, as the packages' entries."""
     recorded = []
 
-    def cake_rmsnorm(x, w, eps, residual=None, deterministic=True):
-        assert w.dtype == torch.float32 and eps == EPS
-        recorded.append(deterministic)
-        return x.clone()
+    def entry(variant):
+        def run(x, w, eps, residual=None):
+            assert w.dtype == torch.float32 and eps == EPS
+            recorded.append(variant)
+            return x.clone()
 
-    monkeypatch.setattr(_fast_package(), "cake_rmsnorm", cake_rmsnorm)
+        return run
+
+    det, fast = _packages()
+    monkeypatch.setattr(det, "cake_rmsnorm_det", entry("det"))
+    monkeypatch.setattr(fast, "cake_rmsnorm_nondet", entry("fast"))
     return recorded
 
 
@@ -231,7 +239,7 @@ def test_an_unconfigured_call_runs_det(no_build, calls):
     x = torch.randn(7, 1, 2048).bfloat16()
 
     y = norm(x)
-    assert calls == [True]
+    assert calls == ["det"]
     assert y.shape == x.shape and torch.equal(y, x)
 
 
@@ -246,7 +254,7 @@ def test_the_variant_is_read_when_a_call_runs_not_when_the_module_is_built(no_bu
     norm(x)
     cake.configure(cake_rmsnorm_variant="det")
     rmsnorm.zero_centered_rmsnorm(x, norm.weight, EPS)
-    assert calls == [True, False, True]
+    assert calls == ["det", "fast", "det"]
 
 
 def test_fast_runs_det_under_torch_deterministic_algorithms_and_logs_it_once(no_build, calls, monkeypatch, caplog):
@@ -264,7 +272,7 @@ def test_fast_runs_det_under_torch_deterministic_algorithms_and_logs_it_once(no_
         torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
     norm(x)
 
-    assert calls == [True, True, False]
+    assert calls == ["det", "det", "fast"]
     messages = [record.getMessage() for record in caplog.records if "cake.rmsnorm" in record.getMessage()]
     assert messages == [
         "miles_ext_kernels.cake.rmsnorm: the fast variant does not serve calls under "

@@ -384,7 +384,7 @@ def test_the_checker_pins_the_flashinfer_loader(flashinfer, ext):
         ("def f():\n    pass\ndef g():\n    import flashinfer\n", {"flashinfer_hooks": ["f"]}, "imports flashinfer"),
         ("def f():\n    import flashinfer.jit.cpp_ext\n", {}, "imports flashinfer.jit.cpp_ext"),
         ("def f():\n    pass\nimport flashinfer.jit\n", {"flashinfer_hooks": ["f"]}, "imports flashinfer.jit"),
-        ("from .. import cake_rmsnorm_det_train_backend\nimport torch\nimport tvm_ffi\n", {}, None),
+        ("from .. import cake_rmsnorm_det_train\nimport torch\nimport tvm_ffi\n", {}, None),
     ],
 )
 def test_the_checker_finds_flashinfer_imports_and_environment_reads(source, allow, finding):
