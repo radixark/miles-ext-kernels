@@ -2,10 +2,12 @@
 
 Experimental backend for the forward and backward of packed GDN (scalar-gated
 DeltaNet) layers in training: head dimension 128, chunk 64, grouped Q/K heads
-(`HV` a multiple of `H`), no context parallelism.  Every launch is
-fixed-order: two runs of one call on one device give the same bits.  The
+(`HV` a multiple of `H`), no context parallelism.  The public entry point is
+`cake_gdn_nondet` in `flashinfer.cake_gdn_nondet_train`.  Every launch is
+fixed-order today, so two runs of one call on one device give the same bits;
+the contract does not promise run-to-run bits.  The
 results match the deterministic package
-`flashinfer.experimental.cake_gdn_det_train` within that package's accuracy
+`flashinfer.experimental.cake.cake_gdn_det_train` within that package's accuracy
 budgets, not bitwise: where the backward runs the package tail (see Chain),
 `dq` and `dk` are rounded to BF16 once, after the FP32 sum of the value heads'
 partials, where the deterministic package rounds each partial.  The output and
@@ -15,7 +17,9 @@ priced for `dhu_tc2` (see Chain); they then match within the same budgets.
 On `sm_107a` a call may also take a deeper split table (see Chain); the
 outputs that depend on that table then match within the same budgets too.
 
-Both the API and the backend are experimental: no compatibility guarantee.
+The facade `flashinfer.cake_gdn_nondet_train` is a stable FlashInfer API: its
+entry points are `@flashinfer_api` functions.  This package, under
+`flashinfer.experimental.cake`, is its backend.
 SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the supported
 architectures; another device raises `RuntimeError`.  The SM107 libraries need
 CUDA 13.4 or newer.  The feature does not
@@ -24,15 +28,39 @@ libraries are loaded prebuilt from `aot/` when a builder compiled them and
 JIT-built by FlashInfer from the sources and flags `build.json` records
 otherwise.  The package reads no environment variable.
 
+## Mode rules
+
+The mode is in the name.  No entry takes a `deterministic` keyword: passing
+one raises `TypeError`.
+
+| call | runs | under `torch.use_deterministic_algorithms(True)` (strict or `warn_only=True`) |
+|---|---|---|
+| `flashinfer.cake_gdn_nondet_train.cake_gdn_nondet` and this package's `cake_gdn_nondet`, `CakeGDNNondetFunction.apply`, `cake_gdn_nondet_train_forward`, `cake_gdn_nondet_train_backward` | this package | runs unchanged: no alert, no warning, no fallback (every launch is fixed-order today) |
+| `flashinfer.cake_gdn_det_train.cake_gdn_det` | the deterministic package | unchanged |
+
+* This package is the non-deterministic route only.  Nothing routes a call
+  to the deterministic package and nothing falls back to it: a caller who
+  wants the deterministic route calls `flashinfer.cake_gdn_det_train`.
+* PyTorch's deterministic algorithms do not change the route.  Every launch
+  of this version is fixed-order, so no call raises PyTorch's alert or warns.
+  The contract does not promise run-to-run bits: a later version may add an
+  unordered launch, which then raises PyTorch's alert before it runs
+  (`RuntimeError`; a `UserWarning` and then the launch under `warn_only=True`).
+* The forward tape carries the tag `"mode": "nondet"`.
+  `cake_gdn_nondet_train_backward` refuses (`ValueError`) a tape without it,
+  such as a tape of the deterministic package.
+* The context-parallel packages follow the same rules
+  (`flashinfer.cake_gdn_nondet_train_kcp` and `flashinfer.cake_gdn_det_train_kcp`).
+
 ## Opt-in
 
 Import the entry point explicitly; nothing in `flashinfer` imports this
 package.
 
 ```python
-from flashinfer.experimental.cake.cake_gdn_train import chunk_gated_delta_rule
+from flashinfer.cake_gdn_nondet_train import cake_gdn_nondet
 
-o, final_state = chunk_gated_delta_rule(
+o, final_state = cake_gdn_nondet(
     q, k, v, g, beta,                    # [B, T, H, 128] / [B, T, HV, 128] bf16; g, beta [B, T, HV]
     scale=None,                          # 1 / sqrt(128) when None
     initial_state=None,                  # [N, HV, 128, 128] fp32 or None
@@ -40,9 +68,11 @@ o, final_state = chunk_gated_delta_rule(
     cu_seqlens=cu_seqlens,               # packed batch (B == 1): int32 / int64 offsets on the device
     cu_seqlens_cpu=cu_seqlens_cpu,       # the same offsets on the host: host-table route; None: device route
     use_qk_l2norm_in_kernel=True,
-    deterministic=False,                 # required: this package is the non-deterministic route
 )
 ```
+
+`is_cake_gdn_nondet_train_supported(device=None)` in the same module returns
+`True` when the device is an exported target.
 
 Without `cu_seqlens` the `B` sequences have length `T` each.  `g` is
 computed in FP32; `beta` is FP32 or BF16 and its gradient comes back in its
@@ -63,37 +93,44 @@ of `cu_seqlens`, since reading them would synchronize the device.
 
 ## Deterministic and non-deterministic routes
 
-Packed GDN training has four Cake packages, one per (mode, parallelism):
+Packed GDN training has four Cake modules, one per (mode, parallelism).  Each
+facade sits at the top level of `flashinfer`; its backend package sits under
+`flashinfer.experimental.cake`:
 
 | mode | one rank (this API, FLA signature) | context parallel (KCP) |
 |---|---|---|
-| deterministic (bitwise run to run) | `flashinfer.experimental.cake_gdn_det_train` (`chunk_gated_delta_rule_det`) | `flashinfer.experimental.cake_gdn_det_train_kcp` (`chunk_gdn_det_kcp`) |
-| non-deterministic (within the det budgets) | `flashinfer.experimental.cake.cake_gdn_train` (`chunk_gated_delta_rule(..., deterministic=False)`) | `flashinfer.experimental.cake_gdn_train_kcp` |
+| `det` (deterministic) | `flashinfer.cake_gdn_det_train` (`cake_gdn_det`) | `flashinfer.cake_gdn_det_train_kcp` (`cake_gdn_det_kcp`) |
+| `nondet` (within the det budgets) | `flashinfer.cake_gdn_nondet_train` (`cake_gdn_nondet`) | `flashinfer.cake_gdn_nondet_train_kcp` (`cake_gdn_nondet_kcp`) |
 
-Each package is standalone: it imports nothing else from `flashinfer` and
-ships its own copy of every kernel it shares with another.  Nothing selects a
-package implicitly.  Every entry of this package (`chunk_gated_delta_rule`,
-`ChunkGatedDeltaRuleFunction.apply`, `gdn_chunk_forward`,
-`gdn_chunk_backward`) takes `deterministic: bool = True` and raises
-`ValueError` unless it is `False`, so a call that does not ask for the
-non-deterministic route fails instead of running it.  The autograd function
-records the forward's mode, and `gdn_chunk_backward` refuses (`ValueError`) a
-forward tape of the other mode, such as one of the deterministic package.
-The KCP facade `flashinfer.cake_gdn_train_kcp` is the entry that dispatches on
-`deterministic` (`True`: the deterministic package; `False`: the
-non-deterministic one).
+Each backend package is standalone: it imports nothing else from `flashinfer`
+and ships its own copy of every kernel it shares with another.  Nothing
+selects a package implicitly.
 
-No launch of this package is unordered, so PyTorch's deterministic algorithms
-(`torch.use_deterministic_algorithms(True)`, with or without `warn_only`)
-change nothing: no entry raises PyTorch's alert.  The deterministic packages,
-their names, defaults and aliases are unchanged.
+This package exports four names at its root:
 
-| name | what it is now |
+| name | what it is |
 |---|---|
-| `flashinfer.experimental.cake_gdn_det_train` and its aliases `chunk_gated_delta_rule`, `ChunkGatedDeltaRuleFunction`, `gdn_chunk_forward`, `gdn_chunk_backward` | unchanged: the deterministic one-rank package |
-| `flashinfer.experimental.cake_gdn_train` (the KCP package of FlashInfer v0.7.3rc1) | unchanged: a legacy alias of the deterministic KCP package `flashinfer.experimental.cake_gdn_det_train_kcp` |
-| `flashinfer.gdn_train`, `flashinfer.cake_gdn_det_train_kcp` | unchanged: deterministic KCP entry points |
-| `flashinfer.experimental.cake.cake_gdn_train` | new: this non-deterministic one-rank package |
+| `cake_gdn_nondet` | the autograd entry point (FLA signature) |
+| `CakeGDNNondetFunction` | its autograd Function |
+| `cake_gdn_nondet_train_forward` | the forward chain over flattened inputs and one chunk table; returns the tape |
+| `cake_gdn_nondet_train_backward` | the backward chain over one forward tape |
+
+The planner and its helpers (`make_options`, `scan_plans`,
+`build_chunk_meta`, ...) stay in `cake_chain`.
+
+## Migration
+
+The old names fail at import; there are no aliases.
+
+| old | new |
+|---|---|
+| `flashinfer.experimental.cake.cake_gdn_train` | `flashinfer.cake_gdn_nondet_train` (facade), `flashinfer.experimental.cake.cake_gdn_nondet_train` (backend) |
+| `chunk_gated_delta_rule(..., deterministic=False)` | `cake_gdn_nondet(...)` |
+| `ChunkGatedDeltaRuleFunction` | `CakeGDNNondetFunction` |
+| `gdn_chunk_forward(..., deterministic=False)` | `cake_gdn_nondet_train_forward(...)` |
+| `gdn_chunk_backward(..., deterministic=False)` | `cake_gdn_nondet_train_backward(...)` |
+| package-root re-exports of `cake_chain` internals: `CHUNK`, `FINALIZE_STAGES`, `FULL`, `HEAD_DIM`, `PRESCAN_CONFIGS`, `REG_SCAN_CONFIGS`, `ChainOptions`, `ChunkMeta`, `ScanPlan`, `SegmentTable`, `StageSet`, `StreamGroups`, `build_chunk_meta`, `build_chunk_meta_from_cu_seqlens`, `choose_scan_plan`, `dhu_tc_pricing`, `finalize_stage`, `lpt_sequence_order`, `lpt_walk`, `make_options`, `scan_plans`, `sdt_pricing`, `sequence_groups`, `stage_set`, `two_stream_split`, `use_prep_tma` | `cake_chain.<name>` (same name) |
+| `benchmarks/bench_cake_gdn_train.py` | `benchmarks/bench_cake_gdn_nondet_train.py` |
 
 ## Chain
 
@@ -104,11 +141,10 @@ grid needs a second, short wave: with `slots = 6 x SMs` and
 `CTAs = chunks x H`, the plain prep runs for `slots < CTAs <= 2.5 x slots`
 (`sm_100a`, `sm_103a`; `sm_107a` has no plain-prep band and runs `prep_tma`
 for every grid), and
-for Q or K not 16-byte aligned.  Both preps give the same bits.  On `sm_100a`
-and `sm_103a` the WY stage runs `wy_tc2`: the chains and outputs of `wy_tc`
-(the same bits) with a 64-column TMEM accumulator and packed shared-memory
-operands, so five CTAs fit on an SM where `wy_tc` fits four; `sm_107a` runs
-`wy_tc`.  A long sequence can be
+for Q or K not 16-byte aligned.  Both preps give the same bits.  The WY stage
+runs `wy_tc2`: the chains and outputs of `wy_tc` (the same bits) with a
+64-column TMEM accumulator and packed shared-memory operands, so five CTAs fit
+on an SM where `wy_tc` fits four.  A long sequence can be
 split into segments: a pre-scan and a stitch then give every segment its start
 state.  The backward runs the adjoint scan, either `dv_local` plus a register
 scan or, on a serial plan, the tcgen05 scan with `dv_local` fused (`dhu_tc2`),
@@ -144,10 +180,10 @@ so the deterministic package's bits need its tables: pin `scan_config` /
 tails computes `dq`, `dk`, `dv`, `dg` and `dbeta`.  The device's architecture,
 the call's value-head group `G = HV / H` and its (chunk, value head) CTAs
 select the fastest one measured on B200, GB300 and R200 (the production rows, packs,
-source head pairs and group shapes of `benchmarks/bench_cake_gdn_train.py`),
+source head pairs and group shapes of `benchmarks/bench_cake_gdn_nondet_train.py`),
 and the `tail` keyword pins one:
 
-| tail | selected for | `dq` / `dk` rounding | run to run |
+| tail | selected for | `dq` / `dk` rounding | run to run today (not a contract) |
 |---|---|---|---|
 | `"tail"`: one tcgen05 kernel per (chunk, value head), a workspace slot per value head, the last CTA of a (chunk, key head) sums the slots | `G` other than 2 and 3 with at least the architecture's `TAIL_MIN_CTAS` chunks x `HV` | the value heads' FP32 partials summed in value-head order, one BF16 rounding after the FP32 L2-norm pullback | bitwise |
 | `"tail_g2"`: one cluster kernel per (chunk, key head) | `G = 2` | each value head's partial rounded to BF16, summed in a fixed order (the deterministic package's bits) | bitwise |
@@ -226,14 +262,17 @@ tail runs on the caller's stream.
 
 ## Speed against the deterministic package
 
-`benchmarks/bench_cake_gdn_train.py` times this package against
-`flashinfer.experimental.cake_gdn_det_train` on its rows, packs, head pairs
+`benchmarks/bench_cake_gdn_nondet_train.py` times this package against
+`flashinfer.experimental.cake.cake_gdn_det_train` (both package entries, no
+facade) on its rows, packs, head pairs
 and group shapes (ABBA order, CUDA events, the L2 flushed before every call),
 prints the stages each backward launched, and lists at the end every shape and
 boundary where this package is slower than the other arm by more than the sum
 of the two spreads.  Backward time of the deterministic package over this
 package's (above 1: this package is faster; the median over 12 ABBA groups of
-the two packages' time ratio inside a group, for the cells whose groups agree):
+the two packages' time ratio inside a group, for the cells whose groups agree).
+All figures in this section were measured before the rename of FlashInfer
+#8928, with the same programs and tables:
 
 | shapes | what this package runs differently | B200 | GB300 |
 |---|---|---|---|
@@ -253,7 +292,8 @@ deterministic package beyond the sum of the two spreads only in the forward of `
 0.989 (`(1, 3)`, GB300) in the backward, and the forward of every
 shape down to 0.991 (`(2, 6)`, GB300): small calls whose issue time
 is about their device time, where the entry's mode check and option checks
-(about 0.5 us a call) and the backward's tail rule show.
+(about 0.5 us a call; the rename removed the mode check) and the backward's
+tail rule show.
 
 ## Plan pins (keyword-only)
 

@@ -1,5 +1,5 @@
 """The GDN variants with a ``KcpContext``: the vendored KCP packages (``det``: ``cake_gdn_det_train_kcp``; ``fast``:
-``cake_gdn_train_kcp``) at the shapes miles feeds them.
+``cake_gdn_nondet_train_kcp``) at the shapes miles feeds them.
 
 One GPU (a one-rank context): against the FP64 token recurrence, output and every input gradient within the accuracy
 budgets of the package suite, on miles' strided q / k views and BF16 beta, with the tapes kept (``save_mode="full"``)
@@ -340,7 +340,7 @@ def test_an_initial_or_a_final_state_is_rejected_when_the_call_is_made(variant, 
     calls = []
     for name in ("det_kcp", "fast_kcp"):
         package = ops._package(name)
-        entry = "chunk_gdn_det_kcp" if name == "det_kcp" else "chunk_gdn_kcp"
+        entry = "cake_gdn_det_kcp" if name == "det_kcp" else "cake_gdn_nondet_kcp"
         monkeypatch.setattr(package, entry, lambda *args, _name=name, **kwargs: calls.append(_name))
     monkeypatch.setattr(ops, "_cp_apply", lambda *args: calls.append("fla_cp"))
     inputs = _inputs(REF_LAYOUT, HEADS["4x12"], seed=6)

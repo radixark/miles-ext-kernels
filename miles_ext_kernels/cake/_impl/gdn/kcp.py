@@ -12,7 +12,7 @@ packed boundaries on the host and the process group. ``ops.chunk_gated_delta_rul
 ``ops.kcp_chunk_gated_delta_rule`` run on it the KCP package of the configured variant:
 
 * ``det``: ``cake_gdn_det_train_kcp``, bit for bit run to run for a fixed partition;
-* ``fast``: ``cake_gdn_train_kcp``, within the det package's accuracy budgets, not its bits.
+* ``fast``: ``cake_gdn_nondet_train_kcp``, within the det package's accuracy budgets, not its bits.
 
 The packages share one partition contract, so both variants see the same local tokens; each builds its own segment
 plan and device tables, on first use, once per context.
@@ -42,8 +42,8 @@ __all__ = ["KCP_LAYOUTS", "KcpContext", "build_kcp_context", "release"]
 KCP_LAYOUTS = ("contiguous", "zigzag", "zigzag_per_document")
 # variant -> the name ``ops._package`` loads it by, and its partition / context builders
 _PACKAGES = {
-    "det": ("det_kcp", "partition_det_kcp", "build_context_det_kcp"),
-    "fast": ("fast_kcp", "partition_kcp", "build_context_kcp"),
+    "det": ("det_kcp", "cake_gdn_det_train_kcp_partition", "cake_gdn_det_train_kcp_build_context"),
+    "fast": ("fast_kcp", "cake_gdn_nondet_train_kcp_partition", "cake_gdn_nondet_train_kcp_build_context"),
 }
 
 
@@ -106,7 +106,8 @@ class KcpContext:
         self.cu_seqlens = torch.tensor(self.cu_seqlens_cpu, dtype=torch.int32).to(device, non_blocking=True)
 
     def partition(self, variant: str):
-        """The partition object of ``variant``'s package (``PartitionDetKcp`` / ``PartitionKcp``)."""
+        """The partition object of ``variant``'s package (``CakeGDNDetKcpPartition`` /
+        ``CakeGDNNondetKcpPartition``)."""
         part = self._partitions.get(variant)
         if part is None:
             build = getattr(_package(variant), _PACKAGES[variant][1])
@@ -118,8 +119,9 @@ class KcpContext:
         return part
 
     def context(self, variant: str):
-        """This rank's context of ``variant``'s package (``ContextDetKcp`` / ``ContextKcp``): its segment plan and
-        device tables, built on first use. Raises the package's ``ValueError`` for a partition beyond its plan caps."""
+        """This rank's context of ``variant``'s package (``CakeGDNDetKcpContext`` / ``CakeGDNNondetKcpContext``): its
+        segment plan and device tables, built on first use. Raises the package's ``ValueError`` for a partition beyond
+        its plan caps."""
         ctx = self._contexts.get(variant)
         if ctx is None:
             build = getattr(_package(variant), _PACKAGES[variant][2])

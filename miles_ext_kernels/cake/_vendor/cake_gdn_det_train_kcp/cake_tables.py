@@ -23,26 +23,28 @@ per (document, owned head)), the head ownership table (``head_groups``, the
 padded owner when ``HV % Hg != 0``) and the convolution halo row counts.
 
 Everything is derived from the package-local :mod:`.cake_kcp_plan` context
-(``build_context_det_kcp``) and its head plan ``ctx.heads(HV)``; the segment count
+(``cake_gdn_det_train_kcp_build_context``) and its head plan ``ctx.heads(HV)``; the segment count
 ``P`` per fragment comes from the context's plan rule (``kcp_plan_row`` over every
 rank's fragment table under the shipped ``"row_cost"`` rule, the per-rank
 ``kcp_plan`` under a rule selected by the test knobs) -- the state of the GDN route is per value
 head, so every head count here is ``HV``.  Tables are built once per ``(HV, sm_count, P)`` key at
-first use (``ctx.prepare(H_qk, HV)``; never at ``build_context_det_kcp``,
+first use (``ctx.prepare(H_qk, HV)``; never at ``cake_gdn_det_train_kcp_build_context``,
 never per call) and cached on the context (``ctx._caches``) together with their
 int32 / int64 device copies (int32 everywhere except the merge's int64 element
 offsets ``INT64_TABLES``): no per-call host-to-device copy, no device read,
 capture-safe.  Pure host
 metadata; nothing here reads a tensor's contents.
 
-Buffer forms (the kernels' ``tile_stride``): the c1 send buffer and the b1
-buffer with re-sent maps are interleaved PAIRS of ``[128, 128]`` FP32 tiles per
-(slot, head) -- ``[B_f | M_f^T]`` (halves ``TILE_B`` / ``TILE_M``) and
-``[d_f | M_f^T]`` (``TILE_D`` / ``TILE_M``) -- the c2 receive buffer (``S_in``),
-the b2 receive buffer (``dS_out``) and the offsets-only b1 buffer are dense
-planes.  :class:`PoolAddressing` recovers the kernels' ``(hg, n, tile_stride,
-half)`` form of every pool from the head plan and reproduces its explicit
-tile tables exactly (checked by the package tests on every step-0 row).
+Buffer forms (the kernels' ``tile_stride``): the c1 send buffer is
+interleaved PAIRS of ``[128, 128]`` FP32 tiles per (slot, head) --
+``[B_f | M_f^T]`` (halves ``TILE_B`` / ``TILE_M``) -- the c2 receive buffer
+(``S_in``), the b2 receive buffer (``dS_out``) and both b1 buffers are dense
+planes; the b1 buffer with re-sent maps holds per owner block the ``d_f`` plane
+of the ``n_in`` crossing-in slots, then the ``M_f^T`` plane of the ``n_io``
+fragments that cross in and out (a document's last fragment sends no map).
+:class:`PoolAddressing` recovers the kernels' ``(hg, n, tile_stride, half)``
+form of every pool from the head plan and reproduces its explicit tile tables
+exactly (checked by the package tests on every step-0 row).
 """
 
 from __future__ import annotations
@@ -56,17 +58,17 @@ from .cake_kcp_plan import (
     CHUNK,
     TILE,
     TILE_B,
-    TILE_D,
     TILE_M,
     TILE_STRIDE_PAIR,
     TILE_STRIDE_PLANE,
-    ContextDetKcp,
+    CakeGDNDetKcpContext,
     KcpHeadPlan,
     head_groups,
 )
 
 # The pools a walk launch addresses: name -> (split table of the head plan, slot count field of the context,
-# tile stride, half of the pair; ``None`` = a dense plane).
+# tile stride, half of the pair; ``None`` = a dense plane).  The two b1 planes with maps share one owner block of
+# ``n_in + n_io`` slots (:data:`_B1_DM_BLOCK`).
 POOLS = {
     "s_in": (
         "c2_recv",
@@ -101,22 +103,25 @@ POOLS = {
     "b1_d_dm": (
         "b1_send_dm",
         "n_in",
-        TILE_STRIDE_PAIR,
-        TILE_D,
-    ),  # d_f half of the b1 send pairs (maps re-sent)
+        TILE_STRIDE_PLANE,
+        None,
+    ),  # d_f plane of the b1 send buffer with maps (in_slot rows)
     "b1_m_dm": (
         "b1_send_dm",
-        "n_in",
-        TILE_STRIDE_PAIR,
-        TILE_M,
-    ),  # M_f^T half of the b1 send pairs
+        "n_io",
+        TILE_STRIDE_PLANE,
+        None,
+    ),  # M_f^T plane behind it (io_slot rows: the fragments crossing in and out)
 }
+# the b1 buffer with maps: per owner block [d_f: n_in slots | M_f^T: n_io slots] x Hg tiles; pool -> plane index
+_B1_DM_BLOCK = {"b1_d_dm": 0, "b1_m_dm": 1}
 LOCAL_TABLES = ("chunk_bos", "chunk_len", "seq_chunk_start")
 WALK_TABLES = (
     "seg_chunk_start",
     "walk_seg_offset",
     "walk_seg_tape",
     "h0_index",
+    "b1_m_index",
     "out_index",
     "dht_index",
     "carry_index",
@@ -157,7 +162,7 @@ def owner_table(HV: int, world_size: int) -> dict:
     }
 
 
-def halo_rows(ctx: ContextDetKcp) -> dict:
+def halo_rows(ctx: CakeGDNDetKcpContext) -> dict:
     """Row counts of the convolution halo plan of this rank (rows of ``C`` channels; BF16 forward history rows,
     FP32 backward ``dpre`` rows): the per-peer split sizes in rows and their sums."""
     h = ctx.halo
@@ -183,7 +188,8 @@ def halo_rows(ctx: ContextDetKcp) -> dict:
 class PoolAddressing:
     """The kernels' view of one compact state pool: tile ``((h // hg) * n + slot) * hg + h % hg`` of (slot, head),
     ``tile_stride`` tiles apart (``1`` dense plane, ``2`` interleaved pair) and, for a pair, the ``half`` this
-    launch reads or writes (the base pointer the host passes is the pool plus ``half * TILE`` elements)."""
+    launch reads or writes (the base pointer the host passes is the pool plus ``half * TILE`` elements; for the b1
+    map plane ``half`` is its tile offset ``n_in * hg`` inside the owner block, at ``tile_stride`` 1)."""
 
     name: str
     hg: int
@@ -209,10 +215,17 @@ class PoolAddressing:
         return self.n_tiles * self.tile_stride * TILE
 
 
-def pool_addressing(hp: KcpHeadPlan, ctx: ContextDetKcp, name: str) -> PoolAddressing:
+def pool_addressing(
+    hp: KcpHeadPlan, ctx: CakeGDNDetKcpContext, name: str
+) -> PoolAddressing:
     """The :class:`PoolAddressing` of pool ``name`` (:data:`POOLS`) for head plan ``hp`` of ``ctx``."""
     split, slots, stride, half = POOLS[name]
-    n = int(getattr(ctx, slots))
+    if name in _B1_DM_BLOCK:  # one owner block [d_f: n_in | M_f^T: n_io] of both planes
+        n_io = int(hp.n_io_by_rank[ctx.rank])
+        n = int(ctx.n_in) + n_io
+        half = int(ctx.n_in) * hp.Hg if _B1_DM_BLOCK[name] else None
+    else:
+        n = int(getattr(ctx, slots))
     n_tiles = hp.n_owners * hp.Hg * n
     expected = sum(hp.splits[split]) // (stride * TILE) if n else 0
     if n_tiles != expected:
@@ -328,7 +341,7 @@ def owner_chains(hp: KcpHeadPlan) -> dict[str, ChainTables]:
     the fragments ``f2 .. f(n-1)`` with ``Mop = M_f`` read from the c1 ``M_f^T`` tiles (``transpose_m = 0``); the
     state entering each element and the final state are the ``S_in`` of the element's fragment and of ``fn``,
     published into the c2 send layout.  ``adj_b1`` / ``adj_c1``: from ``X0 = d_{fn}`` over ``f(n-1) .. f2`` with
-    ``Mop = M_f^T`` (``transpose_m = 1``), the maps read from the b1 pairs (``adj_b1``: ``save_transfer=False``) or
+    ``Mop = M_f^T`` (``transpose_m = 1``), the maps read from the b1 map plane (``adj_b1``: ``save_transfer=False``) or
     from the saved c1 receive tensor (``adj_c1``: ``save_transfer=True``, or the replay); the entering / final
     states are the ``dS_out`` of the predecessors, published into the b2 send layout."""
     hs = hp.hg_stride
@@ -403,7 +416,8 @@ class WalkTables:
     chunk-aligned segment table ``seg_chunk_start [NSEG + 1]``, the segment lists ``walk_seg_offset`` (the segments
     the offset / transfer walks visit: crossing-out fragments at ``P = 1``, every segment at ``P > 1``) and
     ``walk_seg_tape`` (all), the index tables (``h0_index``: slot in ``S_in`` of segment 0 of a crossing-in
-    fragment, else ``-1``; ``out_index``: c1 slot of a crossing-out fragment at ``P = 1`` / staging slot at
+    fragment, else ``-1``; ``b1_m_index``: slot in the b1 map plane of segment 0 of a fragment crossing in and out,
+    else ``-1``; ``out_index``: c1 slot of a crossing-out fragment at ``P = 1`` / staging slot at
     ``P > 1``; ``dht_index``: ``dS_out`` slot of the last segment of a crossing-out fragment; ``carry_index`` /
     ``dcarry_index`` the inter-segment carry slots; the ``*_fused`` one-pool forms), the pool addressing of every
     exchange pool (:data:`POOLS`), the owner's merge chains and the int32 / int64 device copies."""
@@ -422,6 +436,7 @@ class WalkTables:
     walk_seg_offset: tuple[int, ...]
     walk_seg_tape: tuple[int, ...]
     h0_index: tuple[int, ...]
+    b1_m_index: tuple[int, ...]
     out_index: tuple[int, ...]
     dht_index: tuple[int, ...]
     carry_index: tuple[int, ...]
@@ -447,7 +462,7 @@ class WalkTables:
         return range(self.seg_chunk_start[seg], self.seg_chunk_start[seg + 1])
 
 
-def local_tables(ctx: ContextDetKcp) -> LocalTables:
+def local_tables(ctx: CakeGDNDetKcpContext) -> LocalTables:
     """The :class:`LocalTables` of ``ctx`` (built once, cached on the context)."""
     key = ("gdn_local_tables",)
     cached = ctx._caches.get(key)
@@ -468,7 +483,9 @@ def local_tables(ctx: ContextDetKcp) -> LocalTables:
     return cached
 
 
-def walk_tables(ctx: ContextDetKcp, HV: int, *, P: int | None = None) -> WalkTables:
+def walk_tables(
+    ctx: CakeGDNDetKcpContext, HV: int, *, P: int | None = None
+) -> WalkTables:
     """The :class:`WalkTables` of ``ctx`` at ``HV`` value heads (built once per ``(ctx, HV, P)``, cached on the
     context; the head plan ``ctx.heads(HV, P=P)`` is cached too).  ``P`` overrides the plan rule's segment count
     (the GDN host's segments knob)."""
@@ -512,6 +529,7 @@ def walk_tables(ctx: ContextDetKcp, HV: int, *, P: int | None = None) -> WalkTab
         walk_seg_offset=tuple(hp.walk_seg_offset),
         walk_seg_tape=tuple(hp.walk_seg_tape),
         h0_index=tuple(hp.h0_index),
+        b1_m_index=tuple(hp.b1_m_index),
         out_index=tuple(hp.out_index),
         dht_index=tuple(hp.dht_index),
         carry_index=tuple(hp.carry_index),
@@ -562,10 +580,10 @@ def table_dtype(name: str) -> torch.dtype:
 
 
 def prepare(
-    ctx: ContextDetKcp, H_qk: int, HV: int, *, P: int | None = None
+    ctx: CakeGDNDetKcpContext, H_qk: int, HV: int, *, P: int | None = None
 ) -> PreparedTables:
     """Build (once per ``(HV, sm_count, P)`` key) and return the :class:`PreparedTables` of ``ctx`` for the head pair:
-    the first-use upload (``build_context_det_kcp`` has no ``HV``; the host calls this before the
+    the first-use upload (``cake_gdn_det_train_kcp_build_context`` has no ``HV``; the host calls this before the
     first forward and the #7039 test before measuring).  ``HV`` must be a multiple of ``H_qk``; ``P`` is the
     segments override.  Every table dtype is checked against the design here, before any launch."""
     H_qk, HV = int(H_qk), int(HV)
@@ -604,7 +622,7 @@ def prepare(
     return cached
 
 
-def describe(ctx: ContextDetKcp, HV: int) -> dict:
+def describe(ctx: CakeGDNDetKcpContext, HV: int) -> dict:
     """Plain-int summary of both bundles for reports."""
     lt, wt = local_tables(ctx), walk_tables(ctx, HV)
     return {

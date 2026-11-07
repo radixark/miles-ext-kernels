@@ -297,7 +297,7 @@ def test_fast_stays_within_the_budgets_run_to_run_and_with_the_recomputed_backwa
 def test_a_cp_context_call_runs_det_and_says_so_once(monkeypatch, caplog):
     monkeypatch.setattr(config, "_warned", set())
     calls = []
-    for variant, entry_name in (("fast", "chunk_gated_delta_rule"), ("det", "chunk_gated_delta_rule_det")):
+    for variant, entry_name in (("fast", "cake_gdn_nondet"), ("det", "cake_gdn_det")):
         package = ops._package(variant)
 
         def counted(*args, _entry=getattr(package, entry_name), _variant=variant, **kwargs):

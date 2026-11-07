@@ -28,8 +28,16 @@ DW_ATOL, DW_RTOL = 5e-2, 1e-4
 # :func:`partition_stand_in` / :func:`build_stand_in_context` of this module, always available
 CONTEXT_BUILDERS = {
     "stand-in": (None, "partition_stand_in", "build_stand_in_context"),
-    "gdn-det": ("miles_ext_kernels.cake._vendor.cake_gdn_det_train_kcp", "partition_det_kcp", "build_context_det_kcp"),
-    "gdn-fast": ("miles_ext_kernels.cake._vendor.cake_gdn_train_kcp", "partition_kcp", "build_context_kcp"),
+    "gdn-det": (
+        "miles_ext_kernels.cake._vendor.cake_gdn_det_train_kcp",
+        "cake_gdn_det_train_kcp_partition",
+        "cake_gdn_det_train_kcp_build_context",
+    ),
+    "gdn-fast": (
+        "miles_ext_kernels.cake._vendor.cake_gdn_nondet_train_kcp",
+        "cake_gdn_nondet_train_kcp_partition",
+        "cake_gdn_nondet_train_kcp_build_context",
+    ),
     "kda-det": ("miles_ext_kernels.cake._vendor.cake_kda_det_train_kcp", "partition_det_kcp", "build_context_det_kcp"),
     "kda-fast": ("miles_ext_kernels.cake._vendor.cake_kda_train_kcp", "partition_kcp", "build_context_kcp"),
 }
