@@ -23,7 +23,7 @@ and an operand they cannot read is a ``ValueError``, never a silent copy. The pa
 layer): a BF16 parameter is cast to FP32 at the call, which is exact, and autograd returns its gradient in BF16 (the
 FP32 gradient rounded once). ``T`` is a run-time scalar (``T == 0`` launches nothing).
 
-The kernels are three vendored FlashInfer packages:
+The kernels are four vendored FlashInfer packages:
 
 * ``cake_mhc_det_train`` (``det``): forward, and a backward whose ``dfn`` / ``dscale`` / ``dbase`` are fixed-order
   reductions, bitwise reproducible for a token count on a device.
@@ -33,14 +33,18 @@ The kernels are three vendored FlashInfer packages:
   per-chunk partials). ``dX`` is the ``det`` bits; ``dscale`` / ``dbase`` are the ``det`` package's per-CTA
   reduction, whose low-order bits differ from ``det`` at hidden 4096 above 14927 tokens (``det`` sums them over
   8-token group rows there).
-* ``cake_mhc_head_det_train``: the model head's stream mean, bit for bit torch's BF16 ``X.mean(dim=1)`` and its
-  gradient (one program for both variants).
+* ``cake_mhc_head_det_train`` (``det``) and ``cake_mhc_head_nondet_train`` (``fast``): the model head's stream mean,
+  bit for bit torch's BF16 ``X.mean(dim=1)``, and its gradient. The head is elementwise per token (no cross-token
+  reduction, no atomics); the ``fast`` package runs the ``det`` package's kernels under its own library names, so
+  both give the same bits.
 
-Variant. :func:`mhc_prepare` reads ``config.variant("mhc")`` when it runs: ``det`` unless ``configure`` set
-``fast`` (``validate_args`` resolves miles' default to ``fast`` and deterministic mode to ``det``). The handle it
-returns belongs to that variant's package, so :func:`mhc_finish` and the backward of the pair run the variant of the
-prepare. The variant comes from the configuration only: under ``torch.use_deterministic_algorithms(True)`` the
-backward of a ``fast`` connection raises PyTorch's alert for an operation without a deterministic implementation.
+Variant. :func:`mhc_prepare` and :func:`mhc_head` read ``config.variant("mhc")`` when they run: ``det`` unless
+``configure`` set ``fast`` (``validate_args`` resolves miles' default to ``fast`` and deterministic mode to ``det``).
+The handle :func:`mhc_prepare` returns belongs to that variant's package, so :func:`mhc_finish` and the backward of
+the pair run the variant of the prepare; the backward of the head runs the package of its forward. The variant comes
+from the configuration only: under ``torch.use_deterministic_algorithms(True)`` the backward of a ``fast`` connection
+raises PyTorch's alert for an operation without a deterministic implementation, and the head of either variant raises
+nothing (it has no order-varying step).
 
 Workspaces. Each launch of the forward, the statistics replay and the backward takes its workspace from the runtime's
 workspace pool when it runs (roles ``"det-fwd"``, ``"det-bwd"``, ``"fast-fwd"``, ``"fast-bwd"``, sized for the call's
@@ -52,8 +56,8 @@ bound, a CUDA graph capture). One op must not run on two streams at once; calls 
 one buffer per stream. ``miles_ext_kernels.release()`` frees the pool's buffers, then :func:`release` drops the
 launch plans and the loaded libraries.
 
-:func:`prebuild` builds every library both variants and the head may launch at one hidden size and Sinkhorn iteration
-count. The epsilons are launch arguments of every program: they select no library.
+:func:`prebuild` builds every library both variants and their heads may launch at one hidden size and Sinkhorn
+iteration count. The epsilons are launch arguments of every program: they select no library.
 """
 
 from __future__ import annotations
@@ -67,7 +71,8 @@ import torch
 
 from miles_ext_kernels.cake._runtime import config, loader, workspace
 from miles_ext_kernels.cake._vendor import cake_mhc_det_train as _det
-from miles_ext_kernels.cake._vendor import cake_mhc_head_det_train as _head
+from miles_ext_kernels.cake._vendor import cake_mhc_head_det_train as _det_head
+from miles_ext_kernels.cake._vendor import cake_mhc_head_nondet_train as _fast_head
 from miles_ext_kernels.cake._vendor import cake_mhc_nondet_train as _fast
 
 __all__ = [
@@ -149,7 +154,7 @@ _fast._workspace_for = _pooled_workspaces(_fast, "fast")
 
 
 def is_supported(device: Any, hidden: int | None = None) -> bool:
-    """Whether ``device`` (and ``hidden``, when given) runs every entry point of both variants and the head."""
+    """Whether ``device`` (and ``hidden``, when given) runs every entry point of both variants and their heads."""
     device = _device(device)
     if device.type != "cuda" or not torch.cuda.is_available():
         return False
@@ -160,7 +165,8 @@ def is_supported(device: Any, hidden: int | None = None) -> bool:
     return (
         _det.is_cake_mhc_det_train_supported(device, hidden)
         and _fast.is_cake_mhc_nondet_train_supported(device, hidden)
-        and _head.is_cake_mhc_head_det_train_supported(device, hidden)
+        and _det_head.is_cake_mhc_head_det_train_supported(device, hidden)
+        and _fast_head.is_cake_mhc_head_nondet_train_supported(device, hidden)
     )
 
 
@@ -213,8 +219,11 @@ def mhc_finish(X: torch.Tensor, B: torch.Tensor, handle: Any) -> torch.Tensor:
 
 def mhc_head(X: torch.Tensor) -> torch.Tensor:
     """Autograd-enabled head: BF16 ``Y = X.mean(dim=1)`` ``[T, H]`` of the four streams ``X`` ``[T, 4, H]``, and its
-    gradient, bit for bit torch's."""
-    return _head.cake_mhc_head_det(X)
+    gradient, bit for bit torch's, in the head package of the configured variant (its backward runs the same
+    package)."""
+    if config.variant(_OP) == "fast":
+        return _fast_head.cake_mhc_head_nondet(X)
+    return _det_head.cake_mhc_head_det(X)
 
 
 def _run_time(jit: ModuleType, record: str) -> bool:
@@ -237,10 +246,18 @@ def _route_libraries(jit: ModuleType, arch: str, hidden: int, sinkhorn_iters: in
     return tuple(dict.fromkeys(names))
 
 
+def _head_libraries(jit: ModuleType, arch: str) -> tuple[str, ...]:
+    """The ``build.json`` libraries of a head package's forward and backward on ``arch`` (one per role, any shape)."""
+    return tuple(jit.library_name(jit.ROLES[role], arch) for role in ("head_fwd", "head_bwd"))
+
+
 def libraries(arch: str, hidden: int, sinkhorn_iters: int) -> dict[str, tuple[str, ...]]:
-    """Package -> the libraries any call of either variant, and of the head, may launch on ``arch`` at the model
+    """Package -> the libraries any call of either variant, and of its head, may launch on ``arch`` at the model
     shape ``hidden`` / ``sinkhorn_iters``, whatever the token count. ``ValueError`` for a shape the packages do not
-    serve on ``arch``."""
+    serve on ``arch``.
+
+    A head runs its forward and backward programs: :func:`mhc_head` never launches the package's backward that adds
+    into an existing gradient (autograd adds the head's gradient to one that is already there)."""
     if isinstance(hidden, bool) or not isinstance(hidden, int):
         raise ValueError(f"hidden must be an int, not {hidden!r}")
     if isinstance(sinkhorn_iters, bool) or not isinstance(sinkhorn_iters, int):
@@ -251,21 +268,20 @@ def libraries(arch: str, hidden: int, sinkhorn_iters: int) -> dict[str, tuple[st
         )
     served = set(_det.cake_jit.supported_hidden_sizes(arch))
     served &= set(_fast.cake_jit.supported_hidden_sizes(arch))
-    served &= set(_head.cake_jit.supported_hidden_sizes(arch))
+    served &= set(_det_head.cake_jit.supported_hidden_sizes(arch))
+    served &= set(_fast_head.cake_jit.supported_hidden_sizes(arch))
     if hidden not in served:
         raise ValueError(f"the Cake mHC kernels run the hidden sizes {tuple(sorted(served))} on {arch}, not {hidden}")
-    head = _head.cake_jit
     return {
         "cake_mhc_det_train": _route_libraries(_det.cake_jit, arch, hidden, sinkhorn_iters),
         "cake_mhc_nondet_train": _route_libraries(_fast.cake_jit, arch, hidden, sinkhorn_iters),
-        "cake_mhc_head_det_train": tuple(
-            head.library_name(head.ROLES[role], arch) for role in ("head_fwd", "head_bwd")
-        ),
+        "cake_mhc_head_det_train": _head_libraries(_det_head.cake_jit, arch),
+        "cake_mhc_head_nondet_train": _head_libraries(_fast_head.cake_jit, arch),
     }
 
 
 def prebuild(*, device: Any = None, max_workers: int | None = None, hidden: int, sinkhorn_iters: int) -> list[Path]:
-    """Build every library :func:`mhc_prepare` / :func:`mhc_finish` (either variant) and :func:`mhc_head` may launch
+    """Build every library :func:`mhc_prepare` / :func:`mhc_finish` and :func:`mhc_head` (either variant) may launch
     at ``hidden`` and ``sinkhorn_iters`` on ``device`` (default: the current CUDA device), ``max_workers`` nvcc
     processes at a time.
 
@@ -303,6 +319,6 @@ def release() -> None:
     for package in (_det, _fast):
         for cache in (package._EDGES, package._PLANS, package._FAST_ROUTES):
             cache.clear()
-    for package in (_det, _fast, _head):
+    for package in (_det, _fast, _det_head, _fast_head):
         package.cake_jit.load.cache_clear()
     _built.clear()

@@ -1,10 +1,11 @@
 """The mHC implementation without a GPU (CPU torch): what ``prebuild`` builds, the parameter dtypes the kernels
-receive, the variant each call runs, the workspaces each launch takes from the runtime's pool and what ``release``
-drops. Stand-ins replace the kernels where a call would launch them.
+receive, the variant (and head package) each call runs, the workspaces each launch takes from the runtime's pool and
+what ``release`` drops. Stand-ins replace the kernels where a call would launch them.
 """
 
 import argparse
 import ast
+import importlib
 import inspect
 
 import pytest
@@ -17,7 +18,8 @@ from miles_ext_kernels.cake import mhc  # noqa: E402
 from miles_ext_kernels.cake._impl.mhc import ops  # noqa: E402
 from miles_ext_kernels.cake._runtime import config, workspace  # noqa: E402
 
-DET, FAST, HEAD = "cake_mhc_det_train", "cake_mhc_nondet_train", "cake_mhc_head_det_train"
+DET, FAST = "cake_mhc_det_train", "cake_mhc_nondet_train"
+DET_HEAD, FAST_HEAD = "cake_mhc_head_det_train", "cake_mhc_head_nondet_train"
 HIDDEN_BY_ARCH = {"sm_100a": (4096, 5120, 7168), "sm_103a": (4096, 5120, 7168), "sm_107a": (4096,)}
 CASES = [(arch, hidden) for arch, sizes in HIDDEN_BY_ARCH.items() for hidden in sizes]
 
@@ -58,13 +60,24 @@ def _run_time_libraries(package: str, arch: str, hidden: int) -> set[str]:
 def test_another_sinkhorn_count_adds_the_run_time_count_programs(arch, hidden):
     at_record, at_seven = ops.libraries(arch, hidden, 20), ops.libraries(arch, hidden, 7)
 
-    assert set(at_record) == set(at_seven) == {DET, FAST, HEAD}
-    assert at_seven[HEAD] == at_record[HEAD] and len(at_record[HEAD]) == 2
+    assert set(at_record) == set(at_seven) == {DET, FAST, DET_HEAD, FAST_HEAD}
+    for head in (DET_HEAD, FAST_HEAD):
+        assert at_seven[head] == at_record[head] and len(at_record[head]) == 2
     for package in (DET, FAST):
         added = set(at_seven[package]) - set(at_record[package])
         assert set(at_record[package]) < set(at_seven[package])
         assert added == _run_time_libraries(package, arch, hidden) and len(added) == 2, sorted(added)
         assert ops.libraries(arch, hidden, 1) == ops.libraries(arch, hidden, 64) == at_seven
+
+
+@pytest.mark.parametrize("arch", sorted(HIDDEN_BY_ARCH))
+def test_prebuild_builds_the_forward_and_backward_of_each_variants_head(arch):
+    """Each variant's head is a package of its own, with its own library names: prebuild builds the forward and the
+    backward of both (``mhc_head`` never launches the backward that adds into an existing gradient)."""
+    for hidden in HIDDEN_BY_ARCH[arch]:
+        built = ops.libraries(arch, hidden, 20)
+        assert built[DET_HEAD] == (f"cake_mhc_det_train_head_fwd_{arch}", f"cake_mhc_det_train_head_bwd_{arch}")
+        assert built[FAST_HEAD] == (f"cake_mhc_train_head_fwd_{arch}", f"cake_mhc_train_head_bwd_{arch}")
 
 
 # SM counts besides the boards of record (B200 148, GB300 152, R200 208 / 216): other boards of each architecture
@@ -239,13 +252,70 @@ def test_finish_runs_the_package_of_the_handle_and_refuses_another(monkeypatch):
         ops.mhc_finish(None, None, object())
 
 
-def test_the_head_runs_the_head_packages_entry(monkeypatch):
-    """``mhc_head`` calls the head package's mode-word autograd entry (a stand-in here: no device work)."""
-    monkeypatch.setattr(ops._head, "cake_mhc_head_det", lambda X: ("head", X))
+@pytest.mark.parametrize("variant", ["det", "fast"])
+def test_the_head_runs_the_head_package_of_the_configured_variant(monkeypatch, variant):
+    """``mhc_head`` calls the mode-word autograd entry of its variant's head package, and not the other one (stand-ins
+    here: no device work)."""
+    calls = []
+    monkeypatch.setattr(ops._det_head, "cake_mhc_head_det", lambda X: calls.append(("det", X)) or "det")
+    monkeypatch.setattr(ops._fast_head, "cake_mhc_head_nondet", lambda X: calls.append(("fast", X)) or "fast")
     X = torch.zeros(3, 4, 4096, dtype=torch.bfloat16)
 
-    name, given = ops.mhc_head(X)
-    assert name == "head" and given is X
+    cake.configure(cake_mhc_variant=variant)
+    assert ops.mhc_head(X) == variant
+    assert len(calls) == 1 and calls[0][0] == variant and calls[0][1] is X
+
+
+def test_each_head_call_runs_the_variant_configured_when_it_runs(monkeypatch):
+    """The head reads the variant when it runs, from the configuration only: torch's deterministic algorithms do not
+    turn the fast head into the det one."""
+    ran = []
+    monkeypatch.setattr(ops._det_head, "cake_mhc_head_det", lambda X: ran.append("det"))
+    monkeypatch.setattr(ops._fast_head, "cake_mhc_head_nondet", lambda X: ran.append("fast"))
+    X = torch.zeros(3, 4, 4096, dtype=torch.bfloat16)
+
+    ops.mhc_head(X)  # never configured: det
+    cake.configure(argparse.Namespace(deterministic_mode=True))
+    ops.mhc_head(X)
+    miles_ext_kernels.configure({"cake_mhc_variant": "fast"})
+    ops.mhc_head(X)
+    torch.use_deterministic_algorithms(True)
+    try:
+        ops.mhc_head(X)
+    finally:
+        torch.use_deterministic_algorithms(False)
+    cake.configure()
+    ops.mhc_head(X)
+    assert ran == ["det", "det", "fast", "fast", "det"]
+
+
+def test_the_backward_of_the_head_runs_the_package_of_its_forward(monkeypatch):
+    """The head's autograd node is its package's: the forward and backward entries of the variant's head package run,
+    the other package's do not (stand-ins for the kernel entries, on CPU tensors)."""
+    ran = []
+
+    def entries(mode):
+        def forward(X):
+            ran.append(f"{mode} forward")
+            return X.mean(dim=1)
+
+        def backward(dY):
+            ran.append(f"{mode} backward")
+            return (dY / 4).unsqueeze(1).expand(-1, 4, -1).contiguous()
+
+        return forward, backward
+
+    for package, mode in ((ops._det_head, "det"), (ops._fast_head, "nondet")):
+        forward, backward = entries(mode)
+        monkeypatch.setattr(package, f"cake_mhc_head_{mode}_train_forward", forward)
+        monkeypatch.setattr(package, f"cake_mhc_head_{mode}_train_backward", backward)
+
+    for variant in ("det", "fast"):
+        cake.configure(cake_mhc_variant=variant)
+        X = torch.randn(3, 4, 8, requires_grad=True)
+        ops.mhc_head(X).sum().backward()
+        assert torch.equal(X.grad, torch.full_like(X, 0.25))
+    assert ran == ["det forward", "det backward", "nondet forward", "nondet backward"]
 
 
 # --- workspaces: the runtime's pool (review: one bounded pool with a release hook) ---
@@ -374,11 +444,19 @@ def test_a_caller_workspace_goes_to_the_package():
 # --- release ---
 
 
-def test_release_frees_the_pooled_workspaces_and_drops_the_plans_and_loaded_libraries(pooled):
+def test_release_frees_the_pooled_workspaces_and_drops_the_plans_and_loaded_libraries(pooled, monkeypatch):
     caches = ("_EDGES", "_PLANS", "_FAST_ROUTES")
     for package in (ops._det, ops._fast):
         for name in caches:
             getattr(package, name)[("stand-in", name)] = torch.zeros(1)
+    for package in (ops._det, ops._fast, ops._det_head, ops._fast_head):  # one loaded library each (a stand-in)
+        jit = package.cake_jit
+        monkeypatch.setattr(
+            importlib.import_module(f"{package.__name__}.cake_build"), "load_library", lambda name: name
+        )
+        record = next(iter(jit.MODULES))
+        jit.load(record, jit.MODULES[record]["arches"][0])
+        assert jit.load.cache_info().currsize >= 1, package.__name__
     ops._built[("stand-in",)] = []
     ops._pooled_workspaces(_Package(), "det")(None, "bwd", 2, 4096, CPU)
 
@@ -386,6 +464,6 @@ def test_release_frees_the_pooled_workspaces_and_drops_the_plans_and_loaded_libr
     for package in (ops._det, ops._fast):
         assert {name: dict(getattr(package, name)) for name in caches} == {name: {} for name in caches}
         assert package._DEFAULT_WORKSPACES == {} and package._DEFAULT_VIEWS == {}
-    for package in (ops._det, ops._fast, ops._head):
+    for package in (ops._det, ops._fast, ops._det_head, ops._fast_head):
         assert package.cake_jit.load.cache_info().currsize == 0
     assert ops._built == {}

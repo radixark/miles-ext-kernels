@@ -29,6 +29,7 @@ def test_the_op_declares_both_variants_the_selector_and_the_packages():
     assert set(mhc.OP.packages) == {
         "cake_mhc_det_train",
         "cake_mhc_head_det_train",
+        "cake_mhc_head_nondet_train",
         "cake_mhc_nondet_train",
     }
     assert mhc.__all__ == ["OP", *mhc.OP.exports]

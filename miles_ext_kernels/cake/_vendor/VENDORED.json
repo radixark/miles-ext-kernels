@@ -2617,6 +2617,30 @@
           "repo": "https://github.com/flashinfer-ai/flashinfer"
         }
       },
+      "cake_mhc_head_nondet_train": {
+        "cake_revision": "e4cf7fb36d9f7abfa2d21382e10346c9c02013ab",
+        "files": {
+          ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
+          "__init__.py": "6c0fdfc2d55baa3f03bfec6cae7b5cf0ba5073a0",
+          "build.json": "d5ff19ef99e2afe80ad0f9a571aa337244ecba10",
+          "cake_build.py": "00756137eb159e30a77907eda84fd245123d87ea",
+          "cake_jit.py": "dd332cab3e22925b0198a7cee162642881b7a085",
+          "csrc/.clang-format": "3f3476bf48ac1d1cde3620cbd39b264362851098",
+          "csrc/cake_ffi_checks.h": "129288f9432e054dc51b77d93194fb0f2ec20d9c",
+          "csrc/cake_mhc_train_head_bwd__acc_binding.cu": "3d540b81642a5e55ca07a9339c90ab2eba5f8938",
+          "csrc/cake_mhc_train_head_bwd__acc_kernel.cu": "c92073165498ff8f492227f2a46b6420961e9979",
+          "csrc/cake_mhc_train_head_bwd_binding.cu": "4b9c99d385d2de8f024f42f57fefd64212bad892",
+          "csrc/cake_mhc_train_head_bwd_kernel.cu": "fc2fd8492d0b9e50462cfe4b13250f8a6d965e5b",
+          "csrc/cake_mhc_train_head_fwd_binding.cu": "3cc36b96f976c3b747e4069e3fc59108dcca325a",
+          "csrc/cake_mhc_train_head_fwd_kernel.cu": "86a2516b94c7ad60e2305ac3ba9804e02d6a65da"
+        },
+        "source": {
+          "commit": "3bc3b4351f1da01d2613f36d429602da9a6c8c17",
+          "kind": "flashinfer",
+          "path": "flashinfer/experimental/cake/cake_mhc_head_nondet_train",
+          "repo": "https://github.com/flashinfer-ai/flashinfer"
+        }
+      },
       "cake_mhc_nondet_train": {
         "cake_revision": "56051a04ba6b3dc7016625a688f77a4c25fea23e",
         "files": {
