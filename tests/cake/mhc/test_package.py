@@ -228,6 +228,15 @@ def test_finish_runs_the_package_of_the_handle_and_refuses_another(monkeypatch):
         ops.mhc_finish(None, None, object())
 
 
+def test_the_head_runs_the_head_packages_entry(monkeypatch):
+    """``mhc_head`` calls the head package's mode-word autograd entry (a stand-in here: no device work)."""
+    monkeypatch.setattr(ops._head, "cake_mhc_head_det", lambda X: ("head", X))
+    X = torch.zeros(3, 4, 4096, dtype=torch.bfloat16)
+
+    name, given = ops.mhc_head(X)
+    assert name == "head" and given is X
+
+
 # --- workspaces: the runtime's pool (review: one bounded pool with a release hook) ---
 
 
