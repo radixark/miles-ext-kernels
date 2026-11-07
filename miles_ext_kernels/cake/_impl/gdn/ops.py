@@ -2512,7 +2512,7 @@ def prebuild(*, device: Any = None, max_workers: int | None = None) -> list[Path
     returns no call compiles one of them.  One exception: the third-party Triton kernels that a caller-supplied FLA
     ``cp_context`` runs (FLA's own context-parallel pre-processing) are not prewarmed; they compile in FLA on their
     first call.  ``NotImplementedError`` for a device other than SM100a / SM103a / SM107a, ``RuntimeError`` when the
-    toolkit is too old for the device (SM107a: CUDA 13.4).  Returns the cache paths.
+    toolkit is older than CUDA 13.4.  Returns the cache paths.
     """
     arch = loader.device_arch(device)
     paths: list[Path] = []

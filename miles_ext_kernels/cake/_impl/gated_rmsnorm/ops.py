@@ -87,7 +87,7 @@ def check_supported(
 ) -> None:
     """Raise ``ValueError`` unless the Cake kernels run this gated output norm on ``device`` (default: the current
     CUDA device): a SiLU gate, rows of 128, a BF16 weight without bias, compute capability 10.0, 10.3 or 10.7;
-    ``RuntimeError`` when the toolkit cannot build the device's kernels (SM107a needs CUDA 13.4 or newer)."""
+    ``RuntimeError`` when the toolkit cannot build the device's kernels (they need CUDA 13.4 or newer)."""
     if activation != "silu":
         raise ValueError(
             f"{_BACKEND} computes RMSNorm(x) * w * SiLU(z), but this model gates its output norm with "

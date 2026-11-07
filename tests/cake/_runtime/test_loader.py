@@ -207,14 +207,14 @@ def cache(tmp_path, monkeypatch):
 
 @pytest.fixture
 def tvm_ffi(monkeypatch):
-    """A stand-in for tvm_ffi: include finders, a version, and load_module returning ``cudart`` (default 13000)."""
+    """A stand-in for tvm_ffi: include finders, a version, and load_module returning ``cudart`` (default 13040)."""
     module = types.ModuleType("tvm_ffi")
     libinfo = types.ModuleType("tvm_ffi.libinfo")
     libinfo.find_include_path = lambda: INCLUDES[0]
     libinfo.find_dlpack_include_path = lambda: INCLUDES[1]
     module.libinfo = libinfo
     module.__version__ = "0.1.11"
-    module.cudart = 13000
+    module.cudart = 13040
     module.loaded = []
 
     def load_module(path: str) -> _Library:
@@ -229,7 +229,7 @@ def tvm_ffi(monkeypatch):
 
 @pytest.fixture
 def toolkit(tmp_path, monkeypatch):
-    """``toolkit("13.0.88")``: a fake nvcc of that version as ``$CUDA_HOME/bin/nvcc``."""
+    """``toolkit("13.4.92")``: a fake nvcc of that version as ``$CUDA_HOME/bin/nvcc``."""
 
     def make(full: str) -> Path:
         major, minor, _ = full.split(".")
@@ -292,10 +292,10 @@ def test_install_rebinds_the_toolchain_hook(package):
 @pytest.mark.parametrize(
     ("full", "arch", "conditional"),
     [
-        ("13.0.88", "sm_103a", ["-static-global-template-stub=false", "-Xptxas", "-O0"]),
+        ("13.5.20", "sm_103a", ["-static-global-template-stub=false", "-DSYNTHETIC_NEWER"]),
         ("13.4.92", "sm_103a", ["-static-global-template-stub=false", "-DSYNTHETIC_COMMON_13_4", "-DSYNTHETIC_NEWER"]),
-        ("13.0.88", "sm_100a", ["-static-global-template-stub=false"]),
-        ("12.9.86", "sm_100a", ["-static-global-template-stub=false"]),
+        ("13.4.92", "sm_100a", ["-static-global-template-stub=false", "-DSYNTHETIC_COMMON_13_4"]),
+        ("13.5.20", "sm_100a", ["-static-global-template-stub=false"]),
         ("13.4.92", "sm_107a", ["-static-global-template-stub=false", "-DSYNTHETIC_COMMON_13_4"]),
     ],
 )
@@ -321,41 +321,50 @@ def test_the_command_is_flashinfer_compile_command(package, toolkit, tvm_ffi, ca
 
 
 def test_a_library_above_the_toolkit_raises_and_warmups_leave_it_out(package, toolkit, tvm_ffi):
-    nvcc = toolkit("13.0.88")
+    """An entry recording a newer ``min_cuda`` than the toolkit (here 13.5 above CUDA 13.4)."""
+    nvcc = toolkit("13.4.92")
     loader.install(package)
+    _entry(package, "prog_sm_107a")["min_cuda"] = "13.5"
 
-    with pytest.raises(RuntimeError, match="needs CUDA 13.4 or newer"):
+    with pytest.raises(RuntimeError, match=r"needs CUDA 13\.5 or newer"):
         package.jit_spec("prog_sm_107a")
     assert package.jit_specs("sm_107a") == []
     assert [spec.name for spec in package.jit_specs("sm_103a")] == [f"prog_sm_103a_{CLOSURE[:20]}"]
-    with pytest.raises(RuntimeError, match="needs CUDA 13.4 or newer"):
+    with pytest.raises(RuntimeError, match=r"needs CUDA 13\.5 or newer"):
         loader.prebuild_libraries(package, ["prog_sm_107a"])
     assert _calls(nvcc) == []
 
 
-def test_an_architecture_above_the_toolkit_raises_whatever_its_entry_records(package, toolkit, tvm_ffi):
-    """nvcc 13.0 to 13.3 reject compute_107a: an SM107a entry recording a lower min_cuda still needs CUDA 13.4."""
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+def test_an_architecture_above_the_toolkit_raises_whatever_its_entry_records(package, toolkit, tvm_ffi, arch):
+    """The runtime builds every architecture with CUDA 13.4 or newer (nvcc 13.0 to 13.3 also reject compute_107a): an
+    entry recording a lower min_cuda still needs CUDA 13.4."""
     nvcc = toolkit("13.0.88")
     loader.install(package)
-    _entry(package, "prog_sm_107a")["min_cuda"] = "13.0"
+    _entry(package, f"prog_{arch}")["min_cuda"] = "13.0"
 
-    error = r"compiling prog_sm_107a_\w+ for sm_107a needs CUDA 13\.4 or newer, but \S+ is CUDA 13\.0\.88"
+    error = rf"compiling prog_{arch}_\w+ for {arch} needs CUDA 13\.4 or newer, but \S+ is CUDA 13\.0\.88"
     with pytest.raises(RuntimeError, match=error):
-        package.jit_spec("prog_sm_107a")
-    with pytest.raises(RuntimeError, match=r"for sm_107a needs CUDA 13\.4 or newer"):
-        loader.prebuild_libraries(package, ["prog_sm_107a"])
+        package.jit_spec(f"prog_{arch}")
+    with pytest.raises(RuntimeError, match=rf"for {arch} needs CUDA 13\.4 or newer"):
+        loader.prebuild_libraries(package, [f"prog_{arch}"])
     assert _calls(nvcc) == []
 
 
 @pytest.mark.parametrize(
     ("full", "arch", "need"),
     [
-        ("13.0.88", "sm_100a", None),
-        ("13.0.88", "sm_103a", None),
-        ("12.8.93", "sm_103a", "12.9"),
+        ("13.0.88", "sm_100a", "13.4"),
+        ("13.0.88", "sm_103a", "13.4"),
+        ("12.8.93", "sm_103a", "13.4"),
         ("13.0.88", "sm_107a", "13.4"),
         ("13.3.73", "sm_107a", "13.4"),
         ("13.4.92", "sm_107a", None),
+        ("12.9.86", "sm_100a", "13.4"),
+        ("13.3.73", "sm_100a", "13.4"),
+        ("13.3.73", "sm_103a", "13.4"),
+        ("13.4.92", "sm_100a", None),
+        ("13.4.92", "sm_103a", None),
     ],
 )
 def test_check_toolkit_names_the_cuda_version_the_architecture_needs(toolkit, full, arch, need):
@@ -378,13 +387,15 @@ def test_check_toolkit_reads_the_given_nvcc(toolkit):
 
 
 def test_every_architecture_has_a_toolkit_floor():
+    """CUDA 13.4 on every architecture, the Cake standard."""
     assert set(loader.ARCH_BY_CAPABILITY.values()) == set(loader.MIN_CUDA)
+    assert set(loader.MIN_CUDA.values()) == {(13, 4)}
 
 
 def test_the_library_is_cached_outside_the_package_under_a_toolchain_key(
     package, toolkit, tvm_ffi, cache, monkeypatch
 ):
-    toolkit("13.0.88")
+    toolkit("13.4.92")
     loader.install(package)
     root = Path(package.__file__).parent
     before = _files(root)
@@ -396,7 +407,7 @@ def test_the_library_is_cached_outside_the_package_under_a_toolchain_key(
     assert package.library_path("prog_sm_100a") == path
     assert _files(root) == before
     names = {path.name}
-    toolkit("13.0.48")
+    toolkit("13.4.48")
     names.add(package.library_path("prog_sm_100a").name)
     tvm_ffi.__version__ = "0.1.12"
     names.add(package.library_path("prog_sm_100a").name)
@@ -406,7 +417,7 @@ def test_the_library_is_cached_outside_the_package_under_a_toolchain_key(
 
 
 def test_a_cached_library_is_built_once(package, toolkit, tvm_ffi):
-    nvcc = toolkit("13.0.88")
+    nvcc = toolkit("13.4.92")
     loader.install(package)
 
     first = package.jit_spec("prog_sm_100a").build()
@@ -418,21 +429,21 @@ def test_a_cached_library_is_built_once(package, toolkit, tvm_ffi):
 
 
 def test_load_library_builds_loads_and_checks_the_cudart_version(package, toolkit, tvm_ffi):
-    toolkit("13.0.88")
+    toolkit("13.4.92")
     loader.install(package)
 
     library = package.load_library("prog_sm_100a")
 
-    assert library.build_cuda_version() == 13000
+    assert library.build_cuda_version() == 13040
     assert tvm_ffi.loaded == [str(package.library_path("prog_sm_100a"))]
-    assert package.record_cuda_version("sm_100a") == (13, 0)
-    tvm_ffi.cudart = 12090
-    with pytest.raises(RuntimeError, match="compiled against CUDART 12090"):
+    assert package.record_cuda_version("sm_100a") == (13, 4)
+    tvm_ffi.cudart = 13000
+    with pytest.raises(RuntimeError, match="compiled against CUDART 13000"):
         package.load_library("prog_sm_100a")
 
 
 def test_a_failed_compile_raises_and_caches_nothing(package, toolkit, tvm_ffi):
-    nvcc = toolkit("13.0.88")
+    nvcc = toolkit("13.4.92")
     nvcc.with_name("fail").touch()
     loader.install(package)
     spec = package.jit_spec("prog_sm_100a")
@@ -464,7 +475,7 @@ def held_lock(monkeypatch):
 
 
 def test_a_held_build_lock_is_reported_and_given_up_on(package, toolkit, tvm_ffi, held_lock, caplog):
-    nvcc = toolkit("13.0.88")
+    nvcc = toolkit("13.4.92")
     loader.install(package)
     spec = package.jit_spec("prog_sm_100a")
     held_lock(spec)
@@ -481,7 +492,7 @@ def test_a_held_build_lock_is_reported_and_given_up_on(package, toolkit, tvm_ffi
 
 def test_a_build_waits_for_a_released_lock(package, toolkit, tvm_ffi, held_lock, monkeypatch):
     monkeypatch.setattr(loader, "_LOCK_TIMEOUT_SECONDS", 60)
-    nvcc = toolkit("13.0.88")
+    nvcc = toolkit("13.4.92")
     loader.install(package)
     spec = package.jit_spec("prog_sm_100a")
     release = threading.Timer(0.1, held_lock(spec).close)
@@ -495,7 +506,7 @@ def test_a_build_waits_for_a_released_lock(package, toolkit, tvm_ffi, held_lock,
 
 
 def test_prebuild_returns_every_library_and_compiles_only_the_missing_ones(package, toolkit, tvm_ffi):
-    nvcc = toolkit("13.0.88")
+    nvcc = toolkit("13.4.92")
     aot = Path(package.__file__).parent / "aot"
     aot.mkdir()
     (aot / "prog_sm_103a.so").write_bytes(b"prebuilt")
@@ -559,13 +570,13 @@ def test_forgetting_the_synthetic_package_keeps_every_other_vendored_package(mon
 
 
 def test_load_package_imports_a_vendored_package_with_the_loader_installed(vendored, toolkit, tvm_ffi):
-    toolkit("13.0.88")
+    toolkit("13.4.92")
 
     package = loader.load_package(vendored)
 
     assert package.__name__ == f"miles_ext_kernels.cake._vendor.{PACKAGE}"
     assert package.cake_build._jit_toolchain.__module__ == loader.__name__
-    assert package.cake_build.load_library("prog_sm_100a").build_cuda_version() == 13000
+    assert package.cake_build.load_library("prog_sm_100a").build_cuda_version() == 13040
     assert loader.prebuild_libraries(vendored, ["prog_sm_100a"]) == [package.cake_build.library_path("prog_sm_100a")]
 
 
@@ -600,7 +611,7 @@ def test_the_cake_alias_is_the_vendored_package_itself(vendored, package):
 
 
 def test_no_build_raises_instead_of_compiling_and_names_the_op(vendored, toolkit, tvm_ffi, monkeypatch):
-    nvcc = toolkit("13.0.88")
+    nvcc = toolkit("13.4.92")
     synthetic.install(monkeypatch, dataclasses.replace(synthetic.OP, packages=(vendored,)))
     loader.install_op("synth")
     cake_build = sys.modules[f"miles_ext_kernels.cake._vendor.{PACKAGE}.cake_build"]
@@ -615,7 +626,7 @@ def test_no_build_raises_instead_of_compiling_and_names_the_op(vendored, toolkit
     assert _calls(nvcc) == []
     loader.prebuild_libraries(vendored, ["prog_sm_100a"])
     with loader.no_build():
-        assert cake_build.load_library("prog_sm_100a").build_cuda_version() == 13000
+        assert cake_build.load_library("prog_sm_100a").build_cuda_version() == 13040
     assert len(_calls(nvcc)) == 1
 
 

@@ -5,7 +5,7 @@ https://www.apache.org/licenses/LICENSE-2.0
 
 The dense projection GEMMs miles calls (SM100a / SM103a / SM107a), on the vendored FlashInfer packages
 ``cake_dense_gemm_det_train`` (``det``) and ``cake_dense_gemm_nondet_train`` (``fast``), whose libraries the runtime's
-loader builds with nvcc and loads with tvm-ffi (SM107a with a CUDA 13.4 or newer toolkit).
+loader builds with nvcc and loads with tvm-ffi (with a CUDA 13.4 or newer toolkit).
 
 K1 (``cake_dense_gemm_det_train``) computes ``out[l, m, n] = sum_k A[l, m, k] B[l, k, n]`` over strided BF16 views with
 FP32 accumulation and one rounding at the store. Its launch plan, split-K and stream-K fixup order are a pure function

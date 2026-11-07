@@ -32,10 +32,9 @@ workspace's imbalance-aware split picks per rank from the latest load observatio
 Runtime needs: an initialized ``torch.distributed`` NCCL group over the expert-parallel ranks, its CUDA device current;
 PyTorch symmetric memory with multicast (``torch.distributed._symmetric_memory``), so every rank of the group sits in
 one peer-accessible NVLink domain (one NVL72 domain may span hosts); tvm-ffi. Triton (the ``mok`` extra) runs the
-weight quantizer; without it PyTorch operations write the same bytes. SM107a needs a CUDA 13.4 toolkit. The MXFP8
-kernels convert BF16 pairs to E4M3 with ``cvt.rn.satfinite.e4m3x2.bf16x2`` under an nvcc of CUDA 13.1 or newer and with
-the FP32 form of the same conversion under older ones, so CUDA 13.0 builds every SM100a and SM103a kernel (the vendored
-README still says the forward and recompute ones need 13.1; their sources carry that fallback too).
+weight quantizer; without it PyTorch operations write the same bytes. Every architecture needs a CUDA 13.4 or newer
+toolkit. The MXFP8 kernels convert BF16 pairs to E4M3 with ``cvt.rn.satfinite.e4m3x2.bf16x2``; their sources keep the
+FP32 form of the same conversion for an nvcc older than CUDA 13.1, which the runtime's CUDA 13.4 floor never uses.
 
 :func:`prebuild` builds the libraries of a model before its first call: every scheduler layout, top-k, SwiGLU form,
 weight-gradient precision and routed precision the model parameters leave open, the context recompute and every token
@@ -210,8 +209,8 @@ def prebuild(
     Covered whatever the token counts: the BF16 and MXFP8 forward, the context recompute, the backward, the scheduler
     and the epilogues. With the layout, ``topk``, ``clamped_swiglu`` and ``fp32_wgrad`` unset that is all 48 libraries
     of the architecture (50 on SM107a); with the four set, 15 (16 on SM107a; 12 without MXFP8). ``ValueError`` for
-    parameters the kernels do not serve, ``NotImplementedError`` for another GPU, ``RuntimeError`` for a toolkit too
-    old for it (SM107a: CUDA 13.4).
+    parameters the kernels do not serve, ``NotImplementedError`` for another GPU, ``RuntimeError`` for a toolkit
+    older than CUDA 13.4.
     """
     selection = dict(
         ep_size=ep_size,

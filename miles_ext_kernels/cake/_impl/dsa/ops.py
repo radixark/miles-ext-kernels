@@ -85,7 +85,7 @@ _FAST_WARM: set[tuple[str, str]] = set()
 
 def check_device(device=None) -> str:
     """The architecture tag of ``device`` (``sm_100a`` / ``sm_103a`` / ``sm_107a``); raises ``NotImplementedError``
-    elsewhere, and ``RuntimeError`` when the toolkit cannot build the device's kernels (SM107a needs CUDA 13.4)."""
+    elsewhere, and ``RuntimeError`` when the toolkit cannot build the device's kernels (CUDA 13.4 or newer)."""
     if not torch.cuda.is_available():
         raise NotImplementedError("the Cake DSA kernels need a CUDA device (SM100a, SM103a or SM107a)")
     arch = device_arch(device)

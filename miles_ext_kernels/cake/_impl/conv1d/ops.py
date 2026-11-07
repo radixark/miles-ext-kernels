@@ -44,7 +44,7 @@ tensors of one layer (q, k and v) with one exchange per direction, bitwise the s
 
 The packages compile their libraries on first use through the runtime's loader; ``prebuild(weight_dtype=...)`` builds
 every library a call may launch (both variants, both SiLU' policies, every channel count and token count, the
-context-parallel route) before the first step. SM107a needs a CUDA 13.4 or newer toolkit.
+context-parallel route) before the first step. Every architecture needs a CUDA 13.4 or newer toolkit.
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def _capability(device) -> tuple[int, int]:
 def check_supported(channels: int, kernel_size: int, activation: str, device=None, *, has_bias: bool = False) -> None:
     """Raise ``ValueError`` unless the Cake kernels run this short convolution on ``device`` (default: the current
     CUDA device): kernel size 4, SiLU, no bias, a channel count that is a multiple of 8, compute capability 10.0, 10.3
-    or 10.7; ``RuntimeError`` when the toolkit cannot build the device's kernels (SM107a needs CUDA 13.4 or newer).
+    or 10.7; ``RuntimeError`` when the toolkit cannot build the device's kernels (they need CUDA 13.4 or newer).
 
     ``has_bias``: whether the convolution adds a per-channel bias. The entry points take no bias, so a layer with one
     must not run them: it would lose its bias silently.

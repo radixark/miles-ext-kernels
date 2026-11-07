@@ -2,11 +2,11 @@
 
 ``sources.json`` names every kernel role with its architectures and library stem, ``build.json`` every library the
 package can build. Checked: each role has one library per architecture it names (every architecture, the MXFP8
-forward's multimacro programs SM107a only) and the manifest no other, so ``prebuild``
-selects among exactly the libraries a run can load; no library asks for a newer toolkit than the loader's ``MIN_CUDA``
-names for its architecture; and every use of ``cvt.rn.satfinite.e4m3x2.bf16x2`` (which the CUDA 13.0 ptxas rejects) in
-the MXFP8 sources sits under the CUDA 13.1 guard with the FP32 fallback, so CUDA 13.0 builds every SM100a and SM103a
-library.
+forward's multimacro programs SM107a only) and the manifest no other, so ``prebuild`` selects among exactly the
+libraries a run can load; no library asks for a newer toolkit than the loader's ``MIN_CUDA`` names for its
+architecture; and every use of ``cvt.rn.satfinite.e4m3x2.bf16x2`` (which the CUDA 13.0 ptxas rejects) in the MXFP8
+sources sits under the CUDA 13.1 guard with the FP32 fallback, the vendored sources' own rule (the runtime builds with
+CUDA 13.4 or newer, so it never takes the fallback).
 """
 
 import json

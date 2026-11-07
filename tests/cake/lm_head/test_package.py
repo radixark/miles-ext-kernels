@@ -1,5 +1,6 @@
-"""The lm_head implementation without a GPU (CPU torch): what ``prebuild`` builds, the host-count rule and its log,
-the package entry each variant calls, ``release`` and the errors raised before any device work."""
+"""The lm_head implementation without a GPU (CPU torch): what ``prebuild`` builds, the host-count rule and its log
+(which the runtime's CUDA 13.4 floor leaves unreached), the package entry each variant calls, ``release`` and the
+errors raised before any device work."""
 
 import json
 import logging
@@ -103,6 +104,20 @@ def test_the_host_count_path_is_logged_once_per_architecture(toolkit, caplog, ve
     assert len(messages) == logged
     if logged:
         assert "sm_103a programs built by CUDA 13.0" in messages[0] and "also with num_valid_rows" in messages[0]
+
+
+@pytest.mark.parametrize("arch", ARCHES)
+def test_the_runtime_refuses_a_cuda_13_0_toolkit_before_the_host_count_path(monkeypatch, caplog, arch):
+    """CUDA 13.4 is the runtime's floor on every architecture, so no call reaches the packages' CUDA 13.0 path."""
+    cuda_13_0 = loader.CudaVersion(13, 0, "13.0.88")
+    monkeypatch.setattr(loader, "_toolkit", lambda nvcc=None: ("/usr/local/cuda/bin/nvcc", cuda_13_0))
+    _clear_toolkit_caches()
+
+    with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
+        with pytest.raises(RuntimeError, match=rf"for {arch} needs CUDA 13\.4 or newer"):
+            ops._check_toolkit(arch)
+    assert not [record for record in caplog.records if record.name.startswith("miles_ext_kernels")]
+    _clear_toolkit_caches()
 
 
 def test_the_package_modules_take_the_toolkit_from_the_loader():

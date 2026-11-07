@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
 Selected-token log-probabilities of an LM head on the vendored Cake chunked LM-head packages (SM100a / SM103a /
-SM107a; SM107a builds them with a CUDA 13.4 or newer toolkit).
+SM107a, built with a CUDA 13.4 or newer toolkit).
 
 ``logp_t = z[t, y_t] / tau_t - logsumexp_v(z[t, v] / tau_t)`` with ``z = bf16(X @ W^T)``, chunk by chunk: the forward
 keeps the FP32 log-sum-exp of each row, the backward recomputes each chunk's logits and forms ``dX`` and ``dW``
@@ -22,11 +22,10 @@ forward:
 
 Host synchronization. A call without ``num_valid_rows`` reads its count of valid rows back to the host once, in the
 forward (the backward reuses the forward's row index). With ``num_valid_rows`` the forward plans on the given count
-and checks it on the device, without waiting for the device, except on SM103a with a CUDA 13.0 toolkit: the packages
-build the SM103a programs at ``ptxas -O0`` there and keep every call on the host-count path (their mitigation of a
-ptxas 13.0 fault in those programs), so each forward waits for the device and checks a given count on the host
-(``ValueError`` when it is wrong). Any other toolkit (12.9, 13.1 or newer) avoids it; the first call or
-:func:`prebuild` on such a device logs it once.
+and checks it on the device, without waiting for the device. The packages also keep a host-count path for SM103a
+programs built by CUDA 13.0 (at ``ptxas -O0``, their mitigation of a ptxas 13.0 fault), where each forward waits for
+the device and checks a given count on the host; the runtime builds with CUDA 13.4 or newer, so no call takes it
+(:func:`host_count_path` and its log stay for the packages' rule).
 
 Labels. A negative label (``-100`` by convention; every value below 0 alike) marks an ignored row: ``logp`` 0, no
 gradient. A label at or above ``V`` is an error: each call queues the device-side assertion ``max(labels) < V`` ahead
@@ -99,7 +98,7 @@ def _check_toolkit(arch: str) -> None:
         logger.warning(
             "miles_ext_kernels.cake.lm_head: the %s programs built by CUDA 13.0 run at ptxas -O0 on the host-count "
             "path, so every forward waits for the device once, also with num_valid_rows (the packages' mitigation of "
-            "a ptxas 13.0 fault); a CUDA 12.9 or 13.1+ toolkit avoids it",
+            "a ptxas 13.0 fault)",
             arch,
         )
 
@@ -107,7 +106,8 @@ def _check_toolkit(arch: str) -> None:
 def host_count_path(arch: str) -> bool:
     """Do the calls on ``arch`` read their valid-row count back to the host even when given ``num_valid_rows``?
 
-    True for SM103a programs built by CUDA 13.0 (the packages' own rule; the same for both variants).
+    True for SM103a programs built by CUDA 13.0 (the packages' own rule; the same for both variants), which the
+    runtime's CUDA 13.4 floor does not build.
     """
     return not _jit("det").toolchain_runs_hidden_count(arch)
 
@@ -174,8 +174,8 @@ def log_probs(
             device-side assertion). Not differentiable.
         num_valid_rows: the host count of ``labels >= 0`` when the caller knows it (every row valid: ``T``): the
             forward plans on it instead of reading the count back (module docstring, Host synchronization). It is
-            checked on the device: a wrong count stops the stream with a device-side assertion (on the host-count
-            path of SM103a with CUDA 13.0: a ``ValueError``). The same bits as without it.
+            checked on the device: a wrong count stops the stream with a device-side assertion. The same bits as
+            without it.
 
     The variant and the chunk size are the configured ones (``--cake-lm-head-variant``,
     ``--cake-lm-head-chunk-size``), read now; ``det``'s bits depend on the chunk size. Raises ``ValueError`` for

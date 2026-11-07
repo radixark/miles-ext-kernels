@@ -290,7 +290,7 @@ def prebuild(*, device: Any = None, max_workers: int | None = None, hidden: int,
     before; a repeated call in a process builds nothing, and ranks starting at once build each library once (the
     loader's file lock). ``ValueError`` for a hidden size or count the device's architecture does not serve
     (:func:`libraries`), ``NotImplementedError`` for a device other than SM100a / SM103a / SM107a, ``RuntimeError``
-    when the toolkit cannot build its libraries (SM107a needs CUDA 13.4 or newer).
+    when the toolkit cannot build its libraries (they need CUDA 13.4 or newer).
     """
     device = _device(device)
     if device.type != "cuda":

@@ -29,8 +29,8 @@ runs ``fast``).
 
 Only hidden sizes with FP32-weight routes in both packages run (:func:`supported_hidden_sizes`); the module raises at
 construction for any other. The kernels pick a program per token-count window: :func:`prebuild` builds every program
-of both variants for one hidden size, so that no call compiles; constructing the module builds nothing. SM107a needs a
-CUDA 13.4 or newer toolkit to build its kernels.
+of both variants for one hidden size, so that no call compiles; constructing the module builds nothing. Every
+architecture needs a CUDA 13.4 or newer toolkit to build its kernels.
 
 On SM107a, hidden size 4096 also launches programs with more shared memory per block than the standard opt-in
 (232448 B): ``det``'s backward above 4096 tokens and ``fast``'s from 4097 to 24064 tokens. They run in CUDA 13.4's
@@ -201,7 +201,7 @@ def _check_shared_memory(arch: str, hidden_size: int, index: int, cuda_major: in
 def _check_device(hidden_size: int, device: Any) -> str:
     """The architecture of the CUDA ``device``, checked to serve ``hidden_size`` and its kernels to build with the
     toolkit and launch in this process: ``NotImplementedError`` for another architecture, ``ValueError`` for a hidden
-    size it does not serve, ``RuntimeError`` for a toolkit too old to build it (SM107a needs CUDA 13.4) or a width
+    size it does not serve, ``RuntimeError`` for a toolkit older than CUDA 13.4 or a width
     whose oversized shared-memory programs this process cannot launch (SM107a at 4096 needs a CUDA 13.4 runtime)."""
     arch = loader.device_arch(device)
     supported = supported_hidden_sizes(arch)
@@ -238,7 +238,7 @@ def check_supported(hidden_size: int, device: Any = None) -> None:
 
     The hidden size is checked first (``ValueError``), so a process without CUDA gets that error too; then the device:
     ``NotImplementedError`` without CUDA or for an architecture other than SM100a / SM103a / SM107a, ``RuntimeError``
-    when the toolkit cannot build its kernels (SM107a needs CUDA 13.4 or newer) or the process cannot launch the
+    when the toolkit cannot build its kernels (they need CUDA 13.4 or newer) or the process cannot launch the
     programs of that width in the oversized shared-memory mode (SM107a at 4096 needs a CUDA 13.4 or newer runtime).
     """
     hidden_size = int(hidden_size)

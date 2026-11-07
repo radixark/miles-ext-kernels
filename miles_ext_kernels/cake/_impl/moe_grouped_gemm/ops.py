@@ -4,7 +4,7 @@ Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
 The ragged BF16 MoE grouped GEMM miles calls (SM100a / SM103a / SM107a), on two vendored FlashInfer packages whose
-libraries the runtime's loader builds and loads (SM107a with a CUDA 13.4 or newer toolkit):
+libraries the runtime's loader builds and loads (with a CUDA 13.4 or newer toolkit):
 ``_vendor/cake_moe_grouped_gemm_det_train`` (``det``) and ``_vendor/cake_moe_grouped_gemm_nondet_train``
 (``fast``).
 
