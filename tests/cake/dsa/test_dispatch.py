@@ -305,6 +305,26 @@ def test_a_call_fast_does_not_serve_runs_det_and_warns_once_per_reason(routes, c
     assert [route for route, *_ in routes] == ["det"] * 6
 
 
+def test_fast_runs_det_under_torch_deterministic_algorithms(routes, caplog):
+    # the FlashInfer fast backward raises PyTorch's alert under deterministic algorithms; det serves the call instead
+    cake.configure(cake_dsa_variant="fast")
+    previous = torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    try:
+        with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
+            for _ in range(2):
+                assert dsa.sparse_attention(*_thd(64), sm_scale=SCALE) == "det"
+    finally:
+        torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
+    assert dsa.sparse_attention(*_thd(64), sm_scale=SCALE) == "fast"
+
+    assert [route for route, *_ in routes] == ["det", "det", "fast"]
+    assert [record.getMessage() for record in caplog.records] == [
+        "miles_ext_kernels.cake.dsa: the fast variant does not serve calls under "
+        "torch.use_deterministic_algorithms(True); running det"
+    ]
+
+
 def test_non_bf16_inputs_are_rejected_on_every_route(routes):
     q, kv, idx = _thd(64)
     for variant in ("det", "fast"):

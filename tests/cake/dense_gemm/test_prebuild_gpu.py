@@ -6,9 +6,10 @@ builds every program the two packages register for the device's architecture for
 route of :data:`ROUTES` runs the forward and the backward over token counts from 1 to 20480, among them 239 and seeded
 random counts, under ``no_build`` in ``det`` and in ``fast`` (``check_prebuild`` configures each). The routes cover
 every switch a call takes at call time: the variant, the weight layout, a strided input slice and a weight split of
-a parameter (read in place), a weight that is not 16-byte aligned (copied), one gradient only, a side stream, the
+a parameter (read in place), a weight that is not 16-byte aligned (copied), one gradient only, a single-head
+``out_in`` weight gradient (the packages' weight-gradient entry points; on an input slice too), a side stream, the
 router's ``[T, 1, H]`` and ``[T, H]`` inputs, and ``fast`` under ``torch.use_deterministic_algorithms`` (it runs
-``det``). The cold prebuild compiles every registered program of the architecture (about 100 libraries). A fresh
+``det``). The cold prebuild compiles every registered program of the architecture (over 100 libraries). A fresh
 process that imports the implementation and runs both variants loads no flashinfer module. Needs a CUDA device; the
 tests need SM100a / SM103a / SM107a and skip elsewhere.
 """
@@ -139,6 +140,10 @@ ROUTES = {
     "dense-4096-32-weight-gradient-only": _over_tokens(
         _projection_step, PROJECTIONS["dense-4096-32"], grads=("weight",)
     ),
+    # x is a slice of a wider head; the weight is rows 16 to 47 of a [64, 4096] parameter
+    "dense-4096-32-slice-and-split": _over_tokens(
+        _projection_step, PROJECTIONS["dense-4096-32"], slot=4096 + 64, split=(64, 16)
+    ),
     "dsv4-o-group-g8-side-stream": _on_a_side_stream(_over_tokens(_projection_step, PROJECTIONS["dsv4-o-group-g8"])),
     **{name: _over_tokens(_router_step, *shape) for name, shape in ROUTERS.items()},
     "router-e384-h7168-flat": _over_tokens(_router_step, *ROUTERS["router-e384-h7168"], flat=True),
@@ -187,7 +192,8 @@ def test_a_fresh_process_running_both_variants_imports_no_flashinfer_module():
 
 
 def test_the_routes_reach_the_fast_programs_of_this_device():
-    """``fast`` runs a program of its own for some route on this part, or the part has none for these shapes."""
+    """``fast`` runs a program of its own (a weight gradient, a router input gradient) for some route on this part,
+    or the part has none for these shapes; ``prebuild`` builds each of them."""
     part = dict(arch=ARCH, sm_count=SM_COUNT)
     planned = [
         fast_projection_programs(heads, d_in, d_out, weight_layout=layout, tokens=tokens, **part)
@@ -199,10 +205,10 @@ def test_the_routes_reach_the_fast_programs_of_this_device():
         for experts, hidden in ROUTERS.values()
         for tokens in TOKENS
     ]
-    own = {programs["weight_grad"] for programs in planned} - {None}
+    own = {programs[op] for programs in planned for op in ("input_grad", "weight_grad")} - {None}
     if not own:
         pytest.skip(f"fast runs no program of its own for these shapes on {ARCH} with {SM_COUNT} SMs")
-    prebuilt = set(ops.programs_to_prebuild(ARCH, ["projections", "router"])["dense_projection_gemm"])
+    prebuilt = set(ops.programs_to_prebuild(ARCH, ["projections", "router"])["cake_dense_gemm_nondet_train"])
     _, fast_jit = ops._vendored_fast()
 
     assert {fast_jit.library_name(fast_jit.select_module(ARCH, program), ARCH) for program in own} <= prebuilt

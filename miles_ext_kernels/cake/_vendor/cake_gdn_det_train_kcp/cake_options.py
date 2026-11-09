@@ -14,18 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Options of the context-parallel (KCP) packed GDN training route
-(``flashinfer.experimental.cake_gdn_det_train_kcp``): every behaviour switch of the
-entry points is a keyword-only field of :class:`OptionsDetKcp`, validated once
-per call by :meth:`OptionsDetKcp.check`.  No field is read from the environment;
+(``flashinfer.experimental.cake.cake_gdn_det_train_kcp``): every behaviour switch of the
+entry points is a keyword-only field of :class:`CakeGDNDetKcpOptions`, validated once
+per call by :meth:`CakeGDNDetKcpOptions.check`.  No field is read from the environment;
 the package reads ``os.environ`` nowhere.
 
 Public fields (defaults are the shipped behaviour)::
 
     exchange        "a2a" | "ring"          cross-rank exchange scheme (ring: n_d_max - 1 <= 2 and save_transfer=False)
     save_transfer   True                    the merge owner keeps its c1 receive tensor (and M_seg at P > 1) for the backward
-    save_mode       "light" | "full"        saved set: S_in / c1_recv / M_seg + the cheap gate rows and WY inverse (the
-                                            backward replays #1 and the tape walk), or additionally every forward tape
-                                            ("full" is opt-in only; never the default)
+    save_mode       "light" | "full"        saved set: S_in (with save_transfer also c1_recv and M_seg) and no tape (the
+                                            backward re-runs #1 and the tape walk), or additionally M_seg and every
+                                            forward tape ("full" is opt-in only; never the default)
     boundary_mode   "saved" | "replay"      keep the saved set, or keep nothing and re-run the whole module forward
                                             (summaries, exchange, merge) inside the backward (checkpoint replay)
     precision_mode  0 | 1 | 2               transfer-walk build record (template numbering): 0 = shipped TF32 hi/lo (2-MMA,
@@ -70,14 +70,16 @@ Public fields (defaults are the shipped behaviour)::
                                             why); never skipped with graph="replay" or outside the autograd node;
                                             "always" = the unconditional launch
     backend         "kernels" | "fake"      the exported programs, or the torch emulation of the same ABI (tests)
-    segments        None | int              requested segments per fragment (P); must equal the context's plan
+    segments        None | int              segments per fragment (P): None = the context's plan; an int overrides it
+                                            within [1, min(MAX_SEGMENTS, chunks of the rank's longest fragment)] (the
+                                            context builds and caches the overridden plan apart; the byte queries' P=)
     use_qk_l2norm_in_kernel  False | True   per-token L2 norm of every 128-channel Q / K head inside the recurrence
                                             programs (q_hat = bf16(q * r), r = 1 / sqrt(sum q^2 + 1e-6), FTZ off; the
                                             FLA keyword of chunk_gated_delta_rule): q / k stay the raw operands, the
                                             saved set gains the FP32 r of q and k ([2, T_r, H_qk]) and the gradient is
                                             the exact derivative at the stored point; the backward needs the same value
     test_knobs      None | dict             private levers (schedule, fused_walks, cols_rule, debug_sequence,
-                                            record_states, record_qk, p_rule, fwdh_vh, dhu_vh, walk_pair) and the names of the
+                                            record_states, record_qk, p_rule, fwdh_vh, dhu_vh, walk_pair, fused_o) and the names of the
                                             test-only values above;
                                             keyword argument only, never an environment variable
 """
@@ -158,6 +160,9 @@ TEST_KNOBS: dict[str, tuple[Any, ...] | None] = {
     # walk (fork / join with CUDA events; same launches, arguments and outputs); 0 = one stream; None (shipped) = auto:
     # on for zigzag partitions of <= 8 ranks on sm_100a / sm_103a (cake_kcp._walk_pair_enabled)
     "walk_pair": (None, 0, 1),
+    # 1 (shipped) = a forward whose h / v_new tapes have no reader runs the output walk kcp_fwdh_out (#2 with #5 folded
+    # in, no tape written) wherever the registry ships its records (cake_kcp._fuse_o); 0 = the tape walk, then #5
+    "fused_o": (0, 1),
 }
 TEST_KNOB_DEFAULTS: dict[str, Any] = {
     "schedule": SCHEDULE_DEFAULT,
@@ -171,6 +176,7 @@ TEST_KNOB_DEFAULTS: dict[str, Any] = {
     "dhu_vh": None,
     "record_qk": False,
     "walk_pair": None,
+    "fused_o": 1,
 }
 
 
@@ -196,8 +202,8 @@ def validate_ring(n_d_max: int) -> None:
 
 
 @dataclasses.dataclass(kw_only=True)
-class OptionsDetKcp:
-    """The keyword-only options of ``chunk_gdn_det_kcp`` / ``chunk_gdn_det_fwd_kcp`` / ``chunk_gdn_det_bwd_kcp`` (module docstring).
+class CakeGDNDetKcpOptions:
+    """The keyword-only options of ``cake_gdn_det_kcp`` / ``cake_gdn_det_train_kcp_forward`` / ``cake_gdn_det_train_kcp_backward`` (module docstring).
 
     :meth:`check` validates the field values and the cross-field rules (ring needs ``save_transfer=False``;
     ``reuse_recompute_tapes`` needs ``graph="off"``; ``use_qk_l2norm_in_kernel`` a bool; a
@@ -234,7 +240,7 @@ class OptionsDetKcp:
                 REUSE_RECOMPUTE_TAPES_DEFAULT if self.graph == GRAPH_DEFAULT else False
             )
 
-    def check(self) -> OptionsDetKcp:
+    def check(self) -> CakeGDNDetKcpOptions:
         if self.exchange not in EXCHANGES:
             raise ValueError(
                 f"exchange must be one of {EXCHANGES}, got {self.exchange!r}"
@@ -373,13 +379,13 @@ class OptionsDetKcp:
         )
 
 
-OPTION_NAMES = tuple(f.name for f in dataclasses.fields(OptionsDetKcp))
+OPTION_NAMES = tuple(f.name for f in dataclasses.fields(CakeGDNDetKcpOptions))
 
 
-def make_options(options: Any = None, /, **kwargs: Any) -> OptionsDetKcp:
-    """A validated :class:`OptionsDetKcp` from an instance, a mapping, or keyword arguments (unknown names are a
+def make_options(options: Any = None, /, **kwargs: Any) -> CakeGDNDetKcpOptions:
+    """A validated :class:`CakeGDNDetKcpOptions` from an instance, a mapping, or keyword arguments (unknown names are a
     ``TypeError``: no option is ever read from anywhere but the call)."""
-    if isinstance(options, OptionsDetKcp):
+    if isinstance(options, CakeGDNDetKcpOptions):
         if kwargs:
             options = dataclasses.replace(options, **kwargs)
         return options.check()
@@ -387,7 +393,7 @@ def make_options(options: Any = None, /, **kwargs: Any) -> OptionsDetKcp:
     if options is not None:
         if not isinstance(options, dict):
             raise TypeError(
-                f"options must be a OptionsDetKcp, a dict or None, got {type(options).__name__}"
+                f"options must be a CakeGDNDetKcpOptions, a dict or None, got {type(options).__name__}"
             )
         merged.update(options)
     merged.update(kwargs)
@@ -396,7 +402,7 @@ def make_options(options: Any = None, /, **kwargs: Any) -> OptionsDetKcp:
         raise TypeError(
             f"unexpected option(s) {unknown}; known options: {list(OPTION_NAMES)}"
         )
-    return OptionsDetKcp(**merged).check()
+    return CakeGDNDetKcpOptions(**merged).check()
 
 
 __all__ = [
@@ -436,11 +442,8 @@ __all__ = [
     "TRANSFER_WALKS_UNBUILT",
     "TRANSFER_WALK_DEFAULT",
     "USE_QK_L2NORM_DEFAULT",
-    "OptionsDetKcp",
+    "CakeGDNDetKcpOptions",
     "make_options",
     "validate_heads",
     "validate_ring",
 ]
-
-# Compatibility aliases: the pre-rename names bound to the same objects (not in ``__all__``).
-KcpOptions = OptionsDetKcp

@@ -13,7 +13,7 @@ source pair serves both architectures (``arches``); a stage exported with a diff
 its pairs under ``per_arch`` (``dqkwg``: eight warps on SM103a). SM107a has no export of its own: it compiles the SM103a
 records (:data:`EXPORT_ARCH`, the package's ``build.json`` does the same), whose device code takes the same non-SM100a
 paths there. Every library is ``<record name>_<arch>`` of the package's ``build.json``, built with nvcc and loaded with
-tvm-ffi by the runtime loader (SM107a needs CUDA 13.4).
+tvm-ffi by the runtime loader (CUDA 13.4 or newer).
 """
 
 from __future__ import annotations

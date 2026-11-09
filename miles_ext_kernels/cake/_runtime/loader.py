@@ -30,10 +30,9 @@ A waiting rank logs every 30 s and fails after 30 minutes. On a filesystem whose
 lock of a holder killed on another node can stay held for minutes after it died.
 
 :data:`ARCH_BY_CAPABILITY` names the architecture of every compute capability the packages serve, and :data:`MIN_CUDA`
-the oldest toolkit whose nvcc compiles it: SM107a needs CUDA 13.4 (nvcc 13.0 to 13.3 reject ``compute_107a``), so a
-CUDA 13.0 toolkit builds the SM100a and SM103a libraries only. Every library build checks it, whatever ``min_cuda``
-its manifest entry records, and raises naming the toolkit the architecture needs; :func:`check_toolkit` runs the same
-check ahead of a build.
+the oldest toolkit that builds it: CUDA 13.4 on every architecture, the Cake standard (nvcc 13.0 to 13.3 also reject
+``compute_107a``). Every library build checks it, whatever lower ``min_cuda`` its manifest entry records, and raises
+naming the toolkit the architecture needs; :func:`check_toolkit` runs the same check ahead of a build.
 
 An op's ``_impl`` package calls :func:`install_op` once at import: it installs the loader on the ``cake_build`` of
 every package the op declares (``OpSpec.packages``). :func:`load_package` does the same for one package and returns it,
@@ -94,8 +93,8 @@ __all__ = [
 
 # The architecture of every compute capability the vendored packages serve.
 ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
-# The oldest CUDA toolkit whose nvcc compiles each architecture.
-MIN_CUDA = {"sm_100a": (12, 8), "sm_103a": (12, 9), "sm_107a": (13, 4)}
+# The oldest CUDA toolkit that builds each architecture: CUDA 13.4 everywhere, the Cake standard.
+MIN_CUDA = {"sm_100a": (13, 4), "sm_103a": (13, 4), "sm_107a": (13, 4)}
 
 _CUDA_CONSTRAINT = re.compile(r"(==|>=)([0-9]+)\.([0-9]+)")
 _NVCC_RELEASE = re.compile(r"release (\d+)\.(\d+)")

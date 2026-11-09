@@ -144,7 +144,7 @@ def test_a_call_runs_the_variant_configured_when_it_is_made(monkeypatch):
 
     cake.prebuild("gdn")
     ran = []
-    for variant, entry in (("det", "chunk_gated_delta_rule_det"), ("fast", "chunk_gated_delta_rule")):
+    for variant, entry in (("det", "cake_gdn_det"), ("fast", "cake_gdn_nondet")):
         package = ops._package(variant)
 
         def counted(*args, _variant=variant, _entry=getattr(package, entry), **kwargs):

@@ -33,7 +33,7 @@ def test_the_op_declares_its_variants_selector_and_packages():
     assert cake.op_spec(OP) is spec and OP in cake.OPS
     assert spec.variants == ("det", "fast") and spec.cli_choices == ("det", "fast")
     assert spec.selected_by == (("moe_grouped_gemm_backend", "cake"),)
-    assert spec.packages == ("cake_moe_grouped_det_gemm", "cake_moe_grouped_gemm")
+    assert spec.packages == ("cake_moe_grouped_gemm_det_train", "cake_moe_grouped_gemm_nondet_train")
     assert moe_grouped_gemm.__all__ == ["OP", "check_grouped_dims", "grouped_mm", "max_grouped_rows"]
     assert spec.flags == () and spec.variant_flag == "--cake-moe-grouped-gemm-variant"
 

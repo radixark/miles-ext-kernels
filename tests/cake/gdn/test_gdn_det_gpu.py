@@ -342,14 +342,14 @@ def _fla_context(seq_lens) -> types.SimpleNamespace:
 
 def test_a_call_without_a_cp_context_reaches_the_package_and_a_cp_context_call_does_not(monkeypatch):
     package = ops._package("det")
-    entry = package.chunk_gated_delta_rule_det
+    entry = package.cake_gdn_det
     calls = []
 
     def counted(*args, **kwargs):
         calls.append(kwargs["save_state"])
         return entry(*args, **kwargs)
 
-    monkeypatch.setattr(package, "chunk_gated_delta_rule_det", counted)
+    monkeypatch.setattr(package, "cake_gdn_det", counted)
     inputs = _inputs(REF_LAYOUT, HEADS["4x12"], seed=6)
 
     for save_state in (True, False):

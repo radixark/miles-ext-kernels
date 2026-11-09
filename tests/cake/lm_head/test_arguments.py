@@ -49,7 +49,7 @@ def test_the_op_declares_both_packages_both_variants_and_one_entry_point():
 
     assert spec is lm_head.OP
     assert spec.variants == ("det", "fast") and spec.cli_choices == ("det", "fast")
-    assert spec.packages == ("cake_lm_head_det_loss", "cake_lm_head_loss")
+    assert spec.packages == ("cake_lm_head_det_train", "cake_lm_head_nondet_train")
     assert spec.exports == ("log_probs",)
     assert spec.selected_by == (("log_probs_backend", "cake"),)
     assert spec.has_variant_flag and spec.shows_variant_flag

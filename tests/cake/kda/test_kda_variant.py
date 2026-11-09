@@ -1,11 +1,12 @@
 """Which vendored package each KDA entry point runs, what the seam hands it, and the op's prebuild and release (CPU:
 torch and tvm-ffi, no GPU).
 
-The packages are replaced by recorders, except in the tests of the ``fast`` package's toolkit hook, of its plans and of
-the imports, which load the vendored packages themselves (host code only, no launch). Skipped without torch (the
-torch-free CPU suite); with torch, a missing tvm-ffi is an error.
+The packages are replaced by recorders, except in the tests of the entry signatures, of the ``fast`` package's toolkit
+hook, of the plans and of the imports, which load the vendored packages themselves (host code only, no launch).
+Skipped without torch (the torch-free CPU suite); with torch, a missing tvm-ffi is an error.
 """
 
+import inspect
 import logging
 import os
 import subprocess
@@ -22,17 +23,19 @@ from miles_ext_kernels.cake._impl.kda import kcp, ops  # noqa: E402
 from miles_ext_kernels.cake._runtime import config, loader  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RUNS_DET = (
-    "miles_ext_kernels.cake.kda: the fast variant does not serve the in-kernel q / k L2 norm "
-    "(use_qk_l2norm_in_kernel=True); running det"
-)
 RAW = {"use_gate_in_kernel": True, "A_log": "A_log", "dt_bias": "dt_bias", "lower_bound": -5.0}
 # every library of the four packages, per architecture (README, Prebuild)
-LIBRARIES = {"sm_100a": 188, "sm_103a": 186, "sm_107a": 189}
+LIBRARIES = {"sm_100a": 216, "sm_103a": 218, "sm_107a": 216}
+# the entry points each variant's call runs: single rank (node, forward, backward), then context-parallel
+DET_ENTRIES = ["cake_kda_det", "cake_kda_det_train_forward", "cake_kda_det_train_backward"]
+DET_KCP_ENTRIES = ["cake_kda_det_kcp", "cake_kda_det_train_kcp_forward", "cake_kda_det_train_kcp_backward"]
+FAST_ENTRIES = ["cake_kda_nondet", "cake_kda_nondet_train_forward", "cake_kda_nondet_train_backward"]
+FAST_KCP_ENTRIES = ["cake_kda_nondet_kcp", "cake_kda_nondet_train_kcp_forward", "cake_kda_nondet_train_kcp_backward"]
 
 
 class _FastSaved:
-    """Stands for the saved set of a ``fast`` forward (``KdaChunkSaved`` / ``SavedKcp`` of the recorders)."""
+    """Stands for the saved set of a ``fast`` forward (``CakeKDANondetChunkSaved`` / ``CakeKDANondetKcpSaved`` of the
+    recorders)."""
 
 
 class _Recorder:
@@ -46,7 +49,7 @@ class _Recorder:
     def __getattr__(self, entry):
         def call(*args, **kwargs):
             self.calls.append((entry, args, kwargs))
-            if "_bwd" in entry:
+            if entry.endswith("_backward"):
                 return tuple(torch.zeros(1, 5, 4, dtype=torch.bfloat16) for _ in range(5))
             return entry
 
@@ -61,7 +64,7 @@ def packages(monkeypatch):
     """Recorders for the four packages and a fresh once-per-process det-run log; the conftest restores the
     configuration after."""
     det, det_kcp, det_plan = _Recorder(), _Recorder(), _Recorder()
-    fast, fast_kcp = _Recorder(KdaChunkSaved=_FastSaved), _Recorder(SavedKcp=_FastSaved)
+    fast, fast_kcp = _Recorder(CakeKDANondetChunkSaved=_FastSaved), _Recorder(CakeKDANondetKcpSaved=_FastSaved)
     monkeypatch.setattr(ops, "det_backend", det)
     monkeypatch.setattr(ops, "fast_backend", fast)
     monkeypatch.setattr(kcp, "_det_kcp", lambda: det_kcp)
@@ -94,8 +97,8 @@ def test_det_runs_every_call_on_the_deterministic_packages(packages, l2n):
     _single_rank_calls(l2n)
     _kcp_calls(l2n)
 
-    assert packages["det"].entries() == ["chunk_kda_det", "chunk_kda_det_fwd", "chunk_kda_det_bwd"]
-    assert packages["det_kcp"].entries() == ["chunk_kda_det_kcp", "chunk_kda_det_fwd_kcp", "chunk_kda_det_bwd_kcp"]
+    assert packages["det"].entries() == DET_ENTRIES
+    assert packages["det_kcp"].entries() == DET_KCP_ENTRIES
     for _, _, kwargs in packages["det"].calls + packages["det_kcp"].calls:
         assert kwargs["use_qk_l2norm_in_kernel"] is l2n and kwargs["lower_bound"] == -5.0
         assert "deterministic" not in kwargs
@@ -104,73 +107,75 @@ def test_det_runs_every_call_on_the_deterministic_packages(packages, l2n):
     assert packages["fast"].calls == packages["fast_kcp"].calls == []
 
 
-def test_fast_runs_the_non_deterministic_packages_without_the_in_kernel_l2_norm(packages, caplog):
+@pytest.mark.parametrize("l2n", [False, True])
+def test_fast_runs_every_call_on_the_non_deterministic_packages(packages, caplog, l2n):
+    """In every gate and L2 norm mode: the in-kernel q / k L2 norm (miles' call) included, a ``fast`` call runs the
+    non-deterministic packages, with no ``det`` run and no log line, however often it is made."""
     cake.configure(cake_kda_variant="fast")
     with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
-        _single_rank_calls(False)
-        _kcp_calls(False)
+        for _ in range(2):
+            _single_rank_calls(l2n)
+            _kcp_calls(l2n)
 
-    assert packages["fast"].entries() == ["chunk_kda", "chunk_kda_fwd", "chunk_kda_bwd"]
-    assert packages["fast_kcp"].entries() == ["chunk_kda_kcp", "chunk_kda_fwd_kcp", "chunk_kda_bwd_kcp"]
+    assert packages["fast"].entries() == FAST_ENTRIES * 2
+    assert packages["fast_kcp"].entries() == FAST_KCP_ENTRIES * 2
     for _, _, kwargs in packages["fast"].calls + packages["fast_kcp"].calls:
-        # the package's mode switch, and the in-kernel L2 norm off (the package refuses any other value)
-        assert kwargs["deterministic"] is False and kwargs["use_qk_l2norm_in_kernel"] is False
+        assert kwargs["use_qk_l2norm_in_kernel"] is l2n and "deterministic" not in kwargs
         assert kwargs["use_gate_in_kernel"] is True and kwargs["A_log"] == "A_log"
     assert packages["fast"].calls[0][2]["scale"] == ops.DEFAULT_SCALE
     assert packages["fast_kcp"].calls[0][2]["save_mode"] == "light"
     assert packages["det"].calls == packages["det_kcp"].calls == []
-    assert caplog.records == []
-
-
-def test_fast_runs_det_for_the_in_kernel_l2_norm_and_says_so_once(packages, caplog):
-    cake.configure(cake_kda_variant="fast")
-    with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
-        for _ in range(2):
-            _single_rank_calls(True)
-            _kcp_calls(True)
-
-    assert len(packages["det"].calls) == len(packages["det_kcp"].calls) == 6
-    for _, _, kwargs in packages["det"].calls + packages["det_kcp"].calls:
-        assert kwargs["use_qk_l2norm_in_kernel"] is True and "deterministic" not in kwargs
-    assert packages["fast"].calls == packages["fast_kcp"].calls == []
-    assert [record.getMessage() for record in caplog.records] == [RUNS_DET]
+    assert caplog.records == [] and config._warned == set()
 
 
 @pytest.mark.parametrize("variant", ["det", "fast"])
 def test_a_backward_runs_the_package_that_wrote_its_saved_set(packages, variant):
-    """A saved set is read by its own package only, so the configured variant does not choose the backward of one."""
+    """A saved set is read by its own package only, so the configured variant does not choose the backward of one,
+    in either L2 norm mode."""
     cake.configure(cake_kda_variant=variant)
-    _single_rank_calls(False, saved=_FastSaved())
-    _kcp_calls(False, saved=_FastSaved())
-    _single_rank_calls(False, saved=object())  # a set of the det package
-    _kcp_calls(False, saved=object())
+    for l2n in (False, True):
+        _single_rank_calls(l2n, saved=_FastSaved())
+        _kcp_calls(l2n, saved=_FastSaved())
+        _single_rank_calls(l2n, saved=object())  # a set of the det package
+        _kcp_calls(l2n, saved=object())
 
     calls = [call for recorder in packages.values() for call in recorder.calls]
-    bwd = [(entry, kwargs["saved"]) for entry, _, kwargs in calls if "_bwd" in entry]
-    assert [(entry, type(saved)) for entry, saved in bwd if entry.startswith("chunk_kda_det")] == [
-        ("chunk_kda_det_bwd", object),
-        ("chunk_kda_det_bwd_kcp", object),
-    ]
-    assert [(entry, type(saved)) for entry, saved in bwd if not entry.startswith("chunk_kda_det")] == [
-        ("chunk_kda_bwd", _FastSaved),
-        ("chunk_kda_bwd_kcp", _FastSaved),
-    ]
+    bwd = [(entry, kwargs["saved"]) for entry, _, kwargs in calls if entry.endswith("_backward")]
+    # per package, one backward per L2 norm mode (the recorders list their own calls in order)
+    det_bwd = [("cake_kda_det_train_backward", object)] * 2 + [("cake_kda_det_train_kcp_backward", object)] * 2
+    fast_bwd = [("cake_kda_nondet_train_backward", _FastSaved)] * 2
+    fast_bwd += [("cake_kda_nondet_train_kcp_backward", _FastSaved)] * 2
+    assert [(entry, type(saved)) for entry, saved in bwd if entry.startswith("cake_kda_det")] == det_bwd
+    assert [(entry, type(saved)) for entry, saved in bwd if not entry.startswith("cake_kda_det")] == fast_bwd
 
 
-@pytest.mark.parametrize("variant", ["det", "fast"])
-def test_a_fast_saved_set_with_the_in_kernel_l2_norm_is_refused(variant):
-    """The backward of a ``fast`` saved set asked for the in-kernel q / k L2 norm, a mode its forward did not run,
-    hands the ``fast`` package that keyword, and the package refuses it: no gradient without the norm. The vendored
-    packages themselves (their checks run before any operand is read)."""
-    cake.configure(cake_kda_variant=variant)
-    q, k, v, g, beta = _operands()
-    cu_seqlens = torch.tensor([0, 5], dtype=torch.int32)
-    saved = object.__new__(ops.fast_backend.KdaChunkSaved)
-    with pytest.raises(ValueError, match="use_qk_l2norm_in_kernel=True"):
-        ops.chunk_kda_bwd(q, k, v, g, beta, cu_seqlens, v, saved=saved, use_qk_l2norm_in_kernel=True, **RAW)
-    saved = object.__new__(kcp._fast_kcp().SavedKcp)
-    with pytest.raises(ValueError, match="use_qk_l2norm_in_kernel=True"):
-        kcp.chunk_kda_bwd_kcp(q, k, v, g, beta, "ctx", v, saved=saved, use_qk_l2norm_in_kernel=True, **RAW)
+# (det entry, fast entry) of the single-rank and the context-parallel packages
+ENTRY_PAIRS = list(zip(DET_ENTRIES, FAST_ENTRIES))
+KCP_ENTRY_PAIRS = list(zip(DET_KCP_ENTRIES, FAST_KCP_ENTRIES))
+
+
+def test_the_fast_entries_take_the_arguments_of_the_det_entries():
+    """What routing every mode by the configured variant rests on, read from the vendored packages: each ``fast`` entry
+    takes the positional parameters of its ``det`` counterpart in the same order and every keyword of it (the in-kernel
+    L2 norm's included) with the same default; a parameter only it takes has a default. The saved-set classes the
+    backwards are routed by exist."""
+    pairs = [(getattr(ops.det_backend, det), getattr(ops.fast_backend, fast)) for det, fast in ENTRY_PAIRS]
+    pairs += [(getattr(kcp._det_kcp(), det), getattr(kcp._fast_kcp(), fast)) for det, fast in KCP_ENTRY_PAIRS]
+    positional = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    for det, fast in pairs:
+        det_parameters = inspect.signature(det).parameters
+        fast_parameters = inspect.signature(fast).parameters
+        assert "use_qk_l2norm_in_kernel" in det_parameters, det.__name__
+        det_positional = [n for n, p in det_parameters.items() if p.kind in positional]
+        assert [n for n, p in fast_parameters.items() if p.kind in positional] == det_positional, fast.__name__
+        for name, parameter in det_parameters.items():
+            assert fast_parameters[name].kind == parameter.kind, (fast.__name__, name)
+            assert fast_parameters[name].default == parameter.default, (fast.__name__, name)
+        for name, parameter in fast_parameters.items():
+            if name not in det_parameters:
+                assert parameter.default is not inspect.Parameter.empty, (fast.__name__, name)
+    assert isinstance(ops.fast_backend.CakeKDANondetChunkSaved, type)
+    assert isinstance(kcp._fast_kcp().CakeKDANondetKcpSaved, type)
 
 
 def test_the_seam_hands_the_packages_bf16_beta_and_a_dense_v(packages):
@@ -209,7 +214,7 @@ def test_the_seam_is_differentiable(packages, monkeypatch):
     def forward(q, k, v, g, beta, cu_seqlens, **kwargs):
         return v.float() * beta.float().unsqueeze(-1)
 
-    monkeypatch.setattr(packages["det"], "chunk_kda_det", forward, raising=False)
+    monkeypatch.setattr(packages["det"], "cake_kda_det", forward, raising=False)
     packed = torch.randn(1, 5, 4, 3 * 128, dtype=torch.bfloat16, requires_grad=True)
     beta = torch.rand(1, 5, 4, dtype=torch.float32, requires_grad=True)
     q, k, v = packed[..., :128], packed[..., 128:256], packed[..., 256:]
@@ -246,10 +251,11 @@ def test_the_partition_context_and_parameter_reduction_are_the_deterministic_pac
         kcp.build_context_kcp("part", "group", 1, "cuda:1", heads=4)
         kcp.reduce_gate_param_grads_kcp("ctx", "dA_log", "ddt_bias")
 
-    assert packages["det_plan"].entries() == ["partition_det_kcp", "build_context_det_kcp"] * 2
+    plan_entries = ["cake_kda_det_train_kcp_partition", "cake_kda_det_train_kcp_build_context"]
+    assert packages["det_plan"].entries() == plan_entries * 2
     assert packages["det_plan"].calls[0][2] == {"cut_points": None}
     assert packages["det_plan"].calls[1][2] == {"sm_count": None, "heads": 4, "stream": None}
-    assert packages["det_kcp"].entries() == ["reduce_gate_param_grads_det_kcp"] * 2
+    assert packages["det_kcp"].entries() == ["cake_kda_det_train_kcp_reduce_gate_param_grads"] * 2
     assert packages["fast_kcp"].calls == []
 
 
@@ -274,30 +280,48 @@ PLAN_SHAPES = [(s, n, h) for s in (1024, 8192, 65536) for n in (1, 4, 64) for h 
 SM_COUNTS = {"sm_100a": 148, "sm_103a": 148, "sm_107a": 216}
 
 
-def _selected(backend, gate: str, arch: str) -> set[str]:
-    """Every record a ``gate``-mode plan of the :data:`PLAN_SHAPES` selects on ``arch``, over every path."""
+def _selected(backend, gate: str, arch: str, l2n: str = "off") -> set[str]:
+    """Every record a plan of the :data:`PLAN_SHAPES` in the gate mode ``gate`` and the L2 norm mode ``l2n`` selects on
+    ``arch``, over every path."""
     selected = set()
     for tokens, docs, heads in PLAN_SHAPES:
-        plan = backend.plan(tokens, docs, heads, SM_COUNTS[arch], arch, gate=gate)
+        plan = backend.plan(tokens, docs, heads, SM_COUNTS[arch], arch, gate=gate, l2n=l2n)
         selected |= {name for records in plan.records.values() for name in records.values() if name is not None}
     return selected
 
 
+def _programs(backend, gate: str, arch: str, l2n: str) -> list[tuple]:
+    """Per plan of the :data:`PLAN_SHAPES`, path and stage: the program (the library name without the package's prefix:
+    the same name in both packages for a copy of one program) and its launch grids."""
+    jit = backend.cake_jit
+    prefix = next(iter(jit.MODULES.values()))["library"].rsplit("_", 1)[0] + "_"
+    programs = []
+    for tokens, docs, heads in PLAN_SHAPES:
+        plan = backend.plan(tokens, docs, heads, SM_COUNTS[arch], arch, gate=gate, l2n=l2n)
+        for path, records in plan.records.items():
+            for stage, record in records.items():
+                if record is not None:
+                    program = jit.library_name(record, arch).removeprefix(prefix)
+                    programs.append((tokens, docs, heads, path, stage, program, plan.grids[record]))
+    return sorted(programs)
+
+
 @pytest.mark.parametrize("arch", sorted(SM_COUNTS))
-def test_fast_plans_other_programs_than_det(arch):
-    """``fast`` is not ``det`` under another name: in the activated-gate mode its backward runs the ``S1`` programs
-    (the ``q * dq`` term of ``dg`` in GLM intra) on some rows of every architecture, in the raw gate mode the ``R1c``
-    pairs (the FP64 parameter-gradient reduce in no fixed order) on SM100a / SM103a; ``det`` ships neither."""
+def test_fast_plans_other_programs_than_det_with_the_activated_gate_alone(arch):
+    """``fast`` is not ``det`` under another name: with the activated gate and without the in-kernel L2 norm its
+    backward runs the ``S1`` programs (the ``q * dq`` term of ``dg`` in GLM intra) on some rows of every architecture,
+    which ``det`` does not ship. With the raw gate, and with the in-kernel L2 norm in either gate mode, every path of
+    every plan launches ``det``'s programs (copies in the ``fast`` package) on ``det``'s grids."""
     fast_jit = ops.fast_backend.cake_jit
     det_jit = ops.det_backend.cake_jit
-    fast_g, fast_raw = _selected(ops.fast_backend, "g", arch), _selected(ops.fast_backend, "raw", arch)
+    fast_g = _selected(ops.fast_backend, "g", arch)
     det_g = _selected(ops.det_backend, "g", arch)
 
     assert fast_g & set(fast_jit.S1_RECORDS)
     assert not det_g & set(fast_jit.S1_RECORDS)
-    r1c = fast_raw & {*fast_jit.R1C_PAIRS, *fast_jit.R1C_PAIRS.values()}
-    assert bool(r1c) == (arch in ("sm_100a", "sm_103a")), sorted(r1c)
-    assert not set(det_jit.MODULES) & {*fast_jit.S1_RECORDS, *fast_jit.R1C_PAIRS, *fast_jit.R1C_PAIRS.values()}
+    assert not set(det_jit.MODULES) & set(fast_jit.S1_RECORDS)
+    for gate, l2n in (("raw", "off"), ("g", "fused"), ("raw", "fused")):
+        assert _programs(ops.fast_backend, gate, arch, l2n) == _programs(ops.det_backend, gate, arch, l2n), (gate, l2n)
 
 
 # --- prebuild and release ---
@@ -357,7 +381,7 @@ def test_prebuild_takes_the_head_count_alone(builds):
 
 def test_release_drops_the_entry_pools_and_the_graphs_of_a_loaded_context_parallel_package(monkeypatch):
     cleared = []
-    for package in ("cake_kda_det_train_kcp", "cake_kda_train_kcp"):
+    for package in ("cake_kda_det_train_kcp", "cake_kda_nondet_train_kcp"):
         stub = type(sys)(f"{ops._VENDOR}.{package}.cake_kcp")
         stub.graph_cache_clear = lambda package=package: cleared.append(package) or 0
         monkeypatch.setitem(sys.modules, stub.__name__, stub)
@@ -367,10 +391,11 @@ def test_release_drops_the_entry_pools_and_the_graphs_of_a_loaded_context_parall
     cake.release("kda")
 
     assert len(ops.det_backend._entry_pool) == len(ops.fast_backend._entry_pool) == 0
-    assert cleared == ["cake_kda_det_train_kcp", "cake_kda_train_kcp"]
+    assert cleared == ["cake_kda_det_train_kcp", "cake_kda_nondet_train_kcp"]
 
 
 _IMPORTS = """
+import importlib
 import sys
 
 sys.modules["flashinfer"] = None  # any import of flashinfer raises ImportError
@@ -378,7 +403,7 @@ sys.modules["flashinfer"] = None  # any import of flashinfer raises ImportError
 from miles_ext_kernels.cake import kda
 
 VENDOR = "miles_ext_kernels.cake._vendor."
-PACKAGES = {"cake_kda_det_train", "cake_kda_det_train_kcp", "cake_kda_train", "cake_kda_train_kcp"}
+PACKAGES = {"cake_kda_det_train", "cake_kda_det_train_kcp", "cake_kda_nondet_train", "cake_kda_nondet_train_kcp"}
 assert not [n for n in sys.modules if n.startswith(VENDOR)]  # the op module loads no package
 assert kda.chunk_kda  # the first entry point loads the implementation, which installs the loader on every package
 loaded = {n[len(VENDOR):].split(".")[0] for n in sys.modules if n.startswith(VENDOR)}
@@ -389,10 +414,16 @@ assert not [n for n in sys.modules if n.startswith(VENDOR) and n.endswith(".cake
 from miles_ext_kernels.cake._impl.kda import kcp
 
 det_kcp, det_plan, fast_kcp = kcp._det_kcp(), kcp._det_plan(), kcp._fast_kcp()
-assert det_kcp.chunk_kda_det_kcp and det_plan.partition_det_kcp and fast_kcp.chunk_kda_kcp
-# the context-parallel fast package imports its single-rank sibling as ..cake.cake_kda_train: the same module
-assert fast_kcp.cake_backend is sys.modules[VENDOR + "cake_kda_train.cake_backend"]
-assert sys.modules[VENDOR + "cake.cake_kda_train"] is sys.modules[VENDOR + "cake_kda_train"]
+assert det_kcp.cake_kda_det_kcp and det_plan.cake_kda_det_train_kcp_partition and fast_kcp.cake_kda_nondet_kcp
+# each context-parallel package imports its single-rank sibling by name from its own parent: the vendored sibling
+for package, sibling in (
+    ("cake_kda_det_train_kcp", "cake_kda_det_train"),
+    ("cake_kda_nondet_train_kcp", "cake_kda_nondet_train"),
+):
+    single_rank = importlib.import_module(VENDOR + package + "._single_rank")
+    assert single_rank.NAME == VENDOR + sibling, single_rank.NAME
+    assert single_rank.module("cake_backend") is sys.modules[VENDOR + sibling + ".cake_backend"]
+assert not [n for n in sys.modules if n.startswith(VENDOR + "cake.")]
 for package in PACKAGES:
     assert VENDOR + package + ".cake_build" in sys.modules, package
 assert "flashinfer" not in [n.split(".")[0] for n, m in sys.modules.items() if m is not None]

@@ -13,7 +13,9 @@ the backward grid, so a smaller value leaves key blocks out of the backward and 
 error (the output is unaffected). ``--cake-gqa-check-seqlens`` checks it, with the segment boundaries, at every call.
 
 One variant, ``fast``: the output, the LSE and dK / dV repeat bit for bit run to run, but dQ is summed with FP32
-atomic adds in a run-dependent order. There is no ``det`` variant, so ``--deterministic-mode`` rejects the op.
+atomic adds in a run-dependent order. There is no ``det`` variant, so ``--deterministic-mode`` rejects the op, and
+while ``torch.use_deterministic_algorithms(True)`` is in effect the backward raises PyTorch's alert (with
+``warn_only=True`` it warns and runs).
 :func:`check_supported` and :func:`is_supported` tell, without torch, whether the kernels run a head layout; miles'
 argument validation applies them to the heads one tensor-parallel rank holds.
 
@@ -84,7 +86,7 @@ OP = OpSpec(
     summary="packed causal GQA attention, head dim 256, forward + backward",
     variants=("fast",),
     selected_by=(("full_attention_backend", "cake"),),
-    packages=("cake_gqa_train",),
+    packages=("cake_gqa_nondet_train",),
     exports=("check_supported", "is_supported", "varlen_gqa_attention"),
     flags=(
         Flag(

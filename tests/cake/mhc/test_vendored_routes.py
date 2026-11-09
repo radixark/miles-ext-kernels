@@ -1,9 +1,9 @@
 """The vendored mHC packages serve what ``miles_ext_kernels.cake.mhc`` relies on (torch-free, no device).
 
 Each package's ``cake_jit.py`` is loaded by file path (its module level imports neither torch nor the package): every
-library a route (or the head) can launch on sm_100a / sm_103a / sm_107a has its ``build.json`` entry, and the shapes,
-constants, architectures and per-architecture hidden sizes (4096 only on sm_107a) of the three packages are the ones
-``miles_ext_kernels.cake.mhc`` validates against.
+library a route (or a head) can launch on sm_100a / sm_103a / sm_107a has its ``build.json`` entry, and the shapes,
+constants, architectures and per-architecture hidden sizes (4096 only on sm_107a) of the four packages are the ones
+``miles_ext_kernels.cake.mhc`` validates against. The nondet head is the det head's kernels under its own names.
 """
 
 import importlib.util
@@ -17,14 +17,16 @@ from miles_ext_kernels.cake import mhc
 from miles_ext_kernels.cake._runtime import loader
 
 VENDOR = Path(cake.__file__).resolve().parent / "_vendor"
-DET, FAST, HEAD = "cake_mhc_det_train_backend", "cake_mhc_train_backend", "cake_mhc_det_train_head_backend"
-FI_COMMIT = "c5db8d3ccd3fa3842812280f7f208718dc0b8610"
+DET, FAST = "cake_mhc_det_train", "cake_mhc_nondet_train"
+DET_HEAD, FAST_HEAD = "cake_mhc_head_det_train", "cake_mhc_head_nondet_train"
+FI_COMMIT = "3bc3b4351f1da01d2613f36d429602da9a6c8c17"
 FI_PATHS = {
-    DET: "flashinfer/cake_mhc_det_train_backend",
-    FAST: "flashinfer/experimental/cake/cake_mhc_train_backend",
-    HEAD: "flashinfer/cake_mhc_det_train_head_backend",
+    DET: "flashinfer/experimental/cake/cake_mhc_det_train",
+    FAST: "flashinfer/experimental/cake/cake_mhc_nondet_train",
+    DET_HEAD: "flashinfer/experimental/cake/cake_mhc_head_det_train",
+    FAST_HEAD: "flashinfer/experimental/cake/cake_mhc_head_nondet_train",
 }
-# the hidden sizes every route (and the head) serves on each architecture
+# the hidden sizes every route (and each head) serves on each architecture
 HIDDEN_BY_ARCH = {"sm_100a": mhc._HIDDEN_SIZES, "sm_103a": mhc._HIDDEN_SIZES, "sm_107a": (4096,)}
 ARCHES = tuple(HIDDEN_BY_ARCH)
 
@@ -43,7 +45,7 @@ def _libraries(package: str) -> set[str]:
     return {entry["name"] for entry in manifest["libraries"]}
 
 
-def test_the_three_packages_are_the_ops_block_of_the_manifest_at_one_flashinfer_commit():
+def test_the_packages_are_the_ops_block_of_the_manifest_at_one_flashinfer_commit():
     block = json.loads((VENDOR / "VENDORED.json").read_text())["ops"]["mhc"]
 
     assert set(block) == set(mhc.OP.packages) == set(FI_PATHS)
@@ -83,9 +85,10 @@ def test_the_connection_constants_are_the_ones_the_op_validates(package):
 
 
 @pytest.mark.parametrize("arch", ARCHES)
-def test_the_head_libraries_are_in_the_manifest(arch):
-    jit = _cake_jit(HEAD)
-    libraries = _libraries(HEAD)
+@pytest.mark.parametrize("package", [DET_HEAD, FAST_HEAD])
+def test_the_head_libraries_are_in_the_manifest(package, arch):
+    jit = _cake_jit(package)
+    libraries = _libraries(package)
 
     assert jit.supported_hidden_sizes(arch) == HIDDEN_BY_ARCH[arch]
     assert jit.STREAMS == mhc._STREAMS
@@ -108,3 +111,35 @@ def test_another_sinkhorn_count_runs_run_time_count_programs(package, arch):
             if (jit.MODULES[record]["select_rule"] or {}).get("kind") == "run_time_iters"
         }
         assert run_time == set(jit.RUN_TIME_ITERS_ROLES) == {"fwd_coef", "bwd_token"}, (hidden, run_time)
+
+
+def _stem(text: str) -> str:
+    """The det head's library stem renamed to the nondet head's."""
+    return text.replace("cake_mhc_det_train_head", "cake_mhc_train_head")
+
+
+def test_the_nondet_head_is_the_det_heads_kernels_under_its_own_names():
+    """FlashInfer exports the nondet head from the det head's kernel sources under the library stem
+    ``cake_mhc_train_head``: every CUDA source, launch record and build flag is the det head's after that rename, so
+    both variants of ``mhc_head`` compute the same bits."""
+    det_csrc, fast_csrc = VENDOR / DET_HEAD / "csrc", VENDOR / FAST_HEAD / "csrc"
+    det_sources = {_stem(path.name): path for path in det_csrc.glob("*.cu")}
+    fast_sources = {path.name: path for path in fast_csrc.glob("*.cu")}
+    assert set(fast_sources) == set(det_sources) and len(fast_sources) == 6
+    for name, path in fast_sources.items():
+        assert path.read_text() == _stem(det_sources[name].read_text()), name
+    assert (fast_csrc / "cake_ffi_checks.h").read_bytes() == (det_csrc / "cake_ffi_checks.h").read_bytes()
+
+    det_jit, fast_jit = _cake_jit(DET_HEAD), _cake_jit(FAST_HEAD)
+    assert json.loads(_stem(json.dumps(det_jit.MODULES))) == json.loads(json.dumps(fast_jit.MODULES))
+    assert {role: _stem(name) for role, name in det_jit.ROLES.items()} == fast_jit.ROLES
+
+    det_build = json.loads((VENDOR / DET_HEAD / "build.json").read_text())
+    fast_build = json.loads((VENDOR / FAST_HEAD / "build.json").read_text())
+    assert det_build["common"] == fast_build["common"] and det_build["arch_flags"] == fast_build["arch_flags"]
+    flags = ("arch", "entry", "gencode", "min_cuda", "nvcc_flags", "nvcc_flags_if")
+
+    def build_flags(build: dict) -> dict:
+        return {_stem(library["name"]): [library[key] for key in flags] for library in build["libraries"]}
+
+    assert build_flags(det_build) == build_flags(fast_build) and len(build_flags(fast_build)) == 9

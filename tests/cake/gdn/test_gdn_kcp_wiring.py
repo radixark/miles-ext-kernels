@@ -10,9 +10,10 @@ context's FLA context, logged once per reason; a call no kernel set serves raise
 (``backend="fake"``, which runs on the CPU) the call gives the bits of the package's own entry point and its gradients
 reach every input.
 
-The non-deterministic package recognises the deterministic package's packed q / k / v split by its FlashInfer module
-name, which differs under ``_vendor/``; that only decides whether the backward writes one packed row, never a value
-(``test_a_det_split_feeding_fast_changes_no_gradient``), and no entry point of this repository makes such views.
+The non-deterministic package recognises the deterministic package's packed q / k / v split by its class name and
+the last two parts of its module (``cake_gdn_det_train_kcp.cake_kcp``), so under ``_vendor/`` too; that only decides
+whether the backward writes one packed row, never a value (``test_a_det_split_feeding_fast_changes_no_gradient``), and
+no entry point of this repository makes such views.
 """
 
 import itertools
@@ -36,7 +37,7 @@ HEAD_DIM = 128
 # four documents, 512 tokens: every split into 2 or 4 contiguous ranks cuts a document
 LAYOUT = (130, 190, 140, 52)
 HEADS = (2, 4)  # key heads, value heads
-ENTRIES = {"det": "chunk_gdn_det_kcp", "fast": "chunk_gdn_kcp"}
+ENTRIES = {"det": "cake_gdn_det_kcp", "fast": "cake_gdn_nondet_kcp"}
 
 
 def _cu(seq_lens) -> tuple[int, ...]:
@@ -168,10 +169,11 @@ def test_a_kcp_context_call_reaches_the_kcp_package_of_the_variant(monkeypatch, 
     # the default scale of every kernel set, 1 / sqrt(K): the package's own default in FP32
     assert call["scale"] == 1.0 / math.sqrt(HEAD_DIM)
     package = ops._package(f"{variant}_kcp")
-    assert torch.tensor(call["scale"], dtype=torch.float32) == torch.tensor(package.SCALE, dtype=torch.float32)
+    package_scale = torch.tensor(package.cake_kcp.SCALE, dtype=torch.float32)
+    assert torch.tensor(call["scale"], dtype=torch.float32) == package_scale
     assert call["use_qk_l2norm_in_kernel"] is True
     assert call["options"] is None
-    assert call.get("deterministic", True) is (variant == "det")
+    assert "deterministic" not in call
     # g and beta in FP32, contiguous; BF16 beta cast exactly
     assert call["g"].dtype == call["beta"].dtype == torch.float32
     assert call["g"].is_contiguous() and call["beta"].is_contiguous()
@@ -422,7 +424,6 @@ def test_on_the_emulation_a_call_gives_the_bits_of_the_package_entry_point(monke
 
     direct = _leaves(inputs)
     entry = getattr(ops._package(f"{variant}_kcp"), ENTRIES[variant])
-    extra = {} if variant == "det" else {"deterministic": False}
     beta32 = direct["beta"].float()
     ref_out = entry(
         *(direct[n] for n in ("q", "k", "v", "g")),
@@ -432,7 +433,6 @@ def test_on_the_emulation_a_call_gives_the_bits_of_the_package_entry_point(monke
         save_mode="full" if save_state else "light",
         use_qk_l2norm_in_kernel=True,
         options={"backend": "fake"},
-        **extra,
     )
     ref_out.backward(inputs["do"])
     want = _grads(direct, ref_out)
@@ -445,12 +445,13 @@ def test_on_the_emulation_a_call_gives_the_bits_of_the_package_entry_point(monke
 
 
 def test_a_det_split_feeding_fast_changes_no_gradient(monkeypatch):
-    """Risk of the name check: the fast package does not recognise the det package's split under ``_vendor/``, so the
-    split concatenates instead of aliasing; the gradient of the packed row is the same either way."""
+    """The fast package recognises the det package's split under ``_vendor/`` by the last two parts of its module, so
+    both splits hand the packed gradient row on without a copy, and the gradient of the packed row is the same."""
     nd = ops._package("fast_kcp").cake_kcp
     det = ops._package("det_kcp").cake_kcp
-    assert nd._DET_PACKED_SPLIT[0] == "flashinfer.experimental.cake_gdn_det_train_kcp.cake_kcp"
-    assert det.PackedQKVSplitDetKcp.__module__ != nd._DET_PACKED_SPLIT[0]
+    det_split = det.CakeGDNDetKcpPackedQKVSplitFunction
+    assert det_split.__module__ == "miles_ext_kernels.cake._vendor.cake_gdn_det_train_kcp.cake_kcp"
+    assert det_split.__module__ != nd._DET_PACKED_SPLIT[0] and nd._is_det_packed_split(det_split)
     cake.configure(cake_gdn_variant="fast")
     monkeypatch.setattr(ops, "KCP_OPTIONS", {"backend": "fake"})
     ctx = _context()
@@ -459,7 +460,11 @@ def test_a_det_split_feeding_fast_changes_no_gradient(monkeypatch):
     row = torch.cat([inputs[n].flatten(-2) for n in ("q", "k", "v")], dim=-1)
 
     grads = {}
-    for split, views in (("fast", nd.packed_qkv_views_kcp), ("det", det.packed_qkv_views_det_kcp)):
+    views_of = {
+        "fast": nd.cake_gdn_nondet_train_kcp_packed_qkv_views,
+        "det": det.cake_gdn_det_train_kcp_packed_qkv_views,
+    }
+    for split, views in views_of.items():
         stats = (nd if split == "fast" else det).PACKED_SPLIT_STATS
         before = dict(stats)
         qkv = row.detach().clone().requires_grad_(True)
@@ -470,6 +475,6 @@ def test_a_det_split_feeding_fast_changes_no_gradient(monkeypatch):
         out.backward(inputs["do"])
         grads[split] = qkv.grad
         moved = {key: stats[key] - before[key] for key in stats}
-        assert moved == ({"aliased": 1, "concatenated": 0} if split == "fast" else {"aliased": 0, "concatenated": 1})
+        assert moved == {"aliased": 1, "concatenated": 0}, split
 
     assert torch.equal(grads["det"], grads["fast"])

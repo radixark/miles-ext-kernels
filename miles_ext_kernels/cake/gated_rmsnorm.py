@@ -19,7 +19,7 @@ OP = OpSpec(
     summary="SiLU-gated RMSNorm, forward + backward, rows of 128, BF16",
     variants=("det", "fast"),
     selected_by=(("linear_attention_output_norm_backend", "cake"),),
-    packages=("cake_rmsnorm_silu_gate_det_train_backend", "cake_rmsnorm_silu_gate_train_backend"),
+    packages=("cake_rmsnorm_silu_gate_det_train", "cake_rmsnorm_silu_gate_nondet_train"),
     exports=("check_supported", "rmsnorm_silu_gate"),
 )
 

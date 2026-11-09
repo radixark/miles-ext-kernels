@@ -4,8 +4,8 @@ miles' GDN input layernorm: ``[T, 1, H]`` BF16 hidden states at H = 2048 / 4096 
 kernels serve) and small, irregular and 16k-32k token counts, ``weight`` the w of ``(1 + w)`` in BF16 or FP32. ``y``
 and ``dx`` at FlashInfer's tolerance; the FP32 weight gradient within its budget (rel-L2 <= 1e-4, elementwise
 atol = rtol = 1e-4), a BF16 one widened by its rounding; ``det`` bitwise run to run, twice within a process and once
-in a fresh one, also at both sides of the upper edge of its smallest backward window (on SM100a / SM103a the kernel
-that sums each ``dw`` column in a fixed row order), and on a side stream; ``fast`` with ``y`` bitwise ``det``'s,
+in a fresh one, also at both sides of the upper edge of its smallest backward window (where it is the kernel that
+sums each ``dw`` column in a fixed row order), and on a side stream; ``fast`` with ``y`` bitwise ``det``'s,
 ``dx`` reproducible and within one BF16 ulp of ``det``'s; ``fast`` runs ``det`` under torch's deterministic
 algorithms; a backward runs its forward's variant. A width whose oversized shared-memory programs this process cannot
 launch (SM107a at 4096 without a CUDA 13.4 runtime) is refused before any launch: its tests assert that refusal, and
@@ -142,9 +142,9 @@ def test_det_and_fast_match_fp64(H, T, params_dtype):
 
 
 def smallest_token_counts(H):
-    """1, 2 and both sides of the upper edge of the first window of ``det``'s FP32-weight backward of ``H`` here: on
-    SM100a / SM103a the window whose kernel sums each ``dw`` column in a fixed row order."""
-    det = loader.load_package("cake_rmsnorm_det_train_backend")
+    """1, 2 and both sides of the upper edge of the first window of ``det``'s FP32-weight backward of ``H`` here: where
+    the architecture ships one, the window whose kernel sums each ``dw`` column in a fixed row order."""
+    det = loader.load_package("cake_rmsnorm_det_train")
     _, edge, _ = det.cake_jit.program_windows(cake.device_arch(), H, "bwd", False, "f32")[0]
     return sorted({1, 2} | ({edge, edge + 1} if edge is not None else set()))
 
@@ -311,15 +311,20 @@ def test_fast_runs_det_under_torch_deterministic_algorithms(monkeypatch, caplog)
 
 @pytest.mark.parametrize("forward, backward", [("fast", "det"), ("det", "fast")])
 def test_a_backward_runs_the_variant_of_its_forward(monkeypatch, forward, backward):
-    fast = loader.load_package("cake_rmsnorm_train_backend")
-    original = fast.cake_rmsnorm_train_backward
-    flags = []
+    det = loader.load_package("cake_rmsnorm_det_train")
+    fast = loader.load_package("cake_rmsnorm_nondet_train")
+    ran = []
 
-    def record(*args, **kwargs):
-        flags.append(kwargs["deterministic"])
-        return original(*args, **kwargs)
+    def recorder(variant, original):
+        def record(*args, **kwargs):
+            ran.append(variant)
+            return original(*args, **kwargs)
 
-    monkeypatch.setattr(fast, "cake_rmsnorm_train_backward", record)
+        return record
+
+    # the backward each package's autograd function calls
+    monkeypatch.setattr(det, "cake_rmsnorm_det_train_backward", recorder("det", det.cake_rmsnorm_det_train_backward))
+    monkeypatch.setattr(fast, "_backward", recorder("fast", fast._backward))
     x, w, dy = make(1000, 2048)
     cake.configure(cake_rmsnorm_variant=forward)
     norm = rmsnorm.ZeroCenteredRMSNorm(2048, EPS)
@@ -327,7 +332,7 @@ def test_a_backward_runs_the_variant_of_its_forward(monkeypatch, forward, backwa
     y = norm(xi)
     cake.configure(cake_rmsnorm_variant=backward)
     y.backward(dy)
-    assert flags == [forward == "det"]
+    assert ran == [forward]
 
 
 _UNCHECKED_LAUNCH = """

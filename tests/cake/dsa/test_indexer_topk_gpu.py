@@ -1,4 +1,4 @@
-"""The deterministic indexer top-k (FlashInfer's Cake ``cake_dsa_indexer_det``) on SM100a / SM103a / SM107a.
+"""The deterministic indexer top-k (FlashInfer's Cake ``cake_dsa_indexer_det_train``) on SM100a / SM103a / SM107a.
 
 * accuracy -- packed segments at the recorded training token counts (16231 and 16172 queries in 8 segments, top-k 2048
   and 4096), keys longer than the queries, compressed keys (ratio 4), explicit and negative causal offsets, empty
@@ -236,12 +236,17 @@ def test_scale_one_matches_the_det_indexer_logits_and_feeds_the_det_backward():
 
 
 def test_prebuild_builds_every_library_of_the_device_architecture():
+    """The programs the dispatch can pick on the device (``cake_jit.PROGRAM_KEYS``) are the libraries the package's
+    ``build.json`` lists for the architecture, and ``prebuild_libraries`` builds every one of them."""
     arch = loader.device_arch()
     paths = indexer_topk.prebuild_libraries(arch)
     cake_build, _ = indexer_topk._package()
+    names = indexer_topk.library_names(arch)
+    manifest = sorted(entry["name"] for entry in cake_build.manifest()["libraries"] if entry["arch"] == arch)
 
     with loader.no_build():
-        built = [cake_build.jit_spec(name).build() for name in indexer_topk.library_names(arch)]
+        built = [cake_build.jit_spec(name).build() for name in names]
 
-    assert len(built) == (53 if arch == "sm_107a" else 52) and all(Path(path).is_file() for path in built)
+    assert names and names == manifest
+    assert all(Path(path).is_file() for path in built)
     assert [Path(path) for path in paths] == [Path(path) for path in built]

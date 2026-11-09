@@ -122,7 +122,10 @@ def test_prebuild_returns_every_log_prob_stage_with_and_without_a_temperature_an
 
 
 # the entry of each variant's package that log_probs calls
-ENTRIES = {"det": "chunked_lm_head_det_logprob_temperature", "fast": "chunked_lm_head_logprob_temperature"}
+ENTRIES = {
+    "det": "cake_lm_head_det_train_logprob_temperature",
+    "fast": "cake_lm_head_nondet_train_logprob_temperature",
+}
 
 
 def _spy(calls: list, variant: str, original):

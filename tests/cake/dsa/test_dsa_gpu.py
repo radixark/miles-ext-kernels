@@ -8,7 +8,7 @@
   keys outside their window get no gradient.
 * fast sparse attention -- the 64-head RoPE and NoPE geometries against the same reference and against det: ``out``
   and ``dq`` bit-identical across passes, ``dkv`` within the spread of its FP32 atomic accumulation, and independent of
-  the segment count; the calls fast does not serve run det.
+  the segment count; the calls fast does not serve, and every call under torch's deterministic algorithms, run det.
 * the reviewed limits -- batch-local indices outside their batch element, packed indices past the keys, the det
   backward's memory budget, calls without query rows.
 
@@ -21,6 +21,7 @@ import math
 import os
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -533,6 +534,32 @@ def test_calls_fast_does_not_serve_run_det_bit_identically_and_warn_once(caplog)
     assert [record.getMessage() for record in caplog.records] == [
         "miles_ext_kernels.cake.dsa: the fast variant does not serve calls with an attention sink; running det",
         "miles_ext_kernels.cake.dsa: the fast variant does not serve 24 local query heads (only 64); running det",
+    ]
+
+
+def test_fast_runs_det_bit_identically_under_torch_deterministic_algorithms(caplog):
+    """The fast backward raises PyTorch's alert while torch's deterministic algorithms are enabled, so a fast call runs
+    det then: det's bits, one log line, no alert."""
+    args = _thd_inputs(512, 64, 200, seed=17)
+    det = _run(*args, sm_scale=MLA_SCALE, layout="thd", variant="det")
+    previous = torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    try:
+        with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
+            with warnings.catch_warnings(record=True) as seen:
+                warnings.simplefilter("always")
+                fast = [_run(*args, sm_scale=MLA_SCALE, layout="thd", variant="fast") for _ in range(2)]
+    finally:
+        torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
+
+    for result in fast:
+        assert_bitwise(_named(result), _named(det))
+    # the fast backward's alert names its entry (the autograd backward or a prepared runner's)
+    alerts = [str(w.message) for w in seen if "deterministic implementation" in str(w.message)]
+    assert not [message for message in alerts if "cake_dsa_sparse_attention_nondet" in message or "Runner" in message]
+    assert [record.getMessage() for record in caplog.records] == [
+        "miles_ext_kernels.cake.dsa: the fast variant does not serve calls under "
+        "torch.use_deterministic_algorithms(True); running det"
     ]
 
 

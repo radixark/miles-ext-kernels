@@ -1,5 +1,6 @@
-"""The lm_head implementation without a GPU (CPU torch): what ``prebuild`` builds, the host-count rule and its log,
-``release`` and the errors raised before any device work."""
+"""The lm_head implementation without a GPU (CPU torch): what ``prebuild`` builds, the host-count rule and its log
+(which the runtime's CUDA 13.4 floor leaves unreached), the package entry each variant calls, ``release`` and the
+errors raised before any device work."""
 
 import json
 import logging
@@ -13,7 +14,7 @@ torch = pytest.importorskip("torch")
 
 from miles_ext_kernels import cake  # noqa: E402
 from miles_ext_kernels.cake._impl.lm_head import ops  # noqa: E402
-from miles_ext_kernels.cake._runtime import loader  # noqa: E402
+from miles_ext_kernels.cake._runtime import config, loader  # noqa: E402
 
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 
@@ -105,6 +106,20 @@ def test_the_host_count_path_is_logged_once_per_architecture(toolkit, caplog, ve
         assert "sm_103a programs built by CUDA 13.0" in messages[0] and "also with num_valid_rows" in messages[0]
 
 
+@pytest.mark.parametrize("arch", ARCHES)
+def test_the_runtime_refuses_a_cuda_13_0_toolkit_before_the_host_count_path(monkeypatch, caplog, arch):
+    """CUDA 13.4 is the runtime's floor on every architecture, so no call reaches the packages' CUDA 13.0 path."""
+    cuda_13_0 = loader.CudaVersion(13, 0, "13.0.88")
+    monkeypatch.setattr(loader, "_toolkit", lambda nvcc=None: ("/usr/local/cuda/bin/nvcc", cuda_13_0))
+    _clear_toolkit_caches()
+
+    with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
+        with pytest.raises(RuntimeError, match=rf"for {arch} needs CUDA 13\.4 or newer"):
+            ops._check_toolkit(arch)
+    assert not [record for record in caplog.records if record.name.startswith("miles_ext_kernels")]
+    _clear_toolkit_caches()
+
+
 def test_the_package_modules_take_the_toolkit_from_the_loader():
     """The program registries read the toolkit through this loader (``ops`` imports them with it installed)."""
     for variant, package in ops.PACKAGES.items():
@@ -112,6 +127,36 @@ def test_the_package_modules_take_the_toolkit_from_the_loader():
 
         assert jit.__name__ == f"{ops._VENDOR}.{package}.cake_jit"
         assert jit.cake_build._jit_toolchain.__module__ == loader.__name__
+
+
+@pytest.mark.parametrize("variant", ["det", "fast"])
+def test_log_probs_calls_the_mode_word_entry_of_its_variants_package(monkeypatch, variant):
+    """Without a device: ``log_probs`` calls the log-probability entry of its variant's package by its mode-word name,
+    without a ``deterministic`` keyword. The stand-ins are the package's own public functions (``cake_backend_opt_in``)
+    replaced by recorders, so a name the package does not define, or a keyword its entries do not take, fails."""
+    module = ops._entry(variant)
+    expected = f"cake_lm_head_{'det' if variant == 'det' else 'nondet'}_train_logprob_temperature"
+    assert callable(getattr(module, expected, None)), expected
+    calls = []
+
+    def stand_in(name):
+        def entry(X, W, labels, *, chunk_size, num_valid_rows, temperature):
+            calls.append((name, chunk_size, num_valid_rows, temperature))
+            return torch.zeros(labels.shape, dtype=torch.float32)
+
+        return entry
+
+    public = [name for name in dir(module) if not name.startswith("_") and callable(getattr(module, name))]
+    monkeypatch.setattr(ops, "_entry", lambda v: types.SimpleNamespace(**{name: stand_in(name) for name in public}))
+    monkeypatch.setattr(ops, "_arch", lambda device: "sm_100a")
+    cake.configure(cake_lm_head_variant=variant)
+    X = types.SimpleNamespace(device=types.SimpleNamespace(type="cuda"))
+    W = torch.zeros((256, 512), dtype=torch.bfloat16)
+    labels = torch.zeros((3,), dtype=torch.int64)
+
+    logp = ops.log_probs(X, W, labels, temperature=0.5, num_valid_rows=3)
+    assert calls == [(expected, config.option("lm_head", "cake_lm_head_chunk_size"), 3, 0.5)]
+    assert logp.shape == (3,)
 
 
 def test_a_call_off_cuda_is_rejected_before_any_device_work():

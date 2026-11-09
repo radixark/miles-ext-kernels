@@ -14,7 +14,7 @@ from miles_ext_kernels import cake  # noqa: E402
 from miles_ext_kernels.cake import gqa  # noqa: E402
 from miles_ext_kernels.cake._impl.gqa import ops  # noqa: E402
 from miles_ext_kernels.cake._runtime import config, loader, workspace  # noqa: E402
-from miles_ext_kernels.cake._vendor.cake_gqa_train import cake_jit  # noqa: E402
+from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_jit  # noqa: E402
 
 NO_DET = "the cake gqa kernels have no det variant"
 REACHED_THE_KERNELS = "must be on q's CUDA device"

@@ -1,6 +1,6 @@
 """The Cake mHC kernels (``miles_ext_kernels.cake.mhc``) on SM100a / SM103a / SM107a.
 
-Ported from FlashInfer's backend suites of the three vendored packages at every hidden size the device serves (4096,
+Ported from FlashInfer's backend suites of the vendored packages at every hidden size the device serves (4096,
 5120, 7168; 4096 only on SM107a, where the others are refused) and token counts 1, 257, 2049 and 16263, through the
 autograd entry points miles calls:
 
@@ -20,7 +20,8 @@ autograd entry points miles calls:
   runtime's pool, one buffer per role and stream: the bits of a pooled call repeat with the pool off (bound 0) or so
   small that the forward and backward evict each other's buffer, when a buffer sized for a larger call serves a
   smaller one, and after ``release`` frees the pool;
-* the head: bit for bit torch's BF16 ``X.mean(dim=1)`` and its gradient.
+* the head of each variant (its own package): bit for bit torch's BF16 ``X.mean(dim=1)`` and its gradient, without
+  torch's non-determinism alert under its deterministic algorithms.
 """
 
 import argparse
@@ -64,7 +65,7 @@ CASES = [(hidden, T) for hidden in SERVED for T in (1, 257, 2049, 16263)]
 
 @pytest.fixture(autouse=True, scope="module")
 def prebuilt():
-    """Build the libraries of both variants and the head first: no test pays for a build mid-call."""
+    """Build the libraries of both variants and their heads first: no test pays for a build mid-call."""
     for hidden in SERVED:
         cake.prebuild("mhc", device=DEVICE, hidden=hidden, sinkhorn_iters=ops.SINKHORN_ITERS)
     cake.prebuild("mhc", device=DEVICE, hidden=4096, sinkhorn_iters=7)
@@ -428,18 +429,49 @@ def test_finish_refuses_a_foreign_handle() -> None:
         ops.mhc_finish(i["X"], i["B"], object())
 
 
+HEAD_FUNCTIONS = {"det": "CakeMHCHeadDetFunction", "fast": "CakeMHCHeadNondetFunction"}
+
+
+@pytest.mark.parametrize("variant", ["det", "fast"])
 @pytest.mark.parametrize("hidden", SERVED)
 @pytest.mark.parametrize("T", [0, 1, 257, 16263])
-def test_the_head_is_torch_mean_bit_for_bit(hidden: int, T: int) -> None:
+def test_the_head_is_torch_mean_bit_for_bit(variant: str, hidden: int, T: int) -> None:
     g = torch.Generator(device=DEVICE).manual_seed(connection.SEED)
     X = torch.randn(T, STREAMS, hidden, generator=g, device=DEVICE).to(BF16)
     dY = torch.randn(T, hidden, generator=g, device=DEVICE).to(BF16)
     Xk, Xr = X.clone().requires_grad_(True), X.clone().requires_grad_(True)
 
+    cake.configure(cake_mhc_variant=variant)
     Y, Yr = ops.mhc_head(Xk), Xr.mean(dim=1)
+    package = ops._fast_head if variant == "fast" else ops._det_head
+    assert Y.grad_fn._forward_cls is getattr(package, HEAD_FUNCTIONS[variant])
     assert_bitwise(Y, Yr)
     Y.backward(dY)
     Yr.backward(dY)
+    assert_bitwise(Xk.grad, Xr.grad)
+
+
+@pytest.mark.parametrize("variant", ["det", "fast"])
+def test_the_head_raises_no_alert_under_torchs_deterministic_algorithms(variant: str) -> None:
+    """Neither head has an order-varying step: under ``torch.use_deterministic_algorithms(True)`` (strict) the head of
+    either variant runs its forward and backward without torch's alert, and gives the same bits."""
+    g = torch.Generator(device=DEVICE).manual_seed(connection.SEED)
+    X = torch.randn(2049, STREAMS, 4096, generator=g, device=DEVICE).to(BF16)
+    dY = torch.randn(2049, 4096, generator=g, device=DEVICE).to(BF16)
+    Xr = X.clone().requires_grad_(True)
+    Yr = Xr.mean(dim=1)
+    Yr.backward(dY)
+
+    cake.configure(cake_mhc_variant=variant)
+    Xk = X.clone().requires_grad_(True)
+    torch.use_deterministic_algorithms(True)
+    try:
+        Y = ops.mhc_head(Xk)
+        Y.backward(dY)
+        torch.cuda.synchronize()
+    finally:
+        torch.use_deterministic_algorithms(False)
+    assert_bitwise(Y, Yr.detach())
     assert_bitwise(Xk.grad, Xr.grad)
 
 

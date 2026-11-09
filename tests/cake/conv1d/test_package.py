@@ -14,10 +14,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VENDORED = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "VENDORED.json"
-FI_COMMIT = "c5db8d3ccd3fa3842812280f7f208718dc0b8610"
+FI_COMMIT = "9e1857b0879495b31eaee48c8c9b82807e08051b"
 FI_PATHS = {
-    "cake_causal_conv1d_det_train_backend": "flashinfer/cake_causal_conv1d_det_train_backend",
-    "cake_causal_conv1d_train_backend": "flashinfer/experimental/cake/cake_causal_conv1d_train_backend",
+    "cake_causal_conv1d_det_train": "flashinfer/experimental/cake/cake_causal_conv1d_det_train",
+    "cake_causal_conv1d_nondet_train": "flashinfer/experimental/cake/cake_causal_conv1d_nondet_train",
 }
 CAKE_BUILD_BLOB = "00756137eb159e30a77907eda84fd245123d87ea"
 
@@ -52,8 +52,8 @@ def test_the_implementation_installs_the_loader_on_both_packages():
         # the context-parallel module builds through the loader too
         assert ops._kcp_module(variant).__name__ == f"{vendor}.{name}.kcp"
         assert sys.modules[f"{vendor}.{name}.cake_build"]._jit_toolchain.__module__ == loader.__name__
-    alias = importlib.import_module(f"{vendor}.cake.cake_causal_conv1d_train_backend")
-    assert alias is importlib.import_module(f"{vendor}.cake_causal_conv1d_train_backend")
+        # FlashInfer keeps both packages in flashinfer/experimental/cake/: its ``..cake.<name>`` path is the package
+        assert importlib.import_module(f"{vendor}.cake.{name}") is package
 
 
 _NO_FLASHINFER = """

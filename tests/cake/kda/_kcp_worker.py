@@ -2,7 +2,7 @@
 
 Every rank draws the whole packed batch from the same seeded generator, takes its shard (the tokens of its fragments in
 the partition's order), runs each case's autograd step through ``miles_ext_kernels.cake.kda`` (twice for a case that
-runs ``det``) and saves its outputs and gradients with their global token indices; the test process checks them
+gives ``det``'s bits) and saves its outputs and gradients with their global token indices; the test process checks them
 against the exact FP64 recurrence of the whole batch.
 """
 
@@ -22,7 +22,8 @@ from ._reference_l2n import raw_qk
 
 LENGTHS = (1000, 37, 300, 63, 700)
 HEADS = 12
-# name -> (variant, gate mode, in-kernel q / k L2 norm); "fast-l2n" is miles' call under fast, which runs det
+# name -> (variant, gate mode, in-kernel q / k L2 norm); "fast-l2n" is miles' call under fast: the non-deterministic
+# package, with det's bits
 CASES = {
     "det-miles": ("det", "raw", True),
     "det-g": ("det", "g", False),
@@ -33,8 +34,9 @@ CASES = {
 NAMES = ("q", "k", "v", "g", "beta")
 
 
-def runs_det(case: str) -> bool:
-    """Does ``case`` run the ``det`` package (so its results repeat bit for bit)?"""
+def det_bits(case: str) -> bool:
+    """Does ``case`` give ``det``'s bits (so its results repeat bit for bit)? ``det``, and ``fast`` with the in-kernel
+    L2 norm."""
     variant, _, l2n = CASES[case]
     return variant == "det" or l2n
 
@@ -75,6 +77,18 @@ def _step(tensors: dict, idx: torch.Tensor, ctx, mode: str, l2n: bool, device) -
     return {name: t.detach().cpu() for name, t in result.items()}
 
 
+def _saved_type(tensors: dict, idx: torch.Tensor, ctx, mode: str, device) -> str:
+    """The class name of the saved set the explicit forward of this rank's shard writes with the in-kernel L2 norm:
+    the package the configured variant runs."""
+    modes = {"use_gate_in_kernel": True, "lower_bound": LOWER_BOUND} if mode == "raw" else {}
+    if mode == "raw":
+        modes.update(A_log=tensors["A_log"].to(device), dt_bias=tensors["dt_bias"].to(device))
+    operands = [tensors[n][idx].to(device).unsqueeze(0) for n in NAMES]
+    _, saved = kda.chunk_kda_fwd_kcp(*operands, ctx, use_qk_l2norm_in_kernel=True, **modes)
+    torch.cuda.synchronize(device)
+    return type(saved).__name__
+
+
 def differing(a: dict, b: dict) -> list[str]:
     """The names whose tensors differ in shape, dtype or any bit."""
     differ = []
@@ -104,9 +118,10 @@ def run(rank: int, world: int, port: int, layout: str, outdir: str) -> None:
             cake.configure(cake_kda_variant=variant)
             first = _step(tensors, idx, ctx, mode, l2n, device)
             record = {"result": first}
-            if runs_det(case):
+            if det_bits(case):
                 record["repeat_differs"] = differing(first, _step(tensors, idx, ctx, mode, l2n, device))
             if case == "fast-l2n":
+                record["saved_type"] = _saved_type(tensors, idx, ctx, mode, device)
                 cake.configure(cake_kda_variant="det")
                 record["det_differs"] = differing(first, _step(tensors, idx, ctx, mode, l2n, device))
             saved["cases"][case] = record

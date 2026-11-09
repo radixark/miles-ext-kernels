@@ -30,6 +30,7 @@ size 64, head dimension 128, value head ``hv`` reads Q/K head ``hv // (HV // H_q
   #2 kcp_fwdh        per chunk: h_tape = bf16(h); b_v = u - W bf16(h); v_new = bf16(b_v); h = gamma h + K^T bf16(rowscale b_v)
   #3 kcp_transfer    per chunk: V = [u -] W M; M = gamma M + K^T (rowscale V)   (FP32: the TF32x3 class of the kernel)
   #4 kcp_affine_merge X <- Mop_e X + C_e along a chain (FP32), states published through the chain tables
+  #2 kcp_fwdh_out    #2 without tapes and final states, with #5 on each walked chunk: o = bf16(qscale (q bf16(h)) + Aqk bf16(b_v))
   #5 fwd_o           o = bf16(qscale (q h_tape) + Aqk v_new)
   #6 bwd_prep        do_g = bf16(qscale do); dv_intra = bf16(Aqk^T do)
   #7 kcp_dhu         per chunk (reverse): dh_tape = bf16(dh); b_dv = dv_intra + rowscale (K bf16(dh)); dv_new = bf16(b_dv)
@@ -85,9 +86,9 @@ from .cake_kcp_plan import (
     CHUNK,
     HEAD_DIM,
     TILE,
-    ContextDetKcp,
-    PartitionDetKcp,
-    build_context_det_kcp,
+    CakeGDNDetKcpContext,
+    CakeGDNDetKcpPartition,
+    cake_gdn_det_train_kcp_build_context,
 )
 
 F32, BF16 = torch.float32, torch.bfloat16
@@ -231,13 +232,20 @@ def _walk_io(values: Mapping[str, Any], prefix: str):
     )
 
 
-def kcp_fwdh(values: Mapping[str, Any], *, tape: bool) -> None:
+def kcp_fwdh(values: Mapping[str, Any], *, tape: bool, fused_o: bool = False) -> None:
+    """#2 over the listed segments.  ``tape``: the h / v_new tapes; ``fused_o`` (``kcp_fwdh_out``): no tape and no
+    final-state pool, #5's output rows of every walked chunk from the same h and v_new instead (the operands #5 reads
+    from the tapes, so ``o`` is #2 tape + #5 bitwise)."""
     k, w, u, rowscale, gamma = (values[n] for n in ("k", "w", "u", "rowscale", "gamma"))
     HV, _H_qk, r = _group(values)
     bos_t, len_t = _ints(values["chunk_bos"]), _ints(values["chunk_len"])
     stride = int(values["tile_stride"])
     h0, h0_index, h0_hg, h0_n = _walk_io(values, "h0")
-    out, out_index, out_hg, out_n = _walk_io(values, "out")
+    if fused_o:
+        q, aqk, qscale, o = (values[n] for n in ("q", "aqk", "qscale", "o"))
+        out_index = [-1] * len(_ints(values["seg_chunk_start"]))
+    else:
+        out, out_index, out_hg, out_n = _walk_io(values, "out")
     h_tape, v_new = values.get("h_tape"), values.get("v_new")
     for seg in _ints(values["walk_seg"]):
         for hv in range(HV):
@@ -257,6 +265,12 @@ def kcp_fwdh(values: Mapping[str, Any], *, tape: bool) -> None:
                 b_v = f32(u[rows, hv]) - mm(w[rows, hv], hb)  # FP32
                 if tape:
                     v_new[rows, hv] = bf16(b_v)  # ROUND #2: v_new tape
+                if fused_o:
+                    # #5 on this chunk's h / v_new operands (fwd_o's expression)
+                    v_op = bf16(b_v)  # ROUND #2: the v_new operand
+                    acc = qscale[rows, hv][:, None] * mm(q[tok, hq], hb)
+                    acc = acc + mm(aqk[rows, hv, :L], v_op)
+                    o[tok, hv] = bf16(acc)  # ROUND #5: out
                 kop = bf16(
                     rowscale[rows, hv][:, None] * b_v
                 )  # ROUND #2: K-side operand bf16(rowscale b_v)
@@ -705,6 +719,8 @@ def run_module(
         kcp_fwdh(values, tape=False)
     elif program == "kcp_fwdh_tape":
         kcp_fwdh(values, tape=True)
+    elif program == "kcp_fwdh_out":
+        kcp_fwdh(values, tape=False, fused_o=True)
     elif program == "kcp_transfer_walk":
         kcp_transfer_walk(values)
     elif program == "kcp_affine_merge":
@@ -762,7 +778,7 @@ def tape_shapes(
 
 
 def new_tapes(
-    ctx: ContextDetKcp, H_qk: int, HV: int, names, device=None
+    ctx: CakeGDNDetKcpContext, H_qk: int, HV: int, names, device=None
 ) -> dict[str, torch.Tensor]:
     dev = ctx.device if device is None else device
     shapes = tape_shapes(ctx.T_r, ctx.NC_pad, ctx.R, H_qk, HV)
@@ -814,7 +830,7 @@ class FakeRank:
     """One emulated rank: its context, tables, operands (local order, no batch axis) and tapes."""
 
     rank: int
-    ctx: ContextDetKcp
+    ctx: CakeGDNDetKcpContext
     lt: cake_tables.LocalTables
     wt: cake_tables.WalkTables
     ops: dict[str, torch.Tensor]
@@ -885,7 +901,7 @@ class FakeRank:
 
 
 def build_ranks(
-    part: PartitionDetKcp,
+    part: CakeGDNDetKcpPartition,
     ops_by_rank: list[dict[str, torch.Tensor]],
     *,
     H_qk: int,
@@ -902,7 +918,7 @@ def build_ranks(
     Q / K L2 norm form."""
     ranks = []
     for r in range(part.world_size):
-        ctx = build_context_det_kcp(
+        ctx = cake_gdn_det_train_kcp_build_context(
             part, None, r, device, conv_kernel_size, sm_count=sm_count, p_rule=p_rule
         )
         pt = ctx.prepare(H_qk, HV)  # first use: the device-resident table bundle
@@ -934,7 +950,7 @@ def build_ranks(
 
 
 def slice_local(
-    global_ops: dict[str, torch.Tensor], part: PartitionDetKcp, rank: int
+    global_ops: dict[str, torch.Tensor], part: CakeGDNDetKcpPartition, rank: int
 ) -> dict[str, torch.Tensor]:
     """The rank's local operands (fragments in local order) from the global pack (no batch axis)."""
     cu = part.cu_seqlens
@@ -950,7 +966,9 @@ def slice_local(
     return out
 
 
-def gather_global(part: PartitionDetKcp, per_rank: list[torch.Tensor]) -> torch.Tensor:
+def gather_global(
+    part: CakeGDNDetKcpPartition, per_rank: list[torch.Tensor]
+) -> torch.Tensor:
     """Per-rank ``[T_r, ...]`` tensors -> the pack's global token order ``[T, ...]`` (the partition inverse)."""
     cu = part.cu_seqlens
     any_t = per_rank[0]
@@ -1236,7 +1254,7 @@ def emulate_backward(
                                 out_segs, dtype=torch.int32, device=rk.ctx.device
                             ),
                             **rk.pool_args(
-                                "out", "b1_m_dm", b1_send[rk.rank], "h0_index"
+                                "out", "b1_m_dm", b1_send[rk.rank], "b1_m_index"
                             ),
                             "init_mode": 0,
                             "use_u": 0,
@@ -1341,7 +1359,7 @@ def emulate_backward(
 
 
 def emulate(
-    part: PartitionDetKcp,
+    part: CakeGDNDetKcpPartition,
     global_ops: dict[str, torch.Tensor],
     *,
     H_qk: int,

@@ -12,7 +12,8 @@ gate is checked to fail an output 2 % off.
 Bitwise properties: ``det`` repeats bit for bit, in the same process and in a new one; ``fast`` gives ``det``'s
 ``logp`` and, without zero-gradient rows, ``det``'s ``dW``; a no-grad forward gives the training forward's ``logp``; a
 frozen input leaves the other gradient's bits unchanged (``det``); a caller-given valid-row count gives the counted
-call's bits; a call on a side stream or on another GPU gives the default stream's bits.
+call's bits; a call on a side stream or on another GPU gives the default stream's bits. Under
+``torch.use_deterministic_algorithms(True)`` ``det`` keeps its bits and a ``fast`` backward raises PyTorch's alert.
 
 Every kernel library is built before the tests (``cake.prebuild("lm_head")``); set ``TVM_FFI_CACHE_DIR`` to keep them.
 """
@@ -26,6 +27,7 @@ import os
 import subprocess
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -509,7 +511,8 @@ def test_a_given_valid_row_count_gives_the_counted_bits(T, ignore_frac):
 @pytest.mark.parametrize("variant", VARIANTS)
 def test_zero_gradient_rows_get_a_zero_hidden_gradient(variant):
     """PPO-clipped and masked tokens reach the kernels as rows with a zero incoming gradient (``fast`` skips their
-    GEMM work above one chunk): within the gate, with exact zeros in their ``dX`` rows."""
+    GEMM work from the architecture's floor of valid rows on): within the gate, with exact zeros in their ``dX``
+    rows."""
     H, V = SHAPES[0]
     p = _problem(H, V, 16231, temperature=0.7, zero_dlogp_frac=0.3)
     oracle, baseline = _references(p)
@@ -545,6 +548,46 @@ def test_the_configured_variant_and_chunk_size_are_read_at_call_time(variant):
     _run(p, None)
     _configure(variant, 1024)
     _assert_same_bits(_run(p, None), reference, keys, f"{variant} configured after a call of {other}")
+
+
+@contextlib.contextmanager
+def _deterministic_algorithms(warn_only: bool):
+    previous = torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True, warn_only=warn_only)
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
+
+
+# one-chunk and two-chunk calls; at T = 1024 (H 4096, V 129280) the package's own alert does not fire on GB300 (one dX
+# slice), at 64 and 4097 it does
+@pytest.mark.parametrize("T", [64, 1024, 4097], ids=lambda t: f"T{t}")
+def test_a_fast_backward_alerts_under_torch_deterministic_algorithms_and_det_runs_as_always(T):
+    """While ``torch.use_deterministic_algorithms(True)`` is in effect: ``det`` runs without an alert and with its
+    bits; a ``fast`` forward gives its ``logp`` bits and its backward raises PyTorch's alert before it forms a
+    gradient, whatever the shape; under ``warn_only=True`` the backward warns and runs ``fast``."""
+    H, V = SHAPES[0]
+    p = _problem(H, V, T)
+    det = _run(p, "det")
+    fast = _run(p, "fast")
+
+    with _deterministic_algorithms(warn_only=False), warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _assert_same_bits(_run(p, "det"), det, ("logp", "dX", "dW"), "det under deterministic algorithms")
+        _configure("fast")
+        X = p.X.detach().requires_grad_(True)
+        W = p.W.detach().requires_grad_(True)
+        logp = lm_head.log_probs(X, W, p.labels)
+        assert _same_bits(logp.detach(), fast["logp"])
+        with pytest.raises(RuntimeError, match="--cake-lm-head-variant det is the deterministic variant"):
+            logp.backward(p.dlogp)
+        assert X.grad is None and W.grad is None
+    with _deterministic_algorithms(warn_only=True):
+        with pytest.warns(UserWarning, match="--cake-lm-head-variant det is the deterministic variant"):
+            warned = _run(p, "fast")
+    _assert_same_bits(warned, fast, ("logp",), "fast under warn_only")
+    assert all(_finite(warned[name]) for name in ("dX", "dW"))
 
 
 # --------------------------------------------------------------------------- #

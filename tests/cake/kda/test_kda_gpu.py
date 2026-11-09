@@ -230,7 +230,7 @@ def test_autograd_saved_set_replay_and_checkpoint_give_the_same_bits(case):
     operands = [inputs[n].unsqueeze(0) for n in ("q", "k", "v", "g", "beta")]
     modes = dict(A_log=inputs["A_log"], dt_bias=inputs["dt_bias"], lower_bound=LOWER_BOUND, **MILES_MODES)
     out, saved = kda.chunk_kda_fwd(*operands, inputs["cu_seqlens"], **modes)
-    assert isinstance(saved, backend.KdaDetChunkSaved)
+    assert isinstance(saved, backend.CakeKDADetChunkSaved)
     assert (saved.hseg is not None) == (plan.light_path == "light_states")
     assert_bitwise(out.squeeze(0), reference["out"])
     dout = inputs["dout"].unsqueeze(0)

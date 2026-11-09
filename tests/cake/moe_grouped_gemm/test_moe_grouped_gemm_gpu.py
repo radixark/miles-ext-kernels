@@ -34,7 +34,7 @@ except NotImplementedError:
     pytest.skip("the Cake MoE grouped GEMM needs SM100a / SM103a / SM107a", allow_module_level=True)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DET_NODE, FAST_NODE = "CakeGroupedDetMmBackward", "CakeGroupedMmBackward"
+DET_NODE, FAST_NODE = "CakeMoEGroupedGemmDetFunctionBackward", "CakeMoEGroupedGemmNondetFunctionBackward"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -76,7 +76,7 @@ def test_fast_gives_the_det_bits_where_its_reductions_are_ordered(layer, proj):
 def test_the_fast_weight_gradient_adds_its_split_tail_unordered_within_the_budget():
     sizes, (n, k) = list(K512_SIZES), K512_SHAPE
     x, w, g, offs = _cases.inputs(sizes, n, k, seed=SEED + 512)
-    launch = ops._module("fast", "cake_backend").prepare_grouped_gemm_wgrad(g, x, offs, deterministic=False)
+    launch = ops._module("fast", "cake_backend").cake_moe_grouped_gemm_nondet_train_prepare_wgrad(g, x, offs)
     assert launch.plan["tile_k"] == 512 and launch.plan["unordered_tail"], launch.plan
 
     det, fast = _run("det", x, w, g, offs), _run("fast", x, w, g, offs)
@@ -147,7 +147,7 @@ def test_calls_alternating_between_the_default_and_a_side_stream_give_the_same_b
     x, w, g, offs = _cases.inputs(sizes, n, k, seed=SEED + 3)
     backend = ops._module(variant, "cake_backend")
     if variant == "fast":  # the 256-wide k tile: the fast weight gradient reduces in order too
-        assert backend.prepare_grouped_gemm_wgrad(g, x, offs, deterministic=False).plan["tile_k"] == 256
+        assert backend.cake_moe_grouped_gemm_nondet_train_prepare_wgrad(g, x, offs).plan["tile_k"] == 256
     _configure(variant)
     side = torch.cuda.Stream()
     results = []
@@ -177,7 +177,7 @@ def test_short_groups_between_large_ones_repeat_bit_for_bit(proj):
     sizes = [4099 if e % 8 == 7 else SHORT_GROUPS[e % len(SHORT_GROUPS)] for e in range(64)]
     _, n, k = _cases.shape("h2048-i768-e16", proj)
     x, w, g, offs = _cases.inputs(sizes, n, k, seed=SEED + 8)
-    plan = ops._module("fast", "cake_backend").prepare_grouped_gemm_wgrad(g, x, offs, deterministic=False).plan
+    plan = ops._module("fast", "cake_backend").cake_moe_grouped_gemm_nondet_train_prepare_wgrad(g, x, offs).plan
     assert plan["tile_k"] == 256
     det = assert_repeatable(lambda: _run("det", x, w, g, offs), times=8)
     for _ in range(8):

@@ -66,7 +66,7 @@ def prebuild(*, device: Any = None, max_workers: int | None = None) -> list[Path
 
     No model parameter: ``M`` and ``K`` are runtime arguments, so one set of libraries serves every shape and route.
     ``NotImplementedError`` on a device that is not SM100a / SM103a / SM107a, ``RuntimeError`` when the toolkit cannot
-    build its architecture (SM107a needs CUDA 13.4). Returns the cache path of every library.
+    build its architecture (it needs CUDA 13.4 or newer). Returns the cache path of every library.
     """
     arch = loader.device_arch(device)
     return loader.prebuild_libraries(backend.cake_build, libraries(arch), max_workers=max_workers)
