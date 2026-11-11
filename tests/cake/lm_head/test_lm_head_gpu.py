@@ -10,11 +10,12 @@ relative) is three orders below the BF16 errors gated (about 1e-3), and FP64 GEM
 gate is checked to fail an output 2 % off.
 
 Bitwise properties: ``det`` repeats bit for bit, in the same process and in a new one; ``fast`` gives ``det``'s
-``logp`` and, without zero-gradient rows or a folded short tail, ``det``'s ``dW``; a no-grad forward gives the training
-forward's ``logp``; a frozen input leaves the other gradient's bits unchanged (``det``); a caller-given valid-row count
-gives the counted call's bits (``fast``: ``dW`` unless the counted call folds its short tail); a call on a side stream
-or on another GPU gives the default stream's bits. Under ``torch.use_deterministic_algorithms(True)`` ``det`` keeps its
-bits and a ``fast`` backward raises PyTorch's alert.
+``logp`` and, where its package documents it (no zero-gradient row, no folded short tail, no vocabulary-major backward
+of 2 to 4 chunks: ``_forms``), ``det``'s ``dW``; a no-grad forward gives the training forward's ``logp``; a frozen
+input leaves the other gradient's bits unchanged (``det``); a caller-given valid-row count gives the counted call's
+bits (``fast``: ``logp``, and ``dW`` where the counted call keeps ``det``'s); a call on a side stream or on another GPU
+gives the default stream's bits. Under ``torch.use_deterministic_algorithms(True)`` ``det`` keeps its bits and a
+``fast`` backward raises PyTorch's alert.
 
 Every kernel library is built before the tests (``cake.prebuild("lm_head")``); set ``TVM_FFI_CACHE_DIR`` to keep them.
 """
@@ -30,7 +31,6 @@ import sys
 import time
 import warnings
 from dataclasses import dataclass
-from importlib import import_module
 from pathlib import Path
 
 import pytest
@@ -44,6 +44,8 @@ from miles_ext_kernels.cake import lm_head  # noqa: E402
 from miles_ext_kernels.cake._impl.lm_head import ops  # noqa: E402
 from miles_ext_kernels.cake._runtime import loader  # noqa: E402
 
+from . import _forms  # noqa: E402
+
 if tuple(torch.cuda.get_device_capability()) not in cake.ARCH_BY_CAPABILITY:
     pytest.skip("the cake lm_head kernels need SM100a / SM103a / SM107a", allow_module_level=True)
 
@@ -54,8 +56,9 @@ SEED = 20261104
 VARIANTS = ("det", "fast")
 # (H, V) of the models the cake log-prob path serves (H a multiple of 512, V of 256)
 SHAPES = [(4096, 129280), (5120, 248320), (4096, 154880), (6144, 154880), (7168, 129280)]
-# one row, one chunk short of full, two chunks with a one-row tail, four chunks with a ragged tail
-ROWS = [1, 4095, 4097, 16231]
+# one row, one chunk short of full, two chunks with a one-row tail, four chunks with a ragged tail (fast:
+# vocabulary-major), five chunks with a ragged tail (fast: the chunk loop)
+ROWS = [1, 4095, 4097, 16231, 20481]
 TEMPERATURES = [None, 0.7]
 # (H, V, T) of the CUDA 13.0 fault reports on the sm_100a dW / dX GEMMs, about a third of the labels ignored
 ISSUE_SHAPES = [
@@ -349,15 +352,19 @@ def _assert_same_bits(a: dict, b: dict, keys, what: str) -> None:
         assert _same_bits(a[key], b[key]), f"{what}: {key} bits differ"
 
 
-def _fast_folds(p: Problem, chunk_size: int | None = None) -> bool:
-    """Does a ``fast`` call of ``p`` without ``num_valid_rows`` fold its short tail (the package's plan,
-    ``loop_chunks``, over the valid rows, or every row when all are valid)? Its chunks then differ from ``det``'s and
-    from those of the call given the count, so its ``dX`` and ``dW`` may round differently (``logp`` keeps its bits)."""
-    backend = import_module(".cake_backend", ops._package("fast").__name__)
-    chunk = chunk_size or cake.option("lm_head", "cake_lm_head_chunk_size")
+def _loop_rows(p: Problem) -> int:
+    """The rows a ``fast`` call of ``p`` chunks over: the valid rows, or ``T`` when every row is valid."""
     T = int(p.labels.numel())
-    rows = T if bool(p.valid.all()) else int(p.valid.sum())
-    return len(backend.loop_chunks(T, rows, chunk)) < len(backend.plan_chunks(rows, chunk))
+    return T if bool(p.valid.all()) else int(p.valid.sum())
+
+
+def _fast_dw_keys(p: Problem) -> tuple[str, ...]:
+    """The outputs of a ``fast`` call of ``p`` without ``num_valid_rows`` (no zero-gradient row) that keep ``det``'s
+    bits and those of the call given the count: ``logp``, and ``dW`` unless the call folds its short tail or runs the
+    vocabulary-major backward (``_forms.fast_keeps_det_dw``; another grouping within the same accuracy budgets)."""
+    chunk = cake.option("lm_head", "cake_lm_head_chunk_size")
+    keeps = _forms.fast_keeps_det_dw(int(p.labels.numel()), _loop_rows(p), chunk)
+    return ("logp", "dW") if keeps else ("logp",)
 
 
 def _digests(result: dict) -> dict:
@@ -376,7 +383,8 @@ def _digests(result: dict) -> dict:
 @pytest.mark.parametrize(("H", "V"), SHAPES)
 def test_log_probs_match_the_reference(H, V, T, temperature):
     """Both variants pass the gate; ``det`` repeats bit for bit; ``fast`` has ``det``'s ``logp`` and (unless it folds
-    its short tail) ``dW`` bits; the no-grad forward has the training forward's ``logp`` bits."""
+    its short tail or runs the vocabulary-major backward) ``dW`` bits; the no-grad forward has the training forward's
+    ``logp`` bits."""
     p = _problem(H, V, T, temperature=temperature)
     oracle, baseline = _references(p)
 
@@ -388,7 +396,7 @@ def test_log_probs_match_the_reference(H, V, T, temperature):
 
     fast = _run(p, "fast")
     _assert_gate(fast, oracle, baseline, p, "fast")
-    _assert_same_bits(fast, det, ("logp",) if _fast_folds(p) else ("logp", "dW"), "fast vs det")
+    _assert_same_bits(fast, det, _fast_dw_keys(p), "fast vs det")
     _assert_same_bits(_run(p, "fast", train_x=False, train_w=False, grad=False), det, ("logp",), "fast no-grad")
 
 
@@ -508,28 +516,31 @@ def test_a_frozen_input_gets_no_gradient_and_leaves_the_other_one(variant):
 
 
 @pytest.mark.parametrize("ignore_frac", [0.0, 0.05], ids=["all-valid", "some-ignored"])
-@pytest.mark.parametrize("T", [4097, 16231], ids=lambda t: f"T{t}")
+@pytest.mark.parametrize("T", [4097, 16231, 20481], ids=lambda t: f"T{t}")
 def test_a_given_valid_row_count_gives_the_counted_bits(T, ignore_frac):
     """miles knows the count (every scored row has a target): the call with ``num_valid_rows`` gives the bits of
-    the call that counts on the device (``fast``: ``logp``, and ``dW`` unless the counted call folds its short tail,
-    which the call given the count does not)."""
+    the call that counts on the device (``fast``: ``logp``, and ``dW`` unless the counted call folds its short tail or
+    runs the vocabulary-major backward; the call given the count runs the chunk loop without the fold)."""
     H, V = SHAPES[2]
     p = _problem(H, V, T, temperature=0.7, ignore_frac=ignore_frac)
     count = int(p.valid.sum())
-    fast_keys = ("logp",) if _fast_folds(p) else ("logp", "dW")
+    fast_keys = _fast_dw_keys(p)
 
     for variant, keys in (("det", ("logp", "dX", "dW")), ("fast", fast_keys)):
         counted = _run(p, variant)
         _assert_same_bits(_run(p, variant, num_valid_rows=count), counted, keys, f"{variant} num_valid_rows")
 
 
+@pytest.mark.parametrize(("T", "vocab_major"), [(16231, True), (20481, False)], ids=["vocab-major", "chunk-loop"])
 @pytest.mark.parametrize("variant", VARIANTS)
-def test_zero_gradient_rows_get_a_zero_hidden_gradient(variant):
+def test_zero_gradient_rows_get_a_zero_hidden_gradient(variant, T, vocab_major):
     """PPO-clipped and masked tokens reach the kernels as rows with a zero incoming gradient (``fast`` skips their
-    GEMM work from the architecture's floor of valid rows on): within the gate, with exact zeros in their ``dX``
-    rows."""
+    GEMM work from the architecture's floor of valid rows on, in its vocabulary-major backward and in its chunk loop):
+    within the gate, with exact zeros in their ``dX`` rows."""
     H, V = SHAPES[0]
-    p = _problem(H, V, 16231, temperature=0.7, zero_dlogp_frac=0.3)
+    p = _problem(H, V, T, temperature=0.7, zero_dlogp_frac=0.3)
+    chunk = cake.option("lm_head", "cake_lm_head_chunk_size")
+    assert _forms.fast_vocab_major(_loop_rows(p), chunk) is vocab_major
     oracle, baseline = _references(p)
 
     out = _run(p, variant)
@@ -575,8 +586,8 @@ def _deterministic_algorithms(warn_only: bool):
         torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
 
 
-# one-chunk and two-chunk calls; at T = 1024 (H 4096, V 129280) the package's own alert does not fire on GB300 (one dX
-# slice), at 64 and 4097 it does
+# one-chunk and two-chunk calls: this module alerts for every fast backward, whether or not the package's own alert
+# (before a K-sliced dX) would fire for the shape
 @pytest.mark.parametrize("T", [64, 1024, 4097], ids=lambda t: f"T{t}")
 def test_a_fast_backward_alerts_under_torch_deterministic_algorithms_and_det_runs_as_always(T):
     """While ``torch.use_deterministic_algorithms(True)`` is in effect: ``det`` runs without an alert and with its
@@ -761,8 +772,8 @@ def test_a_label_at_or_above_v_stops_the_stream(variant):
 
 def test_the_weight_gradient_is_one_bf16_cast_of_the_fp32_accumulation():
     """``dW`` reaches ``W`` as BF16: the round-to-nearest cast of the FP32 ``[V, H]`` accumulator the backward forms
-    (the package's accumulator, uncast), bit for bit (``det``; ``fast`` without a folded short tail has ``det``'s
-    ``dW`` bits)."""
+    (the package's accumulator, uncast), bit for bit (``det``; ``fast`` has ``det``'s ``dW`` bits where its package
+    documents them, ``_forms``)."""
     H, V = SHAPES[0]
     p = _problem(H, V, 16231, temperature=0.7)
     out = _run(p, "det")

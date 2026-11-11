@@ -1,8 +1,9 @@
 """The prebuild contract of lm_head on a GPU (README, Prebuild): after one ``cake.prebuild("lm_head")`` no call
 compiles, whatever the variant, the temperature (none, a scalar, a per-row tensor, 1.0), the token count (none, one
-row, one chunk, several chunks with a ragged tail, a short tail ``fast`` folds, one chunk whose logits ``det`` keeps
-for the backward), the chunk size, a given valid-row count, ignored or zero-gradient rows, frozen inputs or a forward
-without gradients, at two geometries. ``ROUTES`` lists these call-time paths; each runs one forward and backward
+row, one chunk, several chunks with a ragged tail, a short tail ``fast``'s forward folds, one chunk whose logits
+``det`` keeps for the backward), ``fast``'s two backward forms (vocabulary-major for 2 to 4 chunks, the chunk loop
+otherwise, each with zero-gradient rows), the chunk size, a given valid-row count, ignored rows, frozen inputs or a
+forward without gradients, at two geometries. ``ROUTES`` lists these call-time paths; each runs one forward and backward
 under ``no_build()`` for each variant."""
 
 import sys
@@ -79,9 +80,13 @@ CASES = {
     "one row": lambda H, V: _fwd_bwd(H, V, 1, temperature=0.7, ignore=0.0),
     "one chunk": lambda H, V: _fwd_bwd(H, V, 4095, temperature=0.7),
     "one chunk, every row valid, no temperature (det keeps the logits)": lambda H, V: _fwd_bwd(H, V, 4095, ignore=0.0),
-    "two chunks, every row valid, a one-row tail (fast folds it)": lambda H, V: _fwd_bwd(H, V, 4097, ignore=0.0),
-    "four chunks, zero-gradient rows": lambda H, V: _fwd_bwd(H, V, 16231, zero=0.3),
-    "four chunks, zero-gradient rows, temperature": lambda H, V: _fwd_bwd(H, V, 16231, temperature=0.7, zero=0.3),
+    "two chunks, all valid, a one-row tail (fast: folded, vocab-major)": lambda H, V: _fwd_bwd(H, V, 4097, ignore=0.0),
+    "W frozen, a one-row tail (fast: folded chunk loop)": lambda H, V: _fwd_bwd(H, V, 4097, ignore=0.0, train_w=False),
+    "four chunks, zero-gradient rows (fast: vocab-major)": lambda H, V: _fwd_bwd(H, V, 16231, zero=0.3),
+    "four chunks, zero-grad rows, tau (vocab-major)": lambda H, V: _fwd_bwd(H, V, 16231, temperature=0.7, zero=0.3),
+    "five chunks, zero-gradient rows (fast: chunk loop)": lambda H, V: _fwd_bwd(H, V, 20481, zero=0.3),
+    "five chunks, zero-grad rows, tau (chunk loop)": lambda H, V: _fwd_bwd(H, V, 20481, temperature=0.7, zero=0.3),
+    "two chunks, a long tail, zero-gradient rows (fast: chunk loop)": lambda H, V: _fwd_bwd(H, V, 6800, zero=0.3),
     "a third of the rows ignored": lambda H, V: _fwd_bwd(H, V, 16384, ignore=0.33),
     "given valid-row count": lambda H, V: _fwd_bwd(H, V, 16231, temperature=0.7, given_count=True),
     "given count, every row valid": lambda H, V: _fwd_bwd(H, V, 4097, ignore=0.0, given_count=True),
@@ -91,6 +96,7 @@ CASES = {
     "X trains, W frozen": lambda H, V: _fwd_bwd(H, V, 4097, temperature=0.7, train_w=False),
     "W trains, X frozen": lambda H, V: _fwd_bwd(H, V, 4097, temperature=0.7, train_x=False),
     "chunk size 1024": lambda H, V: _fwd_bwd(H, V, 4097, temperature=0.7, chunk_size=1024),
+    "chunk size 1024, five chunks (fast: chunk loop)": lambda H, V: _fwd_bwd(H, V, 5000, zero=0.3, chunk_size=1024),
     "chunk size 65535, two chunks": lambda H, V: _fwd_bwd(H, V, 70001, chunk_size=65535),
 }
 

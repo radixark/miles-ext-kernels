@@ -8,9 +8,11 @@ Chunked LM-head selected-token log-probabilities, forward and backward, on SM100
 :func:`log_probs` takes the hidden rows ``X [T, H]``, the output weight ``W [V, H]`` (both BF16) and the target ids
 ``labels [T]`` and returns the FP32 ``logp [T]`` of ``softmax(X @ W^T / temperature)`` at the labels, differentiable
 in ``X`` and ``W``. No ``[T, V]`` logits tensor exists beyond one token chunk (``--cake-lm-head-chunk-size`` rows;
-``fast`` runs a two-chunk call whose second chunk is shorter than half a chunk as one chunk): the backward recomputes
-each chunk's logits. ``det`` repeats bit for bit; ``fast`` sums the K slices of the hidden-state gradient through an
-FP32 slab in slice order and skips the GEMM work of rows whose incoming gradient is zero.
+``fast``'s forward runs a two-chunk call whose second chunk is shorter than half a chunk as one chunk): the backward
+recomputes the logits a chunk (or, in ``fast``'s vocabulary-major backward, a vocabulary block of about one chunk's
+logits) at a time. ``det`` repeats bit for bit. ``fast`` runs a call of 2 to 4 chunks vocabulary-major, without the
+FP32 ``[V, H]`` weight-gradient accumulator, sums the K slices of a chunk-loop hidden-state gradient through an FP32
+slab in slice order, and skips the GEMM work of rows whose incoming gradient is zero.
 
 miles selects it with ``--log-probs-backend cake``. The kernels serve ``H`` a multiple of 512 and ``V`` a multiple of
 256 (their dX / dW and logits tiles): a vocabulary that is not, such as 151,936, is rejected at startup, since padding

@@ -7,21 +7,35 @@ Selected-token log-probabilities of an LM head on the vendored Cake chunked LM-h
 SM107a, built with a CUDA 13.4 or newer toolkit).
 
 ``logp_t = z[t, y_t] / tau_t - logsumexp_v(z[t, v] / tau_t)`` with ``z = bf16(X @ W^T)``, chunk by chunk: the forward
-keeps the FP32 log-sum-exp of each row, the backward recomputes each chunk's logits and forms ``dX`` and ``dW``
-through FP32 accumulators with one BF16 cast each. No vocabulary-sized buffer spans more than one chunk. Each call
+keeps the FP32 log-sum-exp of each row, the backward recomputes the logits and forms ``dX`` and ``dW`` in FP32 with
+one BF16 cast each. No vocabulary-sized buffer spans more than one chunk (``fast``'s folded chunk: fewer than 1.5
+chunks of rows). Each call
 reads its variant (``config.variant("lm_head")``) and chunk size when it runs; its backward runs the package of its
 forward:
 
 * ``det``: ``cake_lm_head_det_train``. Fixed chunk order, no atomics: ``logp``, ``dX`` and ``dW`` repeat bit for bit
   for a fixed chunk size.
-* ``fast``: ``cake_lm_head_nondet_train``. ``det``'s ``logp`` bits; the dX GEMM of a K-sliced chunk stores each
-  slice's FP32 tile into a slab that a second kernel sums in slice order, so ``dX`` repeats run to run but may differ
-  from ``det``'s by FP32 rounding (the package still makes no run-to-run promise for its gradients). A call without
-  ``num_valid_rows`` of fewer than three chunks of ``T`` rows whose valid rows make two chunks, the second shorter
-  than half a chunk, runs them as one (the short-tail fold: fewer than 1.5 chunks of rows, no FP32 ``[V, H]``
-  accumulator). ``dW`` keeps ``det``'s bits unless the call folds or a valid row has a zero incoming gradient; a
-  backward of at least the architecture's floor of valid rows (1946 on SM100a and SM107a, 3891 on SM103a) skips the
-  GEMM work of the rows whose incoming gradient is zero (PPO-clipped or masked tokens).
+* ``fast``: ``cake_lm_head_nondet_train``. ``det``'s ``logp`` bits. A call without ``num_valid_rows`` of fewer than
+  three chunks of ``T`` rows whose valid rows make two chunks, the second shorter than half a chunk, runs its forward
+  as one chunk (the short-tail fold: fewer than 1.5 chunks of rows). The backward takes one of two forms (the
+  package's rules):
+
+  - vocabulary-major: a call without ``num_valid_rows`` that trains ``W``, of at most 65535 valid rows that make 2 to
+    4 chunks (except 2 chunks whose second chunk holds at least half a chunk). Per vocabulary block, in block order,
+    it recomputes the block's ``dz`` over every valid row, one weight-gradient GEMM writes the block's BF16 ``dW``
+    rows and the dX GEMM adds the block's product into the FP32 ``dX`` accumulator (one K slice). No FP32 ``[V, H]``
+    accumulator; the ``dz`` block holds about one chunk's logits.
+  - the chunk loop, for every other call: each chunk's ``dX`` and ``dW`` add into FP32 accumulators. The dX GEMM of a
+    K-sliced chunk stores each slice into an FP32 slab that a second kernel sums in slice order. A folded call's
+    chunk loop runs its one chunk.
+
+  Bits, as the package documents them: its slab-summed ``dX`` and the vocabulary-major ``dX`` and ``dW`` repeat bit
+  for bit run to run; it makes no run-to-run promise for the chunk loop's ``dW``. ``dW`` is ``det``'s bits when no
+  valid row has a zero incoming gradient, except on a folded call or a vocabulary-major call (other summation
+  groupings within the same accuracy budgets). ``dX`` can differ from ``det``'s. This module promises no bits for
+  ``fast``. A backward of a call with an ignored row and at least the architecture's floor of valid rows (1946 on
+  SM100a and SM107a, 3891 on SM103a) skips the GEMM work of the rows whose incoming gradient is zero (PPO-clipped or
+  masked tokens), in both forms.
 
 Host synchronization. A call without ``num_valid_rows`` reads its count of valid rows back to the host once, in the
 forward (the backward reuses the forward's row index). With ``num_valid_rows`` the forward plans on the given count
@@ -43,17 +57,21 @@ rule of the packages before the mode-word naming; ``cake_lm_head_nondet_train`` 
 dX reduction, ordered though it is (under ``warn_only=True`` it then warns a second time), so this module raises the
 alert for every shape.
 
-Weight gradient. ``dW`` is BF16, one cast of its FP32 accumulation: during the backward of a call of more than one
-chunk an FP32 ``[V, H]`` accumulator (``4 * V * H`` bytes) and the BF16 ``dW`` (``2 * V * H`` bytes) are live next to
-one chunk's BF16 logits. ``det`` picks its form per call of more than one chunk (the package's automatic memory
-form): when that predicted step peak exceeds the bytes of a head that keeps the BF16 logits of the valid rows
-(``2 * T_v * V + 2 * V * H + 2 * T * H``, less a 2 % margin), the backward recomputes the weight gradient in
-vocabulary blocks within that bound and without the zero-gradient row skip (the same bits on every run; ``dX`` and
-``dW`` keep the other form's bits unless a valid row has a zero incoming gradient). A ``det`` call without a
-temperature or ``num_valid_rows``, of fewer than three chunks of ``T`` rows, whose valid rows fit one chunk and whose
-backward runs no zero-gradient row skip, keeps their BF16 logits (``2 * T_v * V`` bytes) from its forward to its
-backward instead of recomputing them (the same bits). There is no FP32 ``dW``: the autograd engine casts a gradient
-to the dtype of its input, BF16 for ``W``.
+Weight gradient. ``dW`` is BF16, one cast of its FP32 accumulation. A chunk-loop backward of more than one chunk
+keeps an FP32 ``[V, H]`` accumulator (``4 * V * H`` bytes) next to one chunk's BF16 logits; ``fast``'s
+vocabulary-major backward keeps none (its FP32 ``[T_v, H]`` ``dX`` accumulator instead), nor does a folded call.
+``det`` picks its form per call of more than one chunk (the package's automatic memory form): when the chunk loop's
+predicted step peak exceeds the bytes of a head that keeps the BF16 logits of the valid rows
+(``2 * T_v * V + 2 * V * H + 2 * T * H``, less a 2 % margin), the backward runs the fastest exact form that fits:
+an FP32 accumulator split in two vocabulary halves and cast in place (``"fused_ip"``), the accumulator cast once
+after ``dX`` is written (``"unfused"``), or an accumulator over part of the vocabulary (or none) with the other
+``dW`` rows recomputed in vocabulary blocks (``"partial_ip"``, ``"partial"``, ``"recompute"``); when none fits, the
+chunk loop. Every run gives the same bits; ``dX`` and ``dW``
+keep the chunk loop's bits unless a valid row has a zero incoming gradient (the budget forms do not skip those
+rows). A ``det`` call without a temperature or ``num_valid_rows``, of fewer than three chunks of ``T`` rows, whose
+valid rows fit one chunk and whose backward runs no zero-gradient row skip, keeps their BF16 logits
+(``2 * T_v * V`` bytes) from its forward to its backward instead of recomputing them (the same bits). There is no
+FP32 ``dW``: the autograd engine casts a gradient to the dtype of its input, BF16 for ``W``.
 """
 
 from __future__ import annotations
@@ -187,9 +205,10 @@ def log_probs(
             device-side assertion). Not differentiable.
         num_valid_rows: the host count of ``labels >= 0`` when the caller knows it (every row valid: ``T``): the
             forward plans on it instead of reading the count back (module docstring, Host synchronization). It is
-            checked on the device: a wrong count stops the stream with a device-side assertion. The same bits as
-            without it, but for a ``fast`` call that folds its short tail without the count: its ``dX`` and ``dW``
-            may then round differently (module docstring).
+            checked on the device: a wrong count stops the stream with a device-side assertion. ``det``: the same
+            bits as without it. ``fast``: the same ``logp``, and the same ``dW`` unless a valid row has a zero
+            incoming gradient or the call without the count folds or runs the vocabulary-major backward (the call
+            with the count runs the chunk loop without the fold); ``dX`` may round differently (module docstring).
 
     The variant and the chunk size are the configured ones (``--cake-lm-head-variant``,
     ``--cake-lm-head-chunk-size``), read now; ``det``'s bits depend on the chunk size. Raises ``ValueError`` for
