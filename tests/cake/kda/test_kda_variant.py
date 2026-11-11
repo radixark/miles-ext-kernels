@@ -71,6 +71,7 @@ def packages(monkeypatch):
     monkeypatch.setattr(kcp, "_det_kcp", lambda: det_kcp)
     monkeypatch.setattr(kcp, "_det_plan", lambda: det_plan)
     monkeypatch.setattr(kcp, "_fast_kcp", lambda: fast_kcp)
+    monkeypatch.setattr(kcp, "_fast_context", lambda ctx: ctx)
     monkeypatch.setattr(config, "_warned", set())
     return {"det": det, "fast": fast, "det_kcp": det_kcp, "det_plan": det_plan, "fast_kcp": fast_kcp}
 
