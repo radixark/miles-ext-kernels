@@ -18,6 +18,13 @@ one shape and one ``max_seqlen_k``, and ``torch.use_deterministic_algorithms(Tru
 :func:`check_supported` and :func:`is_supported` tell, without torch, whether the kernels run a head layout; miles'
 argument validation applies them to the heads one tensor-parallel rank holds.
 
+Memory. Besides its pooled scratch, each backward allocates a BF16 dS^T workspace from PyTorch's caching allocator and
+frees it on return. All of dS^T takes 32 KiB times ``H_q / 2`` times the key blocks of ``max_seqlen_k`` (128 keys
+each, an even count) times ``(T_q + 63 B) // 64`` for ``B`` segments. Past the vendored default budget of 16 GiB the backward runs in
+chunks (one key/value head at a time, then key-block ranges) and allocates one chunk, within the budget unless one
+key/value head and two key blocks exceed it. One 32768-token sequence with 8 query and 2 key/value heads takes 8 GiB
+per backward. miles cannot lower the budget.
+
 miles selects the kernels with ``--full-attention-backend cake``. Importing this module imports neither torch nor the
 implementation.
 """

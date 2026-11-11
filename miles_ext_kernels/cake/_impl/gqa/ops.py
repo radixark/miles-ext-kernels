@@ -63,8 +63,9 @@ __all__ = [
 OP = "gqa"
 PACKAGE = "cake_gqa_nondet_train"
 HEAD_DIM = cake_backend.HEAD_DIM
-# The stages one forward and backward of varlen_gqa_attention launch (BF16 dK / dV), in launch order; past
-# cake_jit.PLAN_MAX_PAIRS Q-tile pairs the vendored backward builds the tile tables of bwd_plan with PyTorch ops.
+# The stages one forward and backward of varlen_gqa_attention launch (BF16 dK / dV), in the vendored order of
+# cake_jit.STAGES; past cake_jit.PLAN_MAX_PAIRS Q-tile pairs the vendored backward builds the tile tables of bwd_plan
+# with PyTorch ops.
 STAGES = ("fwd", "bwd_pre", "bwd_plan", "bwd_main_bf16", "bwd_dq")
 
 

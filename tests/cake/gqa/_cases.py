@@ -15,6 +15,9 @@ from miles_ext_kernels.cake import gqa
 from miles_ext_kernels.cake._impl.gqa import ops
 from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_backend
 
+# the miles micro-batch, re-exported for the GPU tests
+from ._chunks import MILES_SEGMENTS as MILES_SEGMENTS
+
 D = 256
 SCALE = D**-0.5  # the default, as miles runs it
 # the tensors whose bits do not depend on the run: all of them (no sum uses atomics)
@@ -27,9 +30,6 @@ BOUND_INDEPENDENT = ("out", "lse", "dk", "dv")
 DQ_RTOL = 2**-7
 DQ_ATOL_FRACTION = 2**-16
 
-# A miles micro-batch: three sequences, then the pad that aligns the packed tokens to a multiple of 128 as its own
-# segment; self-attention, so the query and key boundaries are one.
-MILES_SEGMENTS = (1000, 517, 2049, 18)
 
 
 def cu(lens) -> list[int]:

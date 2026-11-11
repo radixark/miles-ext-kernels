@@ -6,7 +6,9 @@ torch-free runtime. Checked: every stage ``ops.STAGES`` launches has exactly one
 the oldest toolkit the runtime accepts for that architecture builds (``MIN_CUDA``: CUDA 13.4 on every architecture);
 the forward grid covers every tile; the backward's workspace chunks and their grids cover every key head and the key
 blocks of ``max_seqlen_k`` and no more (the ``max_seqlen_k`` contract), or of ``T_k`` without it, within the workspace
-budget; the backward scratch is aligned and sized.
+budget, and the budgets the GPU tests force split a miles micro-batch into the chunks they mean to reach; the
+dS^T workspace of a long sequence at the default budget is the one the gqa module documents; the backward scratch is
+aligned and sized.
 """
 
 import ast
@@ -18,6 +20,8 @@ from pathlib import Path
 import pytest
 
 from miles_ext_kernels.cake import MIN_CUDA
+
+from . import _chunks
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_DIR = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "cake_gqa_nondet_train"
@@ -145,6 +149,47 @@ def test_the_backward_grid_covers_the_key_blocks_of_max_seqlen_k_only(cake_jit, 
     # without a bound the grids cover T_k keys: correct for any segment, with pairs that only retire
     unbounded = cake_jit.chunk_plan(**dims, max_seqlen_k=None, budget_bytes=budget)
     assert unbounded["key_blocks"] == 8 * 2048 // cake_jit.BWD_TILE_KEYS
+
+
+@pytest.mark.parametrize("heads", [(16, 2), (8, 2), (24, 4)], ids=["16_2", "8_2", "24_4"])
+def test_the_gpu_test_budgets_chunk_the_backward(cake_jit, heads):
+    """The default budget runs the miles micro-batch in one chunk; the GPU test's ``"kv_heads"`` budget runs one
+    key/value head per chunk with every key block, its ``"key_blocks"`` budget one key/value head and ranges of
+    ``KEY_BLOCKS_PER_CHUNK`` key blocks whose dQ partials carry over between chunks."""
+    h_q, h_kv = heads
+    segments = _chunks.MILES_SEGMENTS
+    dims = dict(
+        total_q=sum(segments),
+        total_k=sum(segments),
+        num_heads_q=h_q,
+        num_heads_kv=h_kv,
+        num_segments=len(segments),
+        max_seqlen_k=max(segments),
+    )
+    budgets = _chunks.budgets(cake_jit, **dims)
+    blocks = cake_jit.key_blocks(dims["total_k"], dims["max_seqlen_k"])
+    width = _chunks.KEY_BLOCKS_PER_CHUNK
+    assert blocks > 2 * width
+
+    default = cake_jit.chunk_plan(**dims, budget_bytes=cake_jit.DEFAULT_WORKSPACE_BUDGET)
+    assert (default["h_chunk"], default["ranges"]) == (h_kv, [(0, blocks)])
+    by_head = cake_jit.chunk_plan(**dims, budget_bytes=budgets["kv_heads"])
+    assert (by_head["h_chunk"], by_head["ranges"]) == (1, [(0, blocks)])
+    assert by_head["ws_tiles"] * cake_jit.DS_TILE_BYTES <= budgets["kv_heads"]
+    by_range = cake_jit.chunk_plan(**dims, budget_bytes=budgets["key_blocks"])
+    assert by_range["h_chunk"] == 1
+    assert by_range["ranges"] == [(n0, min(n0 + width, blocks)) for n0 in range(0, blocks, width)]
+    assert by_range["ws_tiles"] * cake_jit.DS_TILE_BYTES <= budgets["key_blocks"]
+
+
+def test_a_long_sequence_takes_the_documented_ds_workspace(cake_jit):
+    """The gqa module's figure: one 32768-token sequence with 8 query and 2 key/value heads (all of dS^T 16 GiB, one
+    tile more than the default budget holds) runs one key/value head per chunk, an 8 GiB chunk per backward."""
+    dims = dict(total_q=32768, total_k=32768, num_heads_q=8, num_heads_kv=2, num_segments=1, max_seqlen_k=32768)
+    plan = cake_jit.chunk_plan(**dims, budget_bytes=cake_jit.DEFAULT_WORKSPACE_BUDGET)
+
+    assert (plan["key_blocks"], plan["h_chunk"], plan["ranges"]) == (256, 1, [(0, 256)])
+    assert plan["ws_tiles"] * cake_jit.DS_TILE_BYTES == (8 << 30) + cake_jit.DS_TILE_BYTES
 
 
 def test_scratch_layout_is_aligned_and_sized(cake_jit):
