@@ -10,10 +10,11 @@ relative) is three orders below the BF16 errors gated (about 1e-3), and FP64 GEM
 gate is checked to fail an output 2 % off.
 
 Bitwise properties: ``det`` repeats bit for bit, in the same process and in a new one; ``fast`` gives ``det``'s
-``logp`` and, without zero-gradient rows, ``det``'s ``dW``; a no-grad forward gives the training forward's ``logp``; a
-frozen input leaves the other gradient's bits unchanged (``det``); a caller-given valid-row count gives the counted
-call's bits; a call on a side stream or on another GPU gives the default stream's bits. Under
-``torch.use_deterministic_algorithms(True)`` ``det`` keeps its bits and a ``fast`` backward raises PyTorch's alert.
+``logp`` and, without zero-gradient rows or a folded short tail, ``det``'s ``dW``; a no-grad forward gives the training
+forward's ``logp``; a frozen input leaves the other gradient's bits unchanged (``det``); a caller-given valid-row count
+gives the counted call's bits (``fast``: ``dW`` unless the counted call folds its short tail); a call on a side stream
+or on another GPU gives the default stream's bits. Under ``torch.use_deterministic_algorithms(True)`` ``det`` keeps its
+bits and a ``fast`` backward raises PyTorch's alert.
 
 Every kernel library is built before the tests (``cake.prebuild("lm_head")``); set ``TVM_FFI_CACHE_DIR`` to keep them.
 """
@@ -29,6 +30,7 @@ import sys
 import time
 import warnings
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 
 import pytest
@@ -347,6 +349,17 @@ def _assert_same_bits(a: dict, b: dict, keys, what: str) -> None:
         assert _same_bits(a[key], b[key]), f"{what}: {key} bits differ"
 
 
+def _fast_folds(p: Problem, chunk_size: int | None = None) -> bool:
+    """Does a ``fast`` call of ``p`` without ``num_valid_rows`` fold its short tail (the package's plan,
+    ``loop_chunks``, over the valid rows, or every row when all are valid)? Its chunks then differ from ``det``'s and
+    from those of the call given the count, so its ``dX`` and ``dW`` may round differently (``logp`` keeps its bits)."""
+    backend = import_module(".cake_backend", ops._package("fast").__name__)
+    chunk = chunk_size or cake.option("lm_head", "cake_lm_head_chunk_size")
+    T = int(p.labels.numel())
+    rows = T if bool(p.valid.all()) else int(p.valid.sum())
+    return len(backend.loop_chunks(T, rows, chunk)) < len(backend.plan_chunks(rows, chunk))
+
+
 def _digests(result: dict) -> dict:
     """sha256 of the bytes of ``logp``, ``dX`` and ``dW``."""
     return {
@@ -362,8 +375,8 @@ def _digests(result: dict) -> dict:
 @pytest.mark.parametrize("T", ROWS, ids=lambda t: f"T{t}")
 @pytest.mark.parametrize(("H", "V"), SHAPES)
 def test_log_probs_match_the_reference(H, V, T, temperature):
-    """Both variants pass the gate; ``det`` repeats bit for bit; ``fast`` has ``det``'s ``logp`` and ``dW`` bits; the
-    no-grad forward has the training forward's ``logp`` bits."""
+    """Both variants pass the gate; ``det`` repeats bit for bit; ``fast`` has ``det``'s ``logp`` and (unless it folds
+    its short tail) ``dW`` bits; the no-grad forward has the training forward's ``logp`` bits."""
     p = _problem(H, V, T, temperature=temperature)
     oracle, baseline = _references(p)
 
@@ -375,7 +388,7 @@ def test_log_probs_match_the_reference(H, V, T, temperature):
 
     fast = _run(p, "fast")
     _assert_gate(fast, oracle, baseline, p, "fast")
-    _assert_same_bits(fast, det, ("logp", "dW"), "fast vs det")
+    _assert_same_bits(fast, det, ("logp",) if _fast_folds(p) else ("logp", "dW"), "fast vs det")
     _assert_same_bits(_run(p, "fast", train_x=False, train_w=False, grad=False), det, ("logp",), "fast no-grad")
 
 
@@ -498,12 +511,14 @@ def test_a_frozen_input_gets_no_gradient_and_leaves_the_other_one(variant):
 @pytest.mark.parametrize("T", [4097, 16231], ids=lambda t: f"T{t}")
 def test_a_given_valid_row_count_gives_the_counted_bits(T, ignore_frac):
     """miles knows the count (every scored row has a target): the call with ``num_valid_rows`` gives the bits of
-    the call that counts on the device (``fast``: ``logp`` and ``dW``)."""
+    the call that counts on the device (``fast``: ``logp``, and ``dW`` unless the counted call folds its short tail,
+    which the call given the count does not)."""
     H, V = SHAPES[2]
     p = _problem(H, V, T, temperature=0.7, ignore_frac=ignore_frac)
     count = int(p.valid.sum())
+    fast_keys = ("logp",) if _fast_folds(p) else ("logp", "dW")
 
-    for variant, keys in (("det", ("logp", "dX", "dW")), ("fast", ("logp", "dW"))):
+    for variant, keys in (("det", ("logp", "dX", "dW")), ("fast", fast_keys)):
         counted = _run(p, variant)
         _assert_same_bits(_run(p, variant, num_valid_rows=count), counted, keys, f"{variant} num_valid_rows")
 
@@ -746,7 +761,8 @@ def test_a_label_at_or_above_v_stops_the_stream(variant):
 
 def test_the_weight_gradient_is_one_bf16_cast_of_the_fp32_accumulation():
     """``dW`` reaches ``W`` as BF16: the round-to-nearest cast of the FP32 ``[V, H]`` accumulator the backward forms
-    (the package's accumulator, uncast), bit for bit (``det``; ``fast`` has ``det``'s ``dW`` bits)."""
+    (the package's accumulator, uncast), bit for bit (``det``; ``fast`` without a folded short tail has ``det``'s
+    ``dW`` bits)."""
     H, V = SHAPES[0]
     p = _problem(H, V, 16231, temperature=0.7)
     out = _run(p, "det")

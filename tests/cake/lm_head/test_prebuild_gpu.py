@@ -1,8 +1,9 @@
 """The prebuild contract of lm_head on a GPU (README, Prebuild): after one ``cake.prebuild("lm_head")`` no call
 compiles, whatever the variant, the temperature (none, a scalar, a per-row tensor, 1.0), the token count (none, one
-row, one chunk, several chunks with a ragged tail), the chunk size, a given valid-row count, ignored or zero-gradient
-rows, frozen inputs or a forward without gradients, at two geometries. ``ROUTES`` lists these call-time paths; each
-runs one forward and backward under ``no_build()`` for each variant."""
+row, one chunk, several chunks with a ragged tail, a short tail ``fast`` folds, one chunk whose logits ``det`` keeps
+for the backward), the chunk size, a given valid-row count, ignored or zero-gradient rows, frozen inputs or a forward
+without gradients, at two geometries. ``ROUTES`` lists these call-time paths; each runs one forward and backward
+under ``no_build()`` for each variant."""
 
 import sys
 
@@ -77,6 +78,8 @@ CASES = {
     "unit temperature": lambda H, V: _fwd_bwd(H, V, 4097, temperature=1.0),
     "one row": lambda H, V: _fwd_bwd(H, V, 1, temperature=0.7, ignore=0.0),
     "one chunk": lambda H, V: _fwd_bwd(H, V, 4095, temperature=0.7),
+    "one chunk, every row valid, no temperature (det keeps the logits)": lambda H, V: _fwd_bwd(H, V, 4095, ignore=0.0),
+    "two chunks, every row valid, a one-row tail (fast folds it)": lambda H, V: _fwd_bwd(H, V, 4097, ignore=0.0),
     "four chunks, zero-gradient rows": lambda H, V: _fwd_bwd(H, V, 16231, zero=0.3),
     "four chunks, zero-gradient rows, temperature": lambda H, V: _fwd_bwd(H, V, 16231, temperature=0.7, zero=0.3),
     "a third of the rows ignored": lambda H, V: _fwd_bwd(H, V, 16384, ignore=0.33),

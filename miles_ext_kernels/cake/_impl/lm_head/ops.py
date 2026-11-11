@@ -14,18 +14,22 @@ forward:
 
 * ``det``: ``cake_lm_head_det_train``. Fixed chunk order, no atomics: ``logp``, ``dX`` and ``dW`` repeat bit for bit
   for a fixed chunk size.
-* ``fast``: ``cake_lm_head_nondet_train``. ``det``'s ``logp`` bits; the dX GEMM of a K-sliced chunk adds its slices
-  into the FP32 accumulator in an unordered reduction, so ``dX`` may differ run to run by FP32 rounding; ``dW`` keeps
-  ``det``'s bits unless a valid row has a zero incoming gradient; a backward of at least the architecture's floor of
-  valid rows (1946 on SM100a and SM107a, 3891 on SM103a) skips the GEMM work of the rows whose incoming gradient is
-  zero (PPO-clipped or masked tokens).
+* ``fast``: ``cake_lm_head_nondet_train``. ``det``'s ``logp`` bits; the dX GEMM of a K-sliced chunk stores each
+  slice's FP32 tile into a slab that a second kernel sums in slice order, so ``dX`` repeats run to run but may differ
+  from ``det``'s by FP32 rounding (the package still makes no run-to-run promise for its gradients). A call without
+  ``num_valid_rows`` of fewer than three chunks of ``T`` rows whose valid rows make two chunks, the second shorter
+  than half a chunk, runs them as one (the short-tail fold: fewer than 1.5 chunks of rows, no FP32 ``[V, H]``
+  accumulator). ``dW`` keeps ``det``'s bits unless the call folds or a valid row has a zero incoming gradient; a
+  backward of at least the architecture's floor of valid rows (1946 on SM100a and SM107a, 3891 on SM103a) skips the
+  GEMM work of the rows whose incoming gradient is zero (PPO-clipped or masked tokens).
 
 Host synchronization. A call without ``num_valid_rows`` reads its count of valid rows back to the host once, in the
 forward (the backward reuses the forward's row index). With ``num_valid_rows`` the forward plans on the given count
-and checks it on the device, without waiting for the device. The packages also keep a host-count path for SM103a
-programs built by CUDA 13.0 (at ``ptxas -O0``, their mitigation of a ptxas 13.0 fault), where each forward waits for
-the device and checks a given count on the host; the runtime builds with CUDA 13.4 or newer, so no call takes it
-(:func:`host_count_path` and its log stay for the packages' rule).
+and checks it on the device, without waiting for the device; a ``fast`` call then keeps its chunks of the chunk size
+(no short-tail fold). The packages also keep a host-count path for SM103a programs built by CUDA 13.0 (at ``ptxas
+-O0``, their mitigation of a ptxas 13.0 fault), where each forward waits for the device and checks a given count on
+the host; the runtime builds with CUDA 13.4 or newer, so no call takes it (:func:`host_count_path` and its log stay
+for the packages' rule).
 
 Labels. A negative label (``-100`` by convention; every value below 0 alike) marks an ignored row: ``logp`` 0, no
 gradient. A label at or above ``V`` is an error: each call queues the device-side assertion ``max(labels) < V`` ahead
@@ -36,11 +40,20 @@ Deterministic algorithms. A ``fast`` call's backward reads ``torch.are_determini
 runs: with a trainable input it then raises PyTorch's alert (``RuntimeError``) before the package launches anything,
 or, under ``warn_only=True``, warns and runs ``fast``. The forward runs as always and ``det`` never alerts. That is the
 rule of the packages before the mode-word naming; ``cake_lm_head_nondet_train`` itself alerts only before a K-sliced
-dX reduction (under ``warn_only=True`` it then warns a second time), so this module raises the alert for every shape.
+dX reduction, ordered though it is (under ``warn_only=True`` it then warns a second time), so this module raises the
+alert for every shape.
 
-Weight gradient. ``dW`` is BF16, one cast of an FP32 ``[V, H]`` accumulator: during the backward the accumulator
-(``4 * V * H`` bytes) and the BF16 ``dW`` (``2 * V * H`` bytes) are live next to one chunk's BF16 logits. There is no
-FP32 ``dW``: the autograd engine casts a gradient to the dtype of its input, BF16 for ``W``.
+Weight gradient. ``dW`` is BF16, one cast of its FP32 accumulation: during the backward of a call of more than one
+chunk an FP32 ``[V, H]`` accumulator (``4 * V * H`` bytes) and the BF16 ``dW`` (``2 * V * H`` bytes) are live next to
+one chunk's BF16 logits. ``det`` picks its form per call of more than one chunk (the package's automatic memory
+form): when that predicted step peak exceeds the bytes of a head that keeps the BF16 logits of the valid rows
+(``2 * T_v * V + 2 * V * H + 2 * T * H``, less a 2 % margin), the backward recomputes the weight gradient in
+vocabulary blocks within that bound and without the zero-gradient row skip (the same bits on every run; ``dX`` and
+``dW`` keep the other form's bits unless a valid row has a zero incoming gradient). A ``det`` call without a
+temperature or ``num_valid_rows``, of fewer than three chunks of ``T`` rows, whose valid rows fit one chunk and whose
+backward runs no zero-gradient row skip, keeps their BF16 logits (``2 * T_v * V`` bytes) from its forward to its
+backward instead of recomputing them (the same bits). There is no FP32 ``dW``: the autograd engine casts a gradient
+to the dtype of its input, BF16 for ``W``.
 """
 
 from __future__ import annotations
@@ -175,7 +188,8 @@ def log_probs(
         num_valid_rows: the host count of ``labels >= 0`` when the caller knows it (every row valid: ``T``): the
             forward plans on it instead of reading the count back (module docstring, Host synchronization). It is
             checked on the device: a wrong count stops the stream with a device-side assertion. The same bits as
-            without it.
+            without it, but for a ``fast`` call that folds its short tail without the count: its ``dX`` and ``dW``
+            may then round differently (module docstring).
 
     The variant and the chunk size are the configured ones (``--cake-lm-head-variant``,
     ``--cake-lm-head-chunk-size``), read now; ``det``'s bits depend on the chunk size. Raises ``ValueError`` for
@@ -207,8 +221,9 @@ def log_probs(
 def prebuild(*, device: Any = None, max_workers: int | None = None) -> list[Path]:
     """Build every library :func:`log_probs` may launch on ``device``'s architecture (default: the current device):
     every log-probability stage of both variants' programs, with and without a temperature, ``max_workers`` compiles
-    at a time. The programs' candidate-support stages (``support_*``) serve other entries of the packages; no call of
-    :func:`log_probs` launches them, so they are not built.
+    at a time. The programs' other stages serve other entries of the packages: the candidate-support stages
+    (``support_*``, with ``fast``'s accumulating dX slab sum) and ``fast``'s one-pass cross-entropy of the loss entry.
+    No call of :func:`log_probs` launches them, so they are not built.
 
     lm_head takes no model parameters: one program per architecture serves every admissible ``H`` and ``V`` (launch
     scalars), every token count and chunk size. Returns the cache paths, built now or before.
