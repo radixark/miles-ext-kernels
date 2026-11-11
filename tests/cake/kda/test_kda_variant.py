@@ -11,6 +11,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -381,17 +382,23 @@ def test_prebuild_takes_the_head_count_alone(builds):
 
 def test_release_drops_the_entry_pools_and_the_graphs_of_a_loaded_context_parallel_package(monkeypatch):
     cleared = []
+    stubs = {}
     for package in ("cake_kda_det_train_kcp", "cake_kda_nondet_train_kcp"):
-        stub = type(sys)(f"{ops._VENDOR}.{package}.cake_kcp")
+        stub = stubs[package] = type(sys)(f"{ops._VENDOR}.{package}.cake_kcp")
         stub.graph_cache_clear = lambda package=package: cleared.append(package) or 0
         monkeypatch.setitem(sys.modules, stub.__name__, stub)
+    # the workspaces of the calls made without one: the det package's pool, the fast package's clear function
+    det_kcp = stubs["cake_kda_det_train_kcp"]
+    det_kcp._default_pool, det_kcp._default_lock = {("stand-in",): []}, threading.Lock()
+    stubs["cake_kda_nondet_train_kcp"].default_workspace_cache_clear = lambda: cleared.append("fast defaults") or 0
     for backend in (ops.det_backend, ops.fast_backend):
         monkeypatch.setitem(backend._entry_pool, ("stand-in",), [])
 
     cake.release("kda")
 
     assert len(ops.det_backend._entry_pool) == len(ops.fast_backend._entry_pool) == 0
-    assert cleared == ["cake_kda_det_train_kcp", "cake_kda_nondet_train_kcp"]
+    assert det_kcp._default_pool == {}
+    assert cleared == ["cake_kda_det_train_kcp", "cake_kda_nondet_train_kcp", "fast defaults"]
 
 
 _IMPORTS = """

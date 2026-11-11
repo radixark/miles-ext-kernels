@@ -276,12 +276,18 @@ def _clear(module: Any, pool: str, lock: str) -> None:
 
 
 def release() -> None:
-    """Drop the host state the packages keep between calls: the per-stream workspace records of the calls made
-    without a workspace (their device memory is freed when each call returns) and, of a context-parallel package
-    in use, its captured CUDA graphs with their memory pools."""
+    """Drop the state the packages keep between calls: the workspace records of the calls made without a workspace,
+    single-rank and context-parallel (their device memory is freed when each call returns, but the memory pools the
+    ``fast`` context-parallel package keeps its checkpoint sets in), and, of a context-parallel package in use, its
+    captured CUDA graphs with their memory pools."""
     for backend in (det_backend, fast_backend):
         _clear(backend, "_entry_pool", "_entry_lock")
     for package in ("cake_kda_det_train_kcp", "cake_kda_nondet_train_kcp"):
         kcp = sys.modules.get(f"{_VENDOR}.{package}.cake_kcp")
-        if kcp is not None:
-            kcp.graph_cache_clear()
+        if kcp is None:
+            continue
+        kcp.graph_cache_clear()
+        if package == "cake_kda_det_train_kcp":
+            _clear(kcp, "_default_pool", "_default_lock")
+        else:
+            kcp.default_workspace_cache_clear()
