@@ -17,10 +17,13 @@ from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_backend
 
 D = 256
 SCALE = D**-0.5  # the default, as miles runs it
-# the tensors whose bits do not depend on the run (dQ is summed with FP32 atomic adds)
-REPEATABLE = ("out", "lse", "dk", "dv")
-# dQ of two runs of one input: one BF16 rounding step (DQ_RTOL) plus an absolute floor for the FP32 reordering error
-# where partials cancel, DQ_ATOL_FRACTION of the tensor's largest magnitude
+# the tensors whose bits do not depend on the run: all of them (no sum uses atomics)
+REPEATABLE = ("out", "lse", "dq", "dk", "dv")
+# the tensors whose bits do not depend on max_seqlen_k either (it sets the workspace chunks, and with them the dQ
+# rounding)
+BOUND_INDEPENDENT = ("out", "lse", "dk", "dv")
+# dQ of two valid max_seqlen_k of one input: one BF16 rounding step (DQ_RTOL) plus an absolute floor for the FP32
+# reordering error where partials cancel, DQ_ATOL_FRACTION of the tensor's largest magnitude
 DQ_RTOL = 2**-7
 DQ_ATOL_FRACTION = 2**-16
 
@@ -86,6 +89,10 @@ def repeatable(result: dict) -> dict:
     return {name: result[name] for name in REPEATABLE}
 
 
+def bound_independent(result: dict) -> dict:
+    return {name: result[name] for name in BOUND_INDEPENDENT}
+
+
 def digests(result: dict) -> dict[str, str]:
     """sha256 of the bytes of every repeatable tensor."""
     return {
@@ -95,7 +102,7 @@ def digests(result: dict) -> dict[str, str]:
 
 
 def assert_dq_close(got: torch.Tensor, ref: torch.Tensor) -> None:
-    """Two dQ of one input (see DQ_RTOL / DQ_ATOL_FRACTION)."""
+    """Two dQ of one input under two valid ``max_seqlen_k`` (see DQ_RTOL / DQ_ATOL_FRACTION)."""
     floor = DQ_ATOL_FRACTION * float(ref.float().abs().max()) if ref.numel() else 0.0
     torch.testing.assert_close(got, ref, rtol=DQ_RTOL, atol=floor)
 

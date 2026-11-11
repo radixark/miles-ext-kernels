@@ -1,11 +1,12 @@
 """The launch plan of the vendored GQA kernels, without a device (torch-free).
 
-``cake_jit`` (the registry, the grids and the scratch layout; it imports only ``typing``) is loaded by path, so neither
-torch nor the vendored package's loader is imported; ``MIN_CUDA`` comes from the torch-free runtime. Checked: every
-stage ``ops.STAGES`` launches has exactly one library per target architecture, which the oldest toolkit the runtime
-accepts for that architecture builds (``MIN_CUDA``: CUDA 13.4 on every architecture); the forward grid covers every
-tile; the backward grid covers the key blocks of ``max_seqlen_k`` and no more (the ``max_seqlen_k`` contract), or of
-``T_k`` without it; the backward scratch is aligned and sized.
+``cake_jit`` (the registry, the grids, the workspace chunks and the scratch layout; it imports only the standard
+library) is loaded by path, so neither torch nor the vendored package's loader is imported; ``MIN_CUDA`` comes from the
+torch-free runtime. Checked: every stage ``ops.STAGES`` launches has exactly one library per target architecture, which
+the oldest toolkit the runtime accepts for that architecture builds (``MIN_CUDA``: CUDA 13.4 on every architecture);
+the forward grid covers every tile; the backward's workspace chunks and their grids cover every key head and the key
+blocks of ``max_seqlen_k`` and no more (the ``max_seqlen_k`` contract), or of ``T_k`` without it, within the workspace
+budget; the backward scratch is aligned and sized.
 """
 
 import ast
@@ -22,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 PACKAGE_DIR = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "cake_gqa_nondet_train"
 OPS = REPO_ROOT / "miles_ext_kernels" / "cake" / "_impl" / "gqa" / "ops.py"
 # ops.STAGES, the forward and the BF16 dK / dV backward, which is the path the entry point runs
-STAGES = ("fwd", "bwd_pre", "bwd_bf16", "bwd_post")
+STAGES = ("fwd", "bwd_pre", "bwd_plan", "bwd_main_bf16", "bwd_dq")
 # target architecture -> the oldest toolkit the runtime builds it with (README, Install); no library may ask for a
 # newer one, which that toolkit would refuse
 TOOLKIT = dict(MIN_CUDA)
@@ -93,28 +94,57 @@ def test_grids_cover_every_tile(cake_jit):
         assert bound >= fwd_tiles
         # the forward is persistent: any pair count >= 1 covers every tile, capped at one pair per two SMs
         assert cake_jit.grid("fwd", **dims) == (2 * max(1, min(148 // 2, h_q * bound)), 1, 1)
-        # the backward: a CTA pair per (128-key block of the longest segment, key head, segment)
+        # the backward: per workspace chunk, a CTA pair per (128-key block of the chunk, key head, segment); the chunks
+        # cover every key head and the key blocks of the longest segment (of T_k without a bound), rounded up to even
         longest = max(-(-k // cake_jit.BWD_TILE_KEYS) for k in k_lens)
-        gx, gy, gz = cake_jit.grid("bwd_bf16", **dims)
-        assert gx % 2 == 0 and gx // 2 >= longest and (gy, gz) == (h_kv, n)
-        assert cake_jit.grid("bwd_bf16", **dims, max_seqlen_k=max(k_lens)) == (2 * max(1, longest), h_kv, n)
+        plan_dims = {name: value for name, value in dims.items() if name != "sm_count"}
+        for max_k, blocks in ((max(k_lens), longest), (None, -(-dims["total_k"] // cake_jit.BWD_TILE_KEYS))):
+            blocks = max(1, blocks)
+            blocks += blocks & 1
+            # the vendored default, which ops.PoolWorkspace keeps, and a budget that splits most layouts here
+            for budget in (cake_jit.DEFAULT_WORKSPACE_BUDGET, 64 << 20):
+                plan = cake_jit.chunk_plan(**plan_dims, max_seqlen_k=max_k, budget_bytes=budget)
+                assert plan["key_blocks"] == blocks, (max_k, budget, plan)
+                ranges = plan["ranges"]
+                assert [n0 for n0, _ in ranges] == [0] + [n1 for _, n1 in ranges[:-1]] and ranges[-1][1] == blocks
+                assert all(n0 % 2 == 0 and n1 > n0 for n0, n1 in ranges), ranges
+                h_chunk = plan["h_chunk"]
+                assert 1 <= h_chunk <= h_kv
+                # the dS^T workspace stays within the budget unless one key head and two key blocks exceed it
+                assert plan["ws_tiles"] * cake_jit.DS_TILE_BYTES <= budget or (h_chunk, plan["n_chunk"]) == (1, 2)
+                # the grids depend on the chunk's extent only
+                heads = {min(h_chunk, h_kv - h0) for h0 in range(0, h_kv, h_chunk)}
+                for width, hc in {(n1 - n0, hc) for n0, n1 in ranges for hc in heads}:
+                    chunk = dict(chunk_blocks=width, chunk_heads=hc)
+                    assert cake_jit.grid("bwd_main_bf16", **dims, **chunk) == (2 * width, hc, n)
+                    # the dQ GEMM is persistent over the Q-tile pairs of the chunk's head pairs
+                    items = cake_jit.pair_bound(dims["total_q"], n) * hc * (h_q // h_kv // 2)
+                    assert cake_jit.grid("bwd_dq", **dims, **chunk) == (2 * max(1, min(148 // 2, items)), 1, 1)
+        assert cake_jit.pair_bound(dims["total_q"], n) >= sum(-(-q // (2 * cake_jit.BWD_TILE_ROWS)) for q in q_lens)
         rows = cake_jit.rows_pad(dims["total_q"], n)
         assert rows % 128 == 0 and rows >= sum(-(-2 * q // 128) * 128 for q in q_lens)
         assert cake_jit.grid("bwd_pre", **dims) == (rows // 32, h_q // 2, 1)
-        assert cake_jit.grid("bwd_post", **dims) == (rows // 64, h_q // 2, 1)
+        assert cake_jit.grid("bwd_plan", **dims) == (1, 1, 1)
 
 
-@pytest.mark.parametrize("longest", [128, 129, 1024, 1920, 2048])
+@pytest.mark.parametrize("longest", [128, 129, 1024, 1792, 1793, 1920, 2048])
 def test_the_backward_grid_covers_the_key_blocks_of_max_seqlen_k_only(cake_jit, longest):
-    """Why ``max_seqlen_k`` is a contract: the grid has the key blocks of the value given, so a segment with more keys
-    than that has key blocks no CTA pair visits (their dK / dV are never written)."""
-    dims = dict(total_q=8 * 2048, total_k=8 * 2048, num_heads_q=16, num_heads_kv=2, num_segments=8, sm_count=148)
-    blocks = cake_jit.grid("bwd_bf16", **dims, max_seqlen_k=longest)[0] // 2
+    """Why ``max_seqlen_k`` is a contract: the grids have the key blocks of the value given (rounded up to an even
+    count), so a segment with more keys than that has key blocks no CTA pair visits (their dK / dV are never
+    written)."""
+    dims = dict(total_q=8 * 2048, total_k=8 * 2048, num_heads_q=16, num_heads_kv=2, num_segments=8)
+    budget = cake_jit.DEFAULT_WORKSPACE_BUDGET
+    plan = cake_jit.chunk_plan(**dims, max_seqlen_k=longest, budget_bytes=budget)
+    blocks = sum(
+        cake_jit.grid("bwd_main_bf16", **dims, sm_count=148, chunk_blocks=n1 - n0, chunk_heads=plan["h_chunk"])[0] // 2
+        for n0, n1 in plan["ranges"]
+    )
 
-    assert blocks == -(-longest // cake_jit.BWD_TILE_KEYS)
-    assert (blocks * cake_jit.BWD_TILE_KEYS >= 2048) == (longest > 1920)
-    # without a bound the grid covers T_k keys: correct for any segment, with pairs that only retire
-    assert cake_jit.grid("bwd_bf16", **dims)[0] // 2 == 8 * 2048 // cake_jit.BWD_TILE_KEYS
+    assert blocks == plan["key_blocks"] == 2 * -(-longest // (2 * cake_jit.BWD_TILE_KEYS))
+    assert (blocks * cake_jit.BWD_TILE_KEYS >= 2048) == (longest > 1792)
+    # without a bound the grids cover T_k keys: correct for any segment, with pairs that only retire
+    unbounded = cake_jit.chunk_plan(**dims, max_seqlen_k=None, budget_bytes=budget)
+    assert unbounded["key_blocks"] == 8 * 2048 // cake_jit.BWD_TILE_KEYS
 
 
 def test_scratch_layout_is_aligned_and_sized(cake_jit):

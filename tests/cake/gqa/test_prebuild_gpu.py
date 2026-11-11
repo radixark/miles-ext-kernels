@@ -4,7 +4,7 @@
 ``T_k`` bound, the head groups miles runs, keys fewer than queries and empty segments, long keys, no query and no
 key, a softmax scale, the option ``cake_gqa_check_seqlens``, a side stream and the workspace pool turned on (the
 default bound, 0, keeps nothing). The op takes no model parameter. In a fresh process, the libraries a call loads are
-the four ``prebuild`` built, and flashinfer is never imported. Needs a B200 / GB200, B300 / GB300 or R200 and skips
+the five ``prebuild`` built, and flashinfer is never imported. Needs a B200 / GB200, B300 / GB300 or R200 and skips
 elsewhere.
 """
 
@@ -77,7 +77,7 @@ def test_one_prebuild_serves_every_route():
     check_prebuild("gqa", ROUTES)
 
 
-def test_prebuild_returns_the_four_libraries_once_built():
+def test_prebuild_returns_the_five_libraries_once_built():
     from miles_ext_kernels.cake._impl.gqa import ops
 
     paths = cake.prebuild("gqa")
@@ -139,4 +139,4 @@ def test_a_fresh_process_loads_only_the_prebuilt_libraries_and_never_flashinfer(
     )
 
     assert result.returncode == 0, result.stderr[-5000:]
-    assert result.stdout.split() == ["loaded", "4"]
+    assert result.stdout.split() == ["loaded", "5"]
