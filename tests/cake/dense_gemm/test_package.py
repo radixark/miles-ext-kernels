@@ -67,7 +67,7 @@ def _top_level_names(source: str) -> set[str]:
 def test_the_non_deterministic_package_finds_every_name_it_reads_from_the_deterministic_one():
     nondet = VENDOR / "cake_dense_gemm_nondet_train"
     build = json.loads((nondet / "build.json").read_text())
-    assert "cake_dense_gemm_det_train" in build["requires"]["packages"]
+    assert "cake_dense_gemm_det_train" in build["common"]["requires"]["packages"]
     source = (nondet / "cake_backend.py").read_text()
     # the deterministic backend module is bound as ``det`` (``det = deterministic_backend()``, ``det: ModuleType``)
     read = set(re.findall(r"\bdet\.([A-Za-z_]\w*)", source))
