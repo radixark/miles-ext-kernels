@@ -34,7 +34,7 @@ indexer backward (:func:`.ops.indexer_backward`); this call itself has no autogr
   call takes it from torch's caching allocator; a caller-owned uint8 buffer of at least that size may be reused across
   calls on one stream. No call synchronizes with the host.
 
-The package picks one of its 65 (SM100a), 73 (SM103a) or 61 (SM107a) programs per call from ``T``, ``T_kv``, ``S``,
+The package picks one of its 65 (SM100a), 73 (SM103a) or 63 (SM107a) programs per call from ``T``, ``T_kv``, ``S``,
 ``ratio``, ``top_k`` and the SM count, so a new token count mid-run can reach a program not used before. Every library
 of the architecture is therefore built ahead: by ``prebuild("dsa", ..., index_heads=32)``, else by the first call on the
 architecture, unless ``--cake-dsa-lazy-build`` leaves each to its first launch.
@@ -173,7 +173,8 @@ def dsa_indexer_det_topk(
             is already in ``weights``, as in :func:`.ops.indexer_logits`).
         q_causal_offsets: optional int64 ``[S]`` per-segment query offsets (see the module docstring).
         ratio: key compression ratio (``>= 1``).
-        max_seqlen_k: optional host bound on every key segment; selects a finalize program, never a result.
+        max_seqlen_k: optional host bound on every key segment; selects the finalize program and the scan's segment
+            order, never a result.
         workspace: optional caller-owned uint8 buffer of at least :func:`dsa_indexer_det_topk_workspace_size` bytes.
         indices, scores: optional caller-owned int32 / FP32 ``[T, top_k]`` outputs.
 
