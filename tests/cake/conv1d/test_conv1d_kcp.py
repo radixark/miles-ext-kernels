@@ -3,7 +3,8 @@ the CPU: the entry each variant runs and its arguments, the configured variant r
 ``deterministic_mode``), ``det`` for ``fast`` under torch's deterministic algorithms and the FP32 taps of the route.
 Also the contexts the GPU tests pass (the stand-in one and those of the GDN / KDA context-parallel routes this
 checkout vendors): a simulated exchange of their halo tables delivers every history row and every head-row
-derivative to the fragment that reads it. Needs torch and tvm_ffi, not CUDA."""
+derivative to the fragment that reads it, and each carries the partition the ``fast`` route's rank-agreement check
+hashes. Needs torch and tvm_ffi, not CUDA."""
 
 import logging
 import types
@@ -281,3 +282,11 @@ def test_every_context_routes_its_halo_rows(builder, lengths, world_size, layout
                     assert row == -1, (rank, slot, m)
                 else:
                     assert row >= 0 and received[row] == cu[f.doc] + token, (rank, slot, m)
+
+    # the fast route's rank-agreement check hashes each context's partition: its world size, layout, cu_seqlens and
+    # every fragment's doc, off, length, rank and slot
+    assert all(ctx.partition is part for ctx in ctxs)
+    assert int(part.world_size) == world_size and isinstance(part.layout, str)
+    assert [int(c) for c in part.cu_seqlens] == cu
+    for rank, frags in enumerate(part.fragments):
+        assert [(int(f.rank), int(f.slot)) for f in frags] == [(rank, slot) for slot in range(len(frags))]

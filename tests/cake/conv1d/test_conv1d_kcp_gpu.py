@@ -130,13 +130,16 @@ def test_det_matches_the_reference_and_repeats_bitwise(name, lens, cuts, C):
 
 
 @pytest.mark.parametrize("name, lens, cuts, C", ROWS, ids=ROW_IDS)
-def test_det_split_backward_matches_the_reference_and_repeats_bitwise(name, lens, cuts, C):
+def test_det_cooperative_backward_matches_the_reference_and_repeats_bitwise(name, lens, cuts, C):
+    """``det``'s default backward is the ordinary launch (``cooperative=False``); the cooperative one gives its ``y``
+    and ``dx`` bits and a weight gradient of its own order."""
     p = _problem(lens, cuts, C)
-    cooperative = _run(p, "det")
-    split = _run(p, "det", cooperative=False)
-    assert bits_equal(split[0], cooperative[0]) and bits_equal(split[1], cooperative[1])
-    _check_reference(p, split, f"det split {name}")
-    assert _same(_run(p, "det", cooperative=False), split), "the split form differs between runs"
+    split = _run(p, "det")
+    assert _same(_run(p, "det", cooperative=False), split), "the default is not the ordinary launch"
+    cooperative = _run(p, "det", cooperative=True)
+    assert bits_equal(cooperative[0], split[0]) and bits_equal(cooperative[1], split[1])
+    _check_reference(p, cooperative, f"det cooperative {name}")
+    assert _same(_run(p, "det", cooperative=True), cooperative), "the cooperative form differs between runs"
 
 
 @pytest.mark.parametrize("name, lens, cuts, C", ROWS, ids=ROW_IDS)
@@ -261,7 +264,7 @@ def test_side_stream_calls_give_the_default_stream_bits(variant):
     p = _problem((5000, 1003), (1, 2, 4997, 1003), 512)
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
-    forms = [{}, {"cooperative": False}] if variant == "det" else [{}]
+    forms = [{}, {"cooperative": True}] if variant == "det" else [{}]
     for form in forms:
         results = []
         for on_side in (False, True, False, True):
@@ -281,7 +284,7 @@ def test_side_stream_calls_give_the_default_stream_bits(variant):
 
 
 # (row name, launch form) of the det runs a new process repeats
-XPROC_RUNS = (("two-sources", None), ("two-sources", False), ("miles-gdn", None))
+XPROC_RUNS = (("two-sources", None), ("two-sources", True), ("miles-gdn", None))
 _XPROC = """
 import sys
 import torch

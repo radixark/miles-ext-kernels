@@ -19,7 +19,7 @@ from miles_ext_kernels import cake  # noqa: E402
 from miles_ext_kernels.cake._impl.conv1d import ops  # noqa: E402
 from miles_ext_kernels.cake._runtime import config, loader  # noqa: E402
 
-from ._shapes import KCP_CHANNELS, SINGLE_RANK_POINTS  # noqa: E402
+from ._shapes import KCP_CHANNELS, KCP_DOCUMENTS, KCP_LONG_POINT, SINGLE_RANK_POINTS  # noqa: E402
 
 ARCHES = tuple(loader.ARCH_BY_CAPABILITY.values())
 TAPS = (torch.float32, torch.bfloat16)
@@ -260,13 +260,16 @@ def _with_reduce(registry, name, arch, single_rank):
 @pytest.mark.parametrize("taps", TAPS, ids=["fp32-taps", "bf16-taps"])
 def test_prebuild_builds_every_program_a_call_selects(device, monkeypatch, arch, taps):
     """Every program a call of either variant, either SiLU' policy, any channel and token count, single rank or
-    context-parallel, selects on ``arch`` (with its reduce program) is among the libraries ``prebuild`` builds."""
+    context-parallel, selects on ``arch`` (with its reduce program) is among the libraries ``prebuild`` builds; the
+    context-parallel forward's main program is a program of the single-rank forward route of FP32 taps, also for BF16
+    taps (the route widens them)."""
     built = _built(monkeypatch, device, arch, taps)
     assert sorted(built) == sorted(ops.PACKAGES.values())
     bf16 = taps == torch.bfloat16
     for variant, name in ops.PACKAGES.items():
         package = ops._package(variant)
         jit, kcp_jit = package.cake_jit, import_module(".kcp_jit", package.__name__)
+        kcp = import_module(".kcp", package.__name__)
         assert all(library.endswith(f"_{arch}") for library in built[name])
         missing = set()
         for fp32_grad in (False, True):
@@ -283,6 +286,12 @@ def test_prebuild_builds_every_program_a_call_selects(device, monkeypatch, arch,
             for C in (8, 512, 1024, 2560, 8192):
                 for module in kcp_jit.selected_modules(arch, kind, C=C, S=4097):
                     missing |= set(_with_reduce(kcp_jit, module, arch, jit)) - set(built[name])
+        if arch in kcp.FWD_MAIN_ARCHS | kcp.MULTI_FWD_MAIN_ARCHS:
+            assert kcp.FWD_MAIN_ROUTE == jit.forward_route(bias=False, bf16_taps=False)
+            for C in (8, 256, 512, 1024, 2048, 2560, 8192):
+                for S in (5, 4097, 65536, 262401):
+                    for module in jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=C, S=S):
+                        missing |= set(_with_reduce(jit, module, arch, jit)) - set(built[name])
         assert not missing, (variant, sorted(missing))
 
 
@@ -308,6 +317,14 @@ def test_the_prebuild_routes_reach_every_program(arch):
         for kind in kcp_jit.ROUTES[arch]:
             reached = {module for C in KCP_CHANNELS for module in kcp_jit.selected_modules(arch, kind, C=C, S=4097)}
             assert reached == set(kcp_jit.route_modules(arch, kind)), (variant, kind)
+        # the context-parallel forward's main program, which the BF16-taps process of ``test_prebuild_gpu.py`` reaches
+        # through the context-parallel calls only
+        kcp = import_module(".kcp", package.__name__)
+        if arch in kcp.FWD_MAIN_ARCHS | kcp.MULTI_FWD_MAIN_ARCHS:
+            points = [(C, sum(KCP_DOCUMENTS)) for C in KCP_CHANNELS]
+            points.append((KCP_LONG_POINT[0], sum(KCP_LONG_POINT[1])))
+            reached = {module for C, S in points for module in jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=C, S=S)}
+            assert reached == set(jit.route_modules(arch, kcp.FWD_MAIN_ROUTE)), (variant, "kcp main forward")
 
 
 # --- release ---
