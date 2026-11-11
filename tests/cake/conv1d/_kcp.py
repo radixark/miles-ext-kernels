@@ -105,11 +105,11 @@ def _near_equal(total: int, n: int) -> list[tuple[int, int]]:
 def partition_stand_in(cu_seqlens, world_size: int, layout: str = "contiguous", fragments=None):
     """A partition of the pack over ``world_size`` ranks with the fields the tests and the ``fast`` route's
     rank-agreement check read (``world_size``, ``layout``, ``cu_seqlens``, ``fragments[rank]`` of ``doc`` / ``off`` /
-    ``length`` / ``rank`` / ``slot`` in document, then offset order; ``layout`` ``"explicit"`` for ``fragments``):
-    ``layout``
-    ``"contiguous"`` (near-equal token intervals), ``"zigzag"`` (``2 W`` near-equal intervals, rank ``r`` holding
-    ``r`` and ``2 W - 1 - r``), ``"zigzag_per_document"`` (the same per document), or the explicit per-rank
-    ``(doc, off, length)`` tables ``fragments``."""
+    ``length`` / ``rank`` / ``slot`` in document, then offset order).
+
+    ``layout``: ``"contiguous"`` (near-equal token intervals), ``"zigzag"`` (``2 W`` near-equal intervals, rank ``r``
+    holding ``r`` and ``2 W - 1 - r``) or ``"zigzag_per_document"`` (the same per document). ``fragments``: explicit
+    per-rank ``(doc, off, length)`` tables instead; the partition's ``layout`` is then ``"explicit"``."""
     cu = [int(c) for c in cu_seqlens]
     W = int(world_size)
     if fragments is not None:
