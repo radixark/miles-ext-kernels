@@ -6,10 +6,11 @@ https://www.apache.org/licenses/LICENSE-2.0
 SiLU-gated RMSNorm training kernels, forward and backward: ``RMSNorm(x) * weight * SiLU(z)`` over rows of 128, the
 output norm of miles' GDN linear-attention layers.
 
-``det`` sums the weight gradient in a fixed order (bit for bit reproducible); ``fast`` adds its chunk sums with FP64
-atomics (``y``, ``dx`` and ``dz`` are ``det``'s bits, the weight gradient within ``det``'s error bound). miles selects
-the op with ``--linear-attention-output-norm-backend cake``. Importing this module imports neither torch nor the
-implementation (``miles_ext_kernels.cake._impl.gated_rmsnorm``): the entry points load on first access.
+``det`` sums the weight gradient exactly (bit for bit reproducible); ``fast`` picks a faster program by the rows per
+SM (``y``, ``dx`` and ``dz`` repeat bit for bit within one BF16 ulp of FP64; in one band of rows per SM the weight
+gradient is added with FP64 atomics, within ``det``'s error bound). miles selects the op with
+``--linear-attention-output-norm-backend cake``. Importing this module imports neither torch nor the implementation
+(``miles_ext_kernels.cake._impl.gated_rmsnorm``): the entry points load on first access.
 """
 
 from miles_ext_kernels.cake._runtime.spec import OpSpec, lazy_exports

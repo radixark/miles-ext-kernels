@@ -1,12 +1,12 @@
 """gated_rmsnorm's prebuild contract (README, Prebuild): after one ``prebuild``, no call of either variant compiles.
 
 ``ROUTES`` runs one forward + backward per call-time path: the gate read in place and copied at every value-head
-count (12, 16, 32, 48), a 2-D ``[N, 128]`` input, a token sweep (``_shapes.py``) whose row counts reach every forward
-and BF16 backward module the non-deterministic package routes on sm_100a, sm_103a and sm_107a (its short, regular,
-mid, long and extra-long forwards and short, regular, mid and long backwards, as each architecture routes them;
-checked here against the device's SM count and in ``test_prebuild_routes.py`` against every shipped part's), a weight
-without a gradient, and ``fast`` under torch's deterministic algorithms (which runs ``det``). Needs SM100a / SM103a /
-SM107a; skips elsewhere.
+count (12, 16, 32, 48), a 2-D ``[N, 128]`` input, a token sweep (``_shapes.py``) whose row counts and layouts reach
+every forward and BF16 backward module the non-deterministic package selects on sm_100a, sm_103a and sm_107a (its
+tiny, short, pipelined, plain, mid, long and extra-long forwards and its short, exact tiny, fused, repeatable and long
+repeatable backwards, as each architecture's bands select them; checked here against the device's SM count and in
+``test_prebuild_routes.py`` against every shipped part's), a weight without a gradient, and ``fast`` under torch's
+deterministic algorithms (which runs ``det``). Needs SM100a / SM103a / SM107a; skips elsewhere.
 """
 
 import sys
@@ -14,7 +14,7 @@ import sys
 import pytest
 
 from ..helpers import check_prebuild, no_build, requires_arch
-from ._shapes import CALL_ROLES, SHAPES, routed_roles, unreached_roles
+from ._shapes import CALL_ROLES, SHAPES, packed_rows, selected_modules, unreached_roles
 from .inputs import make, reads_in_place, run
 
 OP = "gated_rmsnorm"
@@ -66,8 +66,8 @@ def test_one_prebuild_serves_every_route_of_every_variant():
 
 
 def test_the_token_sweep_reaches_every_row_count_module():
-    """The rows of the routes select every forward and BF16 backward module the non-deterministic package routes on
-    this device (its SM count picks the module); the deterministic package has one module per role."""
+    """The rows of the routes select every forward and BF16 backward module the non-deterministic package selects on
+    this device (its SM count picks the module); the deterministic package has one module per role and layout."""
     import torch
 
     from miles_ext_kernels.cake._impl.gated_rmsnorm import ops
@@ -78,7 +78,7 @@ def test_the_token_sweep_reaches_every_row_count_module():
     sm_count = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
     missing = unreached_roles(jit, arch, sm_count)
 
-    assert set(CALL_ROLES) < set(routed_roles(jit, arch)), f"{arch}: no row-count tier is routed"
+    assert len(selected_modules(jit, arch, sm_count)) > len(CALL_ROLES), f"{arch}: no row-count tier is routed"
     assert missing == [], f"{arch} with {sm_count} SMs: no route reaches {missing}"
 
 
@@ -132,7 +132,26 @@ def test_no_flashinfer_module_is_imported():
 
 
 @pytest.mark.parametrize("name", sorted(SHAPES))
-def test_the_routes_read_the_gate_as_declared(name):
-    tokens, key_heads, value_heads, extra, in_place = SHAPES[name]
+def test_the_routes_read_the_gate_and_the_rows_as_declared(monkeypatch, name):
+    """Each route reads its gate in place or copied as ``SHAPES`` declares, and the non-deterministic package selects
+    its forward and backward modules for the packed or the strided rows ``_shapes.packed_rows`` assumes."""
+    from miles_ext_kernels import cake
+    from miles_ext_kernels.cake._impl.gated_rmsnorm import ops
 
-    assert reads_in_place(make(tokens, key_heads, value_heads, extra)[1]) == in_place
+    tokens, key_heads, value_heads, extra, in_place = SHAPES[name]
+    x, z, w, dy = make(tokens, key_heads, value_heads, extra)
+    package = ops._package("fast")
+    module_for_rows = package.module_for_rows
+    calls = []
+
+    def record(arch, role, rows, sm_count, *, packed=True):
+        calls.append((role, rows, packed))
+        return module_for_rows(arch, role, rows, sm_count, packed=packed)
+
+    monkeypatch.setattr(package, "module_for_rows", record)
+    cake.configure(cake_gated_rmsnorm_variant="fast")
+    run(x, z, w, dy)
+
+    assert reads_in_place(z) == in_place
+    rows = tokens * value_heads
+    assert calls == [(role, rows, packed) for role, packed in zip(CALL_ROLES, packed_rows(tokens, in_place))]

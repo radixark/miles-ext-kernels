@@ -6,9 +6,10 @@ they copy (the projection width, which is the gate's token stride, a multiple of
 16 key / 32 value-head layout of width 12352 and its unaligned twin of width 12360, at 1 to ~32k tokens: ``y``, ``dx``
 and ``dz`` within one BF16 ulp of FP64 and the weight gradient within ``det``'s bound, each gate sensitive to a 2 %
 error; ``det`` bitwise run to run in one process and in a new process; the in-place and the copied gate the same bits;
-``fast``'s ``y``, ``dx`` and ``dz`` bitwise ``det``'s. Also calls alternating between the default and a side stream,
-non-reentrant checkpointing, gradient accumulation, a head split as tensor parallelism makes it (the caller sums the
-weight gradient) and the toolkit check. Needs SM100a /
+``fast`` within the same bounds, its ``y``, ``dx`` and ``dz`` bitwise run to run and ``det``'s bits where its program
+is ``det``'s (the pipelined forwards' ``y``, the fused and the repeatable backwards' ``dx`` and ``dz``). Also calls
+alternating between the default and a side stream, non-reentrant checkpointing, gradient accumulation, a head split as
+tensor parallelism makes it (the caller sums the weight gradient) and the toolkit check. Needs SM100a /
 SM103a / SM107a; skips elsewhere.
 """
 
@@ -20,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from ..helpers import assert_bitwise, assert_repeatable, requires_arch
+from ._shapes import packed_rows
 from .inputs import fp64_reference, make, reads_in_place, run
 
 torch = pytest.importorskip("torch")
@@ -43,6 +45,11 @@ LAYOUTS = (
     (24, 48, 8, False),
 )
 TOKENS = (1, 7, 1031, 32771)
+# the roles of the non-deterministic package whose programs are det's (its documentation): the pipelined forwards
+# give det's y where det's gate does not flush (z above about -87.3; the inputs' z are N(0, 1)), and the fused and the
+# repeatable backwards det's dx and dz
+DET_Y_ROLES = ("fwd_pipe", "fwd_pipe_packed")
+DET_GRAD_ROLES = ("bwd_bf16_fused", "bwd_bf16_rep", "bwd_bf16_rep_long")
 
 
 def configure(variant: str) -> None:
@@ -78,6 +85,29 @@ def pick(result: dict, names=("y", "dx", "dz")) -> dict:
     return {name: result[name] for name in names}
 
 
+def det_bits(tokens: int, value_heads: int, in_place: bool) -> tuple[str, ...]:
+    """The outputs of a ``fast`` call that are ``det``'s bits on this device: ``y`` where the non-deterministic
+    package's forward runs a pipelined program, ``dx`` and ``dz`` where its backward runs the fused or the repeatable
+    one (``cake_jit.module_for_rows`` on the device's SM count)."""
+    from miles_ext_kernels.cake._impl.gated_rmsnorm import ops
+    from miles_ext_kernels.cake._runtime import loader
+
+    jit = ops._package("fast").cake_jit
+    arch = loader.device_arch()
+    sm_count = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    rows = tokens * value_heads
+    fwd_packed, bwd_packed = packed_rows(tokens, in_place)
+    routes = jit.ROUTES[arch]
+    names = ()
+    forward = jit.module_for_rows(arch, "fwd", rows, sm_count, packed=fwd_packed)
+    if forward in {routes.get(r) for r in DET_Y_ROLES}:
+        names += ("y",)
+    backward = jit.module_for_rows(arch, "bwd_bf16", rows, sm_count, packed=bwd_packed)
+    if backward in {routes.get(r) for r in DET_GRAD_ROLES}:
+        names += ("dx", "dz")
+    return names
+
+
 def _layout_id(layout) -> str:
     key_heads, value_heads, extra, in_place = layout
     return f"hk{key_heads}-hv{value_heads}-{'in_place' if in_place else 'copied'}"
@@ -97,10 +127,14 @@ def test_det_and_fast_match_fp64_with_the_gate_in_place_or_copied(tokens, layout
     assert_accurate(det, ref, what="det")
     assert_bitwise(det, run(x, z.contiguous(), w, dy))  # a contiguous gate gives the same bits
     configure("fast")
+    fast = run(x, z, w, dy)
+    assert_accurate(fast, ref, what="fast")
     for _ in range(2):
-        fast = run(x, z, w, dy)
-        assert_bitwise(pick(fast), pick(det))
-        assert dw_misses(fast["dw"], ref["dw"], ref["mag"]) == 0, "fast dw: beyond det's bound"
+        again = run(x, z, w, dy)
+        assert_bitwise(pick(again), pick(fast))
+        assert dw_misses(again["dw"], ref["dw"], ref["mag"]) == 0, "fast dw: beyond det's bound"
+    same = det_bits(tokens, value_heads, in_place)
+    assert_bitwise(pick(fast, same), pick(det, same))
 
 
 _CHILD = """
