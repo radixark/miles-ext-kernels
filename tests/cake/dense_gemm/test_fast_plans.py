@@ -232,6 +232,24 @@ def test_the_documented_accuracy_misses_now_route_to_det(d_out):
     assert on_152["weight_grad"] is None
 
 
+def test_the_stream_k_table_holds_every_row_of_the_deterministic_weight_gradient_table():
+    # fast_projection_programs reports None as det's plan and bits: the package's entry point reads its stream-K
+    # table before K1_WGRAD_DET_RULES_BY_SM, so a row of that table runs the stream-K program while that table holds it
+    backend, jit = ops._vendored_fast()
+    det_rules = backend.K1_WGRAD_DET_RULES_BY_SM
+    assert det_rules
+    for (arch, sm_count), rows in det_rules.items():
+        stream_k = backend.K1_WGRAD_SK_RULES_BY_SM.get((arch, sm_count), {})
+        for d_in, d_out, tokens, dtype in rows:
+            template = stream_k.get((d_in, d_out, tokens, dtype))
+            assert template in jit.KERNELS[arch], (arch, sm_count, d_in, d_out, tokens, dtype)
+            if dtype == "bf16":
+                planned = fast_projection_programs(
+                    1, d_in, d_out, weight_layout="out_in", tokens=tokens, arch=arch, sm_count=sm_count
+                )
+                assert planned["weight_grad"] == template, (arch, sm_count, d_in, d_out, tokens)
+
+
 def test_fast_runs_a_program_of_its_own_on_every_part_but_208_sm_r200(table):
     # the variant changes which program runs for some supported input on every part but 208-SM sm_107a parts, where
     # the package's tables keep every case on the deterministic program (no router window, no BF16 split-K row)

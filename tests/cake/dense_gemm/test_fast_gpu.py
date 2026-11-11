@@ -1,7 +1,8 @@
 """The ``fast`` variant of the dense projection GEMMs on the device (configured with
 ``cake.configure(cake_dense_gemm_variant="fast")``), against ``det`` and FP64.
 
-For every case the programs the non-deterministic package launches are the ones ``fast_projection_programs`` /
+For every case the programs the non-deterministic package plans or launches (its split-K plans, and every launch of
+its table programs, such as the stream-K weight gradient) are the ones ``fast_projection_programs`` /
 ``fast_router_programs`` report for the device's architecture and SM count. The forward is bitwise ``det``'s, and so
 is each gradient where ``fast`` runs ``det``'s plan of the deterministic program. Where it runs a program of its own (a
 weight gradient, or a router input gradient on a short-token SIMT program), or the router weight gradient on the
@@ -58,6 +59,10 @@ PROJECTIONS = {
     "glm5-q-absorb-h16-t1001": (16, 192, 512, "in_out", 1001),
     "glm5-value-h16-t2049": (16, 512, 256, "out_in", 2049),
     "dsv4-o-group-g1-t1001": (1, 4096, 1024, "out_in", 1001),
+    # the stream-K weight gradient of K1_WGRAD_SK_RULES_BY_SM: 212-SM sm_107a at 16384 tokens; 148-SM sm_100a and
+    # 152-SM sm_103a parts at 16172 tokens
+    "dsv4-o-group-g1-t16384": (1, 4096, 1024, "out_in", 16384),
+    "dense-5120-1024-t16172": (1, 5120, 1024, "out_in", 16172),
     "dsv4-o-group-g8-t1001": (8, 4096, 1024, "out_in", 1001),
     **{
         f"dense-{d_in}-{d_out}-t{t}": (1, d_in, d_out, "out_in", t)
@@ -76,21 +81,44 @@ def _fast_backend():
     return ops._vendored_fast()[0]
 
 
-def _launched_own_programs() -> set[str]:
-    """The templates of the non-deterministic package's own programs its convenience path planned since its caches
-    were last cleared (an entry without a plan ran the deterministic program)."""
+# the templates of the non-deterministic package's table programs launched since the caches were last cleared
+_PROGRAM_LAUNCHES: set[str] = set()
+
+
+@pytest.fixture(autouse=True)
+def _record_program_launches(monkeypatch):
+    """Record every launch of the package's table programs (forward, input gradient, stream-K weight gradient): the
+    stream-K launch is cached nowhere, and the program cache records modules, not templates."""
     fast = _fast_backend()
-    return {
+    launch = fast._launch_k1_program
+
+    def recording(module, *args, **kwargs):
+        _PROGRAM_LAUNCHES.add(fast.MODULES[module]["template"])
+        return launch(module, *args, **kwargs)
+
+    monkeypatch.setattr(fast, "_launch_k1_program", recording)
+    _PROGRAM_LAUNCHES.clear()
+    yield
+    _PROGRAM_LAUNCHES.clear()
+
+
+def _launched_own_programs() -> set[str]:
+    """The templates of the non-deterministic package's own programs its convenience path planned or launched since
+    its caches were last cleared (an entry without a plan ran the deterministic program)."""
+    fast = _fast_backend()
+    planned = {
         entry.plan.template
         for cache in (fast._K1_ATOMIC_CACHE, fast._K2_ATOMIC_CACHE)
         for entry in cache.values()
         if entry is not None and entry.plan is not None
     }
+    return planned | _PROGRAM_LAUNCHES
 
 
 def _clear_caches() -> None:
     # this package's caches and the deterministic package's
     _fast_backend().cake_dense_gemm_nondet_train_convenience_cache_clear()
+    _PROGRAM_LAUNCHES.clear()
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -291,28 +319,65 @@ def test_router_fast_runs_the_planned_programs_with_det_bits_or_budget(name):
 # fast under torch.use_deterministic_algorithms: it runs det
 
 
+def _cases_fast_changes() -> tuple[str | None, str | None]:
+    """The first case of ``PROJECTIONS`` and of ``ROUTERS`` whose gradients ``fast`` runs on another program or plan
+    than ``det``'s on this part (``None`` where every case keeps ``det``'s)."""
+    projection = next(
+        (
+            name
+            for name, (heads, d_in, d_out, layout, tokens) in PROJECTIONS.items()
+            if fast_projection_programs(
+                heads, d_in, d_out, weight_layout=layout, tokens=tokens, arch=ARCH, sm_count=SM_COUNT
+            )["weight_grad"]
+        ),
+        None,
+    )
+    router = next(
+        (
+            name
+            for name, (experts, hidden, tokens) in ROUTERS.items()
+            if any(fast_router_programs(experts, hidden, tokens=tokens, arch=ARCH, sm_count=SM_COUNT).values())
+            or ops._fast_router_wgrad_splits(experts, hidden, tokens=tokens, arch=ARCH, sm_count=SM_COUNT)
+        ),
+        None,
+    )
+    return projection, router
+
+
 @pytest.mark.parametrize("warn_only", [False, True], ids=["alert", "warn_only"])
 def test_fast_runs_det_under_torch_deterministic_algorithms(caplog, monkeypatch, warn_only):
-    """While torch's deterministic algorithms are enabled (``warn_only=True`` included) a ``fast`` call runs ``det``:
-    ``det``'s bits (``fast`` gives these rows other bits on some parts), one log line, no alert of the
-    non-deterministic package."""
+    """While torch's deterministic algorithms are enabled (``warn_only=True`` included) a ``fast`` call runs ``det``,
+    on cases where ``fast`` otherwise runs another program or plan on this part: no program of the non-deterministic
+    package, ``det``'s bits, one log line, no alert of the non-deterministic package (whose shipped tables plan no
+    launch that alerts)."""
+    projection_name, router_name = _cases_fast_changes()
+    if projection_name is None and router_name is None:
+        pytest.skip(f"fast runs det's programs and plans for every case on {SM_COUNT}-SM {ARCH} parts")
     monkeypatch.setattr(config, "_warned", set())
-    router = _router_leaves(*ROUTERS["router-e256-h5120-t16384"][:2], 16384, SEED)
-    heads, d_in, d_out, layout, tokens = PROJECTIONS["dense-4096-32-t16384"]
-    projection = _projection_leaves(heads, d_in, d_out, layout, tokens, SEED)
-    det = [*_router_step(*router, "det"), *_projection_step(*projection, layout, "det")]
+    steps = []
+    if router_name is not None:
+        router = _router_leaves(*ROUTERS[router_name], SEED)
+        steps.append(lambda variant: _router_step(*router, variant))
+    if projection_name is not None:
+        heads, d_in, d_out, layout, tokens = PROJECTIONS[projection_name]
+        projection = _projection_leaves(heads, d_in, d_out, layout, tokens, SEED)
+        steps.append(lambda variant: _projection_step(*projection, layout, variant))
+    det = [t for step in steps for t in step("det")]
+    _clear_caches()
     previous = torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled()
     torch.use_deterministic_algorithms(True, warn_only=warn_only)
     try:
         with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
             with warnings.catch_warnings(record=True) as seen:
                 warnings.simplefilter("always")
-                fast = [*_router_step(*router, "fast"), *_projection_step(*projection, layout, "fast")]
+                fast = [t for step in steps for t in step("fast")]
+                torch.cuda.synchronize()
     finally:
         torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
 
-    for got, want in zip(fast, det):
-        assert torch.equal(got, want)
+    assert not _launched_own_programs(), (projection_name, router_name)
+    for got, want in zip(fast, det, strict=True):
+        assert torch.equal(got, want), (projection_name, router_name)
     assert not [str(w.message) for w in seen if "cake_dense_gemm_nondet_train" in str(w.message)]
     assert [record.getMessage() for record in caplog.records if "dense_gemm" in record.getMessage()] == [
         "miles_ext_kernels.cake.dense_gemm: the fast variant does not serve calls under "

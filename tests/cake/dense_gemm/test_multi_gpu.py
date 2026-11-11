@@ -82,14 +82,16 @@ def cases():
     return table
 
 
-def _router_wgrad_det_splits() -> int | None:
-    """The split count of ``fast``'s deterministic weight gradient of the router case where the package's tables give
-    one other than ``det``'s (other bits than ``det``'s), else ``None``."""
+def _router_wgrad_det_splits(name: str) -> int | None:
+    """The split count of ``fast``'s deterministic weight gradient of the router case ``name`` where the package's
+    tables give one other than ``det``'s (other bits than ``det``'s), else ``None``."""
     from miles_ext_kernels.cake._impl.dense_gemm import ops
 
     ((capability, sm_count),) = _PARTS
     arch = cake.ARCH_BY_CAPABILITY[capability]
-    return ops._fast_router_wgrad_splits(256, 5120, tokens=16384, arch=arch, sm_count=sm_count)
+    _, _, (x, weight, _), _ = cases()[name]
+    experts, hidden = weight.shape
+    return ops._fast_router_wgrad_splits(experts, hidden, tokens=x.shape[0], arch=arch, sm_count=sm_count)
 
 
 def _step(name, device, variant):
@@ -133,7 +135,7 @@ def test_fast_keeps_det_forward_and_input_gradient_bits_on_both_devices(name):
         fast = _step(name, device, "fast")
 
         assert torch.equal(fast[0], det[0]) and torch.equal(fast[1], det[1]), device
-        if programs["weight_grad"] is None and not (kind == "router" and _router_wgrad_det_splits()):
+        if programs["weight_grad"] is None and not (kind == "router" and _router_wgrad_det_splits(name)):
             assert torch.equal(fast[2], det[2]), device
         elif kind == "router":
             rel = float((fast[2].double() - want).norm() / want.norm())

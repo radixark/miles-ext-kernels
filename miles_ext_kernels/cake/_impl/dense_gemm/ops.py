@@ -30,10 +30,10 @@ and the token count, it runs a program of its own: a split-K, multi-chain, clust
 gradient, a short-token SIMT or a K-order program for the router weight gradient, a short-token SIMT program for the
 router input gradient, and an input-gradient program with ``det``'s bits for the router forward (a 2-D K1 GEMM of the
 input-gradient layout). A split-K program adds its partials in the order they finish, so a gradient whose elements get
-more than two partials is not bit-reproducible run to run; the other programs repeat their bits (those of the
-gradients other bits than ``det``'s). On some rows it runs a program of the deterministic package on another plan than
-``det``'s (a router weight gradient at another split count, a single-head weight gradient on another program): other
-bits than ``det``'s, the same on every run. Every other forward and gradient has the bits of ``det``.
+more than two partials is not bit-reproducible run to run; the other programs give the same bits on every run
+(other bits than ``det``'s for the gradients they serve). In some token windows it runs the deterministic program of
+the router weight gradient at another split count than ``det``'s: other bits than ``det``'s, the same on every run.
+Every other forward and gradient has the bits of ``det``.
 :func:`fast_projection_programs` and :func:`fast_router_programs` say which programs ``fast`` runs for a shape, a token
 count and a device. While ``torch.use_deterministic_algorithms(True)`` is in effect (``warn_only=True`` included) a
 ``fast`` call runs ``det`` and the runtime logs it once: the non-deterministic package raises PyTorch's alert at its
@@ -485,10 +485,10 @@ def fast_projection_programs(
     """Which program :func:`batched_projection` runs under ``fast`` for ``num_heads`` heads of ``d_in -> d_out`` at
     ``tokens`` tokens on a device of ``arch`` (``sm_100a`` / ``sm_103a`` / ``sm_107a``) with ``sm_count`` SMs:
     ``{"forward": ..., "input_grad": ..., "weight_grad": ...}``, each the template of the non-deterministic package's
-    program, or ``None`` where it runs a program of the deterministic package (``det``'s plan and bits, except on a row
-    of the package's ``K1_WGRAD_DET_RULES_BY_SM``, which runs another program of that package: other bits, the same on
-    every run). The weight gradient of a single-head ``out_in`` projection is planned as the package's weight-gradient
-    entry point plans it (its stream-K table, then the transposed-store ``X.T @ G``). Needs torch, no device: the
+    program, or ``None`` where it runs the deterministic program with ``det``'s plan and bits. The weight gradient of a
+    single-head ``out_in`` projection is planned as the package's weight-gradient entry point plans it (its stream-K
+    table, then the transposed-store ``X.T @ G``; the stream-K table holds every row of the package's
+    ``K1_WGRAD_DET_RULES_BY_SM``, so those rows run the stream-K program). Needs torch, no device: the
     package's tables and planner are a function of the views' geometry, the architecture, the SM count and the token
     count."""
     in_out = _in_out(weight_layout)
