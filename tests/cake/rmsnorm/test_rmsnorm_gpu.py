@@ -5,7 +5,7 @@ kernels serve) and small, irregular and 16k-32k token counts, ``weight`` the w o
 and ``dx`` at FlashInfer's tolerance; the FP32 weight gradient within its budget (rel-L2 <= 1e-4, elementwise
 atol = rtol = 1e-4), a BF16 one widened by its rounding; ``det`` bitwise run to run, twice within a process and once
 in a fresh one, also at both sides of the upper edge of its smallest backward window (where it is the kernel that
-sums each ``dw`` column in a fixed row order), and on a side stream; ``fast`` with ``y`` bitwise ``det``'s,
+sums each ``dw`` column in a fixed row order), and on a side stream; ``fast`` with ``y`` and
 ``dx`` reproducible and within one BF16 ulp of ``det``'s; ``fast`` runs ``det`` under torch's deterministic
 algorithms; a backward runs its forward's variant. A width whose oversized shared-memory programs this process cannot
 launch (SM107a at 4096 without a CUDA 13.4 runtime) is refused before any launch: its tests assert that refusal, and
@@ -133,12 +133,15 @@ def test_det_and_fast_match_fp64(H, T, params_dtype):
         assert_close_at_rms(det["dx"], dx_ref, "det dx")
         assert_dw(det["dw"], dw_ref, "det dw")
         fast = run("fast", x, w, dy, params_dtype=params_dtype)
-        assert_bitwise(fast["y"], det["y"])
-        ulp = 2**-7 * torch.maximum(det["dx"].double().abs(), det["dx"].double().square().mean().sqrt())
-        assert ((fast["dx"].double() - det["dx"].double()).abs() <= ulp).all(), "fast dx beyond one BF16 ulp of det"
+        for name in ("y", "dx"):
+            ulp = 2**-7 * torch.maximum(det[name].double().abs(), det[name].double().square().mean().sqrt())
+            beyond = (fast[name].double() - det[name].double()).abs() > ulp
+            assert not beyond.any(), f"fast {name}: {int(beyond.sum())} elements beyond one BF16 ulp of det"
         assert_dw(fast["dw"], dw_ref, "fast dw")
         for _ in range(2):
-            assert_bitwise(run("fast", x, w, dy, params_dtype=params_dtype)["dx"], fast["dx"])
+            again = run("fast", x, w, dy, params_dtype=params_dtype)
+            assert_bitwise(again["y"], fast["y"])
+            assert_bitwise(again["dx"], fast["dx"])
 
 
 def smallest_token_counts(H):

@@ -17,7 +17,8 @@ of such a parameter across the tensor-parallel ranks), builds on the meta device
 token-count window, a main kernel and a fixed-order reduce (``dw`` bitwise reproducible for a given token count and SM
 count) or, at the smallest token counts, one kernel that sums each ``dw`` column in a fixed row order (``dw`` bitwise
 reproducible for a given token count on any SM count). ``fast`` runs the non-deterministic package
-(``_vendor/cake_rmsnorm_nondet_train``): the same forward programs and, per token-count window, a single-kernel
+(``_vendor/cake_rmsnorm_nondet_train``): a forward within one BF16 ulp of ``det``'s (``det``'s smallest-token-count
+SM100a / SM103a forwards take an approximate ``rsqrt``) and, per token-count window, a single-kernel
 backward whose CTAs add their ``dw`` sums into workspace sums in the order they finish (``dw`` not bitwise
 reproducible; ``dx`` reproducible, within one BF16 ulp of ``det``'s) or ``det``'s kernel pair, both rendered in that
 package. A forward reads the configured variant (``--cake-rmsnorm-variant`` through ``miles_ext_kernels.configure``;
