@@ -91,7 +91,7 @@ def test_an_explicit_fast_variant_under_deterministic_mode_is_rejected():
         deterministic_mode=True,
     )
 
-    with pytest.raises(ValueError, match="not bit-reproducible"):
+    with pytest.raises(ValueError, match="not the det variant"):
         miles_ext_kernels.validate_args(args)
 
 
@@ -126,7 +126,7 @@ def test_configure_sets_the_variant_the_next_call_runs(variant):
 
 
 def test_configure_refuses_fast_in_deterministic_mode_and_unknown_variants():
-    with pytest.raises(ValueError, match="not bit-reproducible"):
+    with pytest.raises(ValueError, match="not the det variant"):
         cake.configure(**{DEST: "fast"}, deterministic_mode=True)
     with pytest.raises(ValueError, match="must be one of"):
         cake.configure(**{DEST: "fastest"})

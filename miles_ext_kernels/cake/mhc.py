@@ -12,10 +12,11 @@ pre / post / Sinkhorn coefficients and the stream collapse ``U``), the layer's b
 ``dX`` and FP32 ``dfn``, ``dscale``, ``dbase`` (cast back to the parameters' dtype when they are BF16).
 ``mhc_head(X)`` is the model head's stream mean, bit for bit torch's BF16 ``X.mean(dim=1)`` and its gradient.
 
-Variants: ``det`` sums the parameter gradients in a fixed order; ``fast`` adds the ``dfn`` partials with FP32
-atomics (only the low-order bits of ``dfn`` vary from run to run; the forward and ``dX`` are the ``det`` bits). Each
-variant runs its own head package; the head is elementwise per token, so both give the same bits. miles selects these
-kernels with ``--mhc-backend cake``.
+Variants: ``det`` sums the parameter gradients in a reduction kernel; ``fast`` folds them inside its column-slab
+pass, without one. Both repeat their bits from run to run; the forward, ``dX``, ``dscale`` and ``dbase`` of
+``fast`` are the ``det`` bits, and only the low-order bits of its ``dfn`` can differ. Each variant runs its own head
+package; the head is elementwise per token, so both give the same bits. miles selects these kernels with
+``--mhc-backend cake``.
 
 ``miles_ext_kernels.cake.prebuild("mhc", hidden=..., sinkhorn_iters=...)`` builds both variants and the head of each
 for the model's hidden size and Sinkhorn iteration count; the epsilons are launch arguments and select no library.

@@ -4,10 +4,11 @@ Against an FP64 reference of the same BF16 inputs, on FlashInfer's suite layouts
 multiple of a tile, keys fewer than queries, empty segments, long keys) and on the tensor-parallel-local head pairs
 miles runs (8/2, 6/1, 16/2, 8/1) over a packed micro-batch whose last segment is its alignment pad: the output, the LSE
 and every gradient within FlashInfer's declared budget and twice the measured error, rows that see no key exactly zero.
-The output, the LSE and dK / dV repeat bit for bit run to run (in one process and in a new one), on the default and a
-side stream, for any valid ``max_seqlen_k``; dQ is within its FP32 reordering. Also: the opt-in check of
+Every output repeats bit for bit run to run (in one process and in a new one), on the default and a side stream; the
+output, the LSE and dK / dV also for any valid ``max_seqlen_k`` and for a backward that a small workspace budget runs
+in chunks (key/value heads, then key-block ranges), where dQ is within its FP32 reordering. Also: the opt-in check of
 ``max_seqlen_k`` and the boundaries, document isolation, checkpointing, no device synchronization in steady state, the
-pooled backward scratch and ``release``, the rejected operands, the backward's alert under torch's deterministic
+pooled backward scratch and ``release``, the rejected operands, no alert or warning under torch's deterministic
 algorithms, and two GPUs giving the same bits. Needs a B200 / GB200, B300 / GB300 or R200 and skips elsewhere.
 """
 
@@ -15,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -28,11 +30,13 @@ from torch.utils.checkpoint import checkpoint  # noqa: E402
 import miles_ext_kernels  # noqa: E402
 from miles_ext_kernels import cake  # noqa: E402
 from miles_ext_kernels.cake import gqa  # noqa: E402
+from miles_ext_kernels.cake._impl.gqa import ops  # noqa: E402
 from miles_ext_kernels.cake._runtime import workspace  # noqa: E402
 from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_backend, cake_jit  # noqa: E402
 
 from ..helpers import POOLED, assert_bitwise, assert_rel_rms  # noqa: E402
 from . import _cases as c  # noqa: E402
+from . import _chunks  # noqa: E402
 
 if tuple(torch.cuda.get_device_capability()) not in cake.ARCH_BY_CAPABILITY:
     pytest.skip(
@@ -47,10 +51,13 @@ MIB = 2**20
 # reference of the same BF16 inputs is at most 1.10 times FlashAttention CuTe's (its dedicated head-dim-256 backward)
 # on B300 against the same reference.
 FA4_REL_L2 = {"out": 2.3e-3, "lse": 1.5e-7, "dq": 2.6e-3, "dk": 2.6e-3, "dv": 2.4e-3}
-# The largest error per tensor over LAYOUTS, measured with this package on a B200 (sm_100a, CUDA 13.0) from
-# standard-normal BF16 inputs drawn on the device (other bits than the CPU draws here): out 2.34e-3 and dV 2.35e-3 on
-# long_keys, the LSE 8.04e-8 on keys_fewer_than_queries, dQ 2.62e-3 and dK 2.58e-3 on empty_segments. The test prints
-# the errors on the device it runs on (REL_RMS).
+# The largest error per tensor over LAYOUTS, measured on a B200 (sm_100a, CUDA 13.0) with the previous version of this
+# package (dQ summed with atomics, an older forward kernel) from standard-normal BF16 inputs drawn on the device (other
+# bits than the CPU draws here): out 2.34e-3 and dV 2.35e-3 on long_keys, the LSE 8.04e-8 on keys_fewer_than_queries,
+# dQ 2.62e-3 and dK 2.58e-3 on empty_segments. Not yet re-measured with this version, whose README gives, over larger
+# layouts (15K to 37K query tokens, 24 query and 4 key/value heads) on sm_100a, sm_103a and sm_107a, at most out
+# 2.35e-3, the LSE 7.86e-8, dQ 2.46e-3 and dK / dV 2.45e-3. The test prints the errors on the device it runs on
+# (REL_RMS).
 MEASURED_REL_L2 = {"out": 2.34e-3, "lse": 8.04e-8, "dq": 2.62e-3, "dk": 2.58e-3, "dv": 2.35e-3}
 # FlashInfer's budget, capped at twice the measured error: out, dQ, dK and dV keep FlashInfer's (1.08 to 1.12 times the
 # measured error); the LSE, whose errors (7.0e-8 to 8.0e-8 over the layouts) are at FP32 rounding (2^-24 = 6.0e-8),
@@ -85,7 +92,7 @@ def _ids(layouts):
 def device() -> torch.device:
     dev = torch.device("cuda", torch.cuda.current_device())
     # build every library of the forward and backward before the first checked call
-    assert len(cake.prebuild("gqa", device=dev)) == 4
+    assert len(cake.prebuild("gqa", device=dev)) == len(ops.STAGES)
     return dev
 
 
@@ -115,14 +122,13 @@ def test_matches_the_fp64_reference(layout, device):
 
 
 @pytest.mark.parametrize("layout", MILES_LAYOUTS, ids=_ids(MILES_LAYOUTS))
-def test_out_lse_dk_dv_repeat_bit_for_bit_in_one_process(layout, device):
+def test_every_output_repeats_bit_for_bit_in_one_process(layout, device):
     _, q_lens, k_lens, h_q, h_kv = layout
     x = c.inputs(q_lens, k_lens, h_q, h_kv, device, seed=5)
     first, second = c.run(x), c.run(x)
     torch.cuda.synchronize()
 
     assert_bitwise(c.repeatable(first), c.repeatable(second))
-    c.assert_dq_close(second["dq"], first["dq"])
 
 
 _NEW_PROCESS = """
@@ -138,7 +144,7 @@ print(json.dumps(c.digests(result)))
 
 
 @pytest.mark.parametrize("heads", [(16, 2), (8, 1)], ids=["16_2", "8_1"])
-def test_out_lse_dk_dv_are_the_bits_of_a_new_process(heads, device):
+def test_every_output_has_the_bits_of_a_new_process(heads, device):
     h_q, h_kv = heads
     x = c.inputs(c.MILES_SEGMENTS, c.MILES_SEGMENTS, h_q, h_kv, device, seed=11)
     here = c.digests(c.run(x))
@@ -158,15 +164,51 @@ def test_out_lse_dk_dv_are_the_bits_of_a_new_process(heads, device):
 
 @pytest.mark.parametrize("segments", [c.MILES_SEGMENTS, EQUAL_SEGMENTS], ids=["miles", "equal_2048"])
 def test_any_valid_max_seqlen_k_gives_the_same_out_lse_dk_dv(segments, device):
-    """``max_seqlen_k`` sizes the backward grid only: the exact bound, a larger one and ``T_k`` agree bit for bit."""
+    """``max_seqlen_k`` sizes the backward grids and workspace chunks only: the exact bound, a larger one and ``T_k``
+    agree bit for bit on the output, the LSE and dK / dV, and on dQ up to the rounding the chunks move."""
     x = c.inputs(segments, segments, 16, 2, device, seed=3)
     longest = c.longest_keys(x)
     exact = c.run(x, max_seqlen_k=longest)
     for bound in (longest + 1, 2 * longest, sum(segments)):
         other = c.run(x, max_seqlen_k=bound)
         torch.cuda.synchronize()
-        assert_bitwise(c.repeatable(exact), c.repeatable(other))
+        assert_bitwise(c.bound_independent(exact), c.bound_independent(other))
         c.assert_dq_close(other["dq"], exact["dq"])
+
+
+@pytest.mark.parametrize("split", ["kv_heads", "key_blocks"])
+def test_a_chunked_backward_matches_the_reference_and_the_bits_of_one_chunk(split, device, monkeypatch):
+    """A long micro-batch runs the backward in dS^T workspace chunks at the default budget: one key/value head at a
+    time, then key-block ranges whose dQ partials carry over between chunks. A small ``PoolWorkspace.budget_bytes``
+    forces those chunks on the miles micro-batch through autograd: every output within the budget against the FP64
+    reference and bit for bit run to run; the output, the LSE and dK / dV bit for bit those of one chunk; dQ within
+    its FP32 reordering."""
+    x = c.inputs(c.MILES_SEGMENTS, c.MILES_SEGMENTS, 16, 2, device, seed=17)
+    one_chunk = c.run(x)
+    dims = dict(
+        total_q=x["q"].shape[0],
+        total_k=x["k"].shape[0],
+        num_heads_q=16,
+        num_heads_kv=2,
+        num_segments=len(c.MILES_SEGMENTS),
+        max_seqlen_k=c.longest_keys(x),
+    )
+    budget = _chunks.budgets(cake_jit, **dims)[split]
+    plan = cake_jit.chunk_plan(**dims, budget_bytes=budget)
+    assert plan["h_chunk"] == 1 and (len(plan["ranges"]) > 1) == (split == "key_blocks"), plan
+    monkeypatch.setattr(ops.PoolWorkspace, "budget_bytes", budget)
+    first, second = c.run(x), c.run(x)
+    torch.cuda.synchronize()
+
+    ref = c.reference(x)
+    finite = torch.isfinite(ref["lse"])
+    errors = assert_rel_rms(
+        {**first, "lse": first["lse"][finite]}, {**ref, "lse": ref["lse"][finite]}, BUDGET, detect_scale=1.02
+    )
+    print(f"REL_RMS chunked_{split} " + " ".join(f"{t}={e:.3e}" for t, e in errors.items()))
+    assert_bitwise(c.repeatable(first), c.repeatable(second))
+    assert_bitwise(c.bound_independent(first), c.bound_independent(one_chunk))
+    c.assert_dq_close(first["dq"], one_chunk["dq"])
 
 
 @pytest.mark.parametrize("bound", [1024, 1920, 2047])
@@ -210,9 +252,8 @@ def test_documents_are_isolated(device):
     assert torch.equal(pert["lse"][:, q_other], base["lse"][:, q_other])
     assert torch.equal(pert["dk"][k_other], base["dk"][k_other])
     assert torch.equal(pert["dv"][k_other], base["dv"][k_other])
-    # dQ is reduced with atomic adds: the other segments agree to the reduction-order rounding of two plain runs
-    c.assert_dq_close(again["dq"], base["dq"])
-    c.assert_dq_close(pert["dq"][q_other], base["dq"][q_other])
+    assert torch.equal(again["dq"], base["dq"])
+    assert torch.equal(pert["dq"][q_other], base["dq"][q_other])
 
 
 @pytest.mark.parametrize("reentrant", [False, True], ids=["non_reentrant", "reentrant"])
@@ -240,9 +281,7 @@ def test_checkpointing_matches_eager(reentrant, device):
         del out
     eager = step(False)
     ckpt = step(True)
-    assert torch.equal(ckpt[0], eager[0])
-    c.assert_dq_close(ckpt[1], eager[1])
-    assert torch.equal(ckpt[2], eager[2]) and torch.equal(ckpt[3], eager[3])
+    assert all(torch.equal(got, want) for got, want in zip(ckpt, eager))
 
 
 def test_steady_state_does_not_synchronize_and_the_check_does(device):
@@ -283,30 +322,31 @@ def test_rejects_unsupported_operands(device):
     assert not gqa.is_supported(12, 4) and gqa.is_supported(24, 4)
 
 
-def test_the_backward_raises_the_deterministic_algorithms_alert(device):
-    """No det variant serves the op: under ``torch.use_deterministic_algorithms(True)`` the backward raises PyTorch's
-    alert (dQ is summed with atomics); with ``warn_only=True`` it warns and runs, giving the bits of a plain call."""
+def test_torch_deterministic_algorithms_raise_no_alert_and_change_no_bit(device):
+    """No sum uses atomics: under ``torch.use_deterministic_algorithms(True)``, strict and with ``warn_only=True``,
+    the forward and the backward neither raise nor warn, and give the bits of a plain call."""
     x = c.inputs(c.MILES_SEGMENTS, c.MILES_SEGMENTS, 16, 2, device, seed=11)
     plain = c.run(x)
     torch.cuda.synchronize()
     previous = torch.are_deterministic_algorithms_enabled(), torch.is_deterministic_algorithms_warn_only_enabled()
+    results = []
     try:
-        torch.use_deterministic_algorithms(True)
-        with pytest.raises(RuntimeError, match="does not have a deterministic implementation"):
-            c.run(x)
-        torch.use_deterministic_algorithms(True, warn_only=True)
-        with pytest.warns(UserWarning, match="does not have a deterministic implementation"):
-            warned = c.run(x)
-        torch.cuda.synchronize()
+        for warn_only in (False, True):
+            torch.use_deterministic_algorithms(True, warn_only=warn_only)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                results.append(c.run(x))
+                torch.cuda.synchronize()
+            assert not caught, (warn_only, [f"{w.category.__name__}: {w.message}" for w in caught])
     finally:
         torch.use_deterministic_algorithms(previous[0], warn_only=previous[1])
 
-    assert_bitwise(c.repeatable(plain), c.repeatable(warned))
-    c.assert_dq_close(warned["dq"], plain["dq"])
+    for result in results:
+        assert_bitwise(c.repeatable(plain), c.repeatable(result))
 
 
 def test_default_and_side_stream_calls_agree_bit_for_bit(device, pooled):
-    """The pool keeps one backward scratch per stream: alternating streams changes no bit of out / lse / dK / dV."""
+    """The pool keeps one backward scratch per stream: alternating streams changes no bit of any output."""
     x = c.inputs(c.MILES_SEGMENTS, c.MILES_SEGMENTS, 16, 2, device, seed=9)
     default, side = torch.cuda.current_stream(device), torch.cuda.Stream(device)
     results = []
@@ -318,7 +358,6 @@ def test_default_and_side_stream_calls_agree_bit_for_bit(device, pooled):
 
     for other in results[1:]:
         assert_bitwise(c.repeatable(results[0]), c.repeatable(other))
-        c.assert_dq_close(other["dq"], results[0]["dq"])
     assert workspace.stats()[device.index]["entries"] == 2  # one ("gqa", "bwd_scratch") buffer per stream
 
 

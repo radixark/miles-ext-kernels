@@ -38,7 +38,7 @@ def _version(text: str) -> tuple[int, int]:
 
 
 def test_every_role_is_built_for_its_architectures(roles):
-    assert len(roles) == 50
+    assert len(roles) == 52
     for role, record in roles.items():
         arches = ["sm_107a"] if role.endswith("_multimacro") else ARCHES
         assert sorted(record["arches"]) == arches, role
@@ -47,6 +47,7 @@ def test_every_role_is_built_for_its_architectures(roles):
         "forward_mxfp8_clamped_multimacro",
         "forward_mxfp8_multimacro",
     ]
+    assert sorted(role for role in roles if role.endswith("_noctx")) == ["forward_clamped_noctx", "forward_noctx"]
 
 
 @pytest.mark.parametrize("arch", ARCHES)

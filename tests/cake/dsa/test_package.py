@@ -18,7 +18,7 @@ ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 RECORDED = {"sm_100a": "12.8", "sm_103a": "12.9", "sm_107a": "13.4"}
 # libraries per architecture of each package
 LIBRARIES = {
-    "cake_dsa_indexer_det_train": {"sm_100a": 65, "sm_103a": 73, "sm_107a": 61},
+    "cake_dsa_indexer_det_train": {"sm_100a": 65, "sm_103a": 73, "sm_107a": 63},
     "cake_dsa_sparse_det": {"sm_100a": 43, "sm_103a": 43, "sm_107a": 43},
     "cake_dsa_sparse_attention_nondet_train": {"sm_100a": 14, "sm_103a": 14, "sm_107a": 14},
 }

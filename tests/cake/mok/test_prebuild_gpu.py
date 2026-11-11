@@ -2,13 +2,13 @@
 compiles a library or a Triton kernel, or loads a library the prebuild did not return.
 
 The model of ``ROUTES``: the layout (1, 4), top-2, hidden 512, intermediate 256, with both SwiGLU forms and both
-weight-gradient precisions, as they are left unset (25 libraries). ``ROUTES`` covers every call-time switch of the op:
+weight-gradient precisions, as they are left unset (27 libraries). ``ROUTES`` covers every call-time switch of the op:
 BF16 and MXFP8 routed weights (each case of ``_cases.CASES``: plain and clamped SwiGLU through ``swiglu_limit``,
-context recompute, BF16 and FP32 weight gradients), token counts (0, 1, 777) through the model's workspace, a new
-workspace (256 tokens), another communication-SM split, and the weight quantizer on weights of another layout. Each
-route runs a forward and a backward and builds its adapter inside the check, so creating one is checked too. The same
-model with ``clamped_swiglu=False`` and ``fp32_wgrad=False`` (15 libraries; 12 with ``mxfp8=False``) runs the routes
-of that form only, with adapters of BF16 weight gradients only.
+context recompute, the context-free forward, BF16 and FP32 weight gradients), token counts (0, 1, 777) through the
+model's workspace, a new workspace (256 tokens), another communication-SM split, and the weight quantizer on weights of
+another layout. Each route runs a forward and a backward and builds its adapter inside the check, so creating one is
+checked too. The same model with ``clamped_swiglu=False`` and ``fp32_wgrad=False`` (16 libraries; 13 with
+``mxfp8=False``) runs the routes of that form only, with adapters of BF16 weight gradients only.
 
 The checks do not depend on what this process ran before: ``release('mok')`` drops the loaded kernel modules, so every
 load of a route goes through the vendored ``cake_build.load_library``, which records the library; the in-process
@@ -56,6 +56,9 @@ if triton is not None:
 
 
 DEVICE = torch.device("cuda", torch.cuda.current_device())
+ARCH = cake.device_arch(DEVICE)
+# on SM107a, the one architecture it is built for, each MXFP8 forward loads its multimacro library beside it
+MULTIMACRO = 1 if ARCH == "sm_107a" else 0
 MODEL = _cases.model()
 # the problem of the routes, created by the first route (inside the check), with the adapters of STATE["wgrads"]
 _STATE: dict = {}
@@ -202,10 +205,10 @@ def _check(tmp_path, monkeypatch, model: dict, routes: dict, *, libraries: int, 
 
 
 def test_after_prebuild_no_route_compiles(group, tmp_path, monkeypatch):
-    _check(tmp_path, monkeypatch, MODEL, ROUTES, libraries=25, wgrads=(False, True))
+    _check(tmp_path, monkeypatch, MODEL, ROUTES, libraries=27 + 2 * MULTIMACRO, wgrads=(False, True))
 
 
-@pytest.mark.parametrize("mxfp8,libraries", [(True, 15), (False, 12)], ids=["mxfp8", "bf16"])
+@pytest.mark.parametrize("mxfp8,libraries", [(True, 16 + MULTIMACRO), (False, 13)], ids=["mxfp8", "bf16"])
 def test_after_a_prebuild_of_one_form_its_routes_compile_nothing(group, tmp_path, monkeypatch, mxfp8, libraries):
     """``clamped_swiglu=False`` and ``fp32_wgrad=False`` set: the narrower prebuild still serves the routes of the
     model, adapters included."""

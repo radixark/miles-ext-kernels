@@ -6,10 +6,11 @@ they copy (the projection width, which is the gate's token stride, a multiple of
 16 key / 32 value-head layout of width 12352 and its unaligned twin of width 12360, at 1 to ~32k tokens: ``y``, ``dx``
 and ``dz`` within one BF16 ulp of FP64 and the weight gradient within ``det``'s bound, each gate sensitive to a 2 %
 error; ``det`` bitwise run to run in one process and in a new process; the in-place and the copied gate the same bits;
-``fast``'s ``y``, ``dx`` and ``dz`` bitwise ``det``'s. Also calls alternating between the default and a side stream,
-non-reentrant checkpointing, gradient accumulation, a head split as tensor parallelism makes it (the caller sums the
-weight gradient) and the toolkit check. Needs SM100a /
-SM103a / SM107a; skips elsewhere.
+``fast`` within the same bounds and its ``y``, ``dx`` and ``dz`` bitwise run to run for the same inputs (the
+non-deterministic package's documented repeatability). ``fast``'s bits are not compared with ``det``'s: the variant
+carries no such promise. Also calls alternating between the default and a side stream, non-reentrant checkpointing,
+gradient accumulation, a head split as tensor parallelism makes it (the caller sums the weight gradient) and the
+toolkit check. Needs SM100a / SM103a / SM107a; skips elsewhere.
 """
 
 import os
@@ -97,10 +98,12 @@ def test_det_and_fast_match_fp64_with_the_gate_in_place_or_copied(tokens, layout
     assert_accurate(det, ref, what="det")
     assert_bitwise(det, run(x, z.contiguous(), w, dy))  # a contiguous gate gives the same bits
     configure("fast")
+    fast = run(x, z, w, dy)
+    assert_accurate(fast, ref, what="fast")
     for _ in range(2):
-        fast = run(x, z, w, dy)
-        assert_bitwise(pick(fast), pick(det))
-        assert dw_misses(fast["dw"], ref["dw"], ref["mag"]) == 0, "fast dw: beyond det's bound"
+        again = run(x, z, w, dy)
+        assert_bitwise(pick(again), pick(fast))
+        assert dw_misses(again["dw"], ref["dw"], ref["mag"]) == 0, "fast dw: beyond det's bound"
 
 
 _CHILD = """
@@ -192,8 +195,9 @@ def test_gradients_accumulate_across_micro_batches():
 @pytest.mark.parametrize("variant", ["det", "fast"])
 def test_a_head_split_gives_each_rank_the_gradient_of_its_own_heads(variant):
     """Tensor parallelism gives each rank half the heads and the same weight: each rank's ``y``, ``dx`` and ``dz``
-    are the whole call's bits, its weight gradient covers its own heads only, and the sum over the ranks (the
-    caller's all-reduce) is the layer's."""
+    are the whole call's (``det``: its bits; ``fast``, whose half calls may run other programs: within one BF16 ulp
+    of FP64), its weight gradient covers its own heads only, and the sum over the ranks (the caller's all-reduce) is
+    the layer's."""
     x, z, w, dy = make(1031, 16, 32)
     configure(variant)
     whole = run(x, z, w, dy)
@@ -202,7 +206,11 @@ def test_a_head_split_gives_each_rank_the_gradient_of_its_own_heads(variant):
     for heads in (slice(0, 16), slice(16, 32)):
         half = run(x[:, heads], z[:, heads], w, dy[:, heads])
         half_ref = fp64_reference(dy[:, heads], x[:, heads], z[:, heads], w, EPS)
-        assert_bitwise(pick(half), {name: whole[name][:, heads] for name in ("y", "dx", "dz")})
+        if variant == "det":
+            assert_bitwise(pick(half), {name: whole[name][:, heads] for name in ("y", "dx", "dz")})
+        else:
+            for name in ("y", "dx", "dz"):
+                assert bf16_misses(half[name], half_ref[name]) == 0, f"fast {name}: beyond one BF16 ulp of FP64"
         assert dw_misses(half["dw"], half_ref["dw"], half_ref["mag"]) == 0
         assert dw_misses(half["dw"], ref["dw"], ref["mag"]) > 0, "one rank's weight gradient is not the layer's"
         halves.append((half["dw"].double(), half_ref["dw"]))

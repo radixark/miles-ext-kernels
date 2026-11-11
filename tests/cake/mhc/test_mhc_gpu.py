@@ -8,11 +8,10 @@ autograd entry points miles calls:
   ``dB``, ``dX``: ``|out - ref| <= 1e-2 + 1e-2 |ref|`` on every element; FP32 ``dfn``, ``dscale``, ``dbase``: rel-L2
   <= 1e-5, and ``dscale`` / ``dbase`` per element <= 1e-4 relative (floor: the vector's RMS) -- plus a relative RMS
   gate on every tensor that a 2 % error fails (``assert_rel_rms``), and a second run bitwise identical;
-* ``fast``: ``U``, ``Y``, ``dB`` and ``dX`` bitwise the ``det`` outputs, ``dscale`` / ``dbase`` too outside the
-  ``det`` group-row band (hidden 4096 above 14927 tokens, where ``det`` sums them in another fixed order: there under
-  the FP32 bars), ``dfn`` under the FP32 bars and within FlashInfer's summation-order bound of the ``det`` ``dfn``;
+* ``fast``: ``U``, ``Y``, ``dB``, ``dX``, ``dscale`` and ``dbase`` bitwise the ``det`` outputs, ``dfn`` under the
+  FP32 bars and within FlashInfer's summation-order bound of the ``det`` ``dfn``, and a second run bitwise identical;
 * the variant of a call is the configured one, read when the call runs; deterministic mode without a variant is
-  ``det``; ``fast`` under torch's deterministic algorithms raises torch's alert in its backward;
+  ``det``; either variant under torch's deterministic algorithms runs without torch's alert and gives its bits;
 * BF16 parameters (FSDP2 ``param_dtype=torch.bfloat16``) run the FP32 parameters' bits;
 * a non-default Sinkhorn count and non-default epsilons against FP64;
 * ``det`` repeats bit for bit in a new process, on a side stream and on a second GPU;
@@ -48,7 +47,7 @@ from ._connection import BF16, BF16_OUTPUTS, F32, F64, OUTPUTS, PARAMETER_GRADS,
 pytestmark = requires_arch("sm_100a", "sm_103a", "sm_107a")
 DEVICE = torch.device("cuda", torch.cuda.current_device())
 ARCH = loader.ARCH_BY_CAPABILITY.get(tuple(torch.cuda.get_device_capability(DEVICE)))
-# the hidden sizes the device serves: FlashInfer exports the packages for SM107a at hidden 4096 only
+# the hidden sizes the device serves: FlashInfer exports the nondet package and the heads for SM107a at hidden 4096
 SERVED = (4096,) if ARCH == "sm_107a" else ops.HIDDEN_SIZES
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -109,12 +108,6 @@ def _assert_reference(out: dict, ref: dict, label: str, names=OUTPUTS) -> dict:
     return assert_rel_rms({k: out[k] for k in names}, ref, budget)
 
 
-def _det_group_rows(T: int, hidden: int) -> bool:
-    """Whether ``det`` sums ``dscale`` / ``dbase`` over 8-token group rows at ``T`` (``fast``: its per-CTA form)."""
-    jit = ops._det.cake_jit
-    return jit.bwd_group_rows(T, jit.sm_count(DEVICE.index), ARCH, hidden)
-
-
 def _dfn_factor(T: int, hidden: int) -> float:
     """``F`` of the ``dfn`` summation-order bound at ``T`` (FlashInfer's ``_dfn_factor``): ``2 P`` where the column
     slab sums the partials of the ``P`` chunks ``det`` sums (at most ``P`` FP32 roundings on each side), ``2 max(P_lpt,
@@ -132,13 +125,8 @@ def _dfn_factor(T: int, hidden: int) -> float:
 
 
 def _assert_fast_against_det(fast: dict, det: dict, ref: dict, T: int, hidden: int, label: str) -> None:
-    for k in BF16_OUTPUTS:
+    for k in (*BF16_OUTPUTS, "dscale", "dbase"):
         assert_bitwise(fast[k], det[k])
-    for k in ("dscale", "dbase"):
-        if _det_group_rows(T, hidden):
-            _assert_fp32(fast[k], ref[k], f"{label} {k}", per_element=True)
-        else:
-            assert_bitwise(fast[k], det[k])
     _assert_fp32(fast["dfn"], ref["dfn"], f"{label} dfn", per_element=False)
     bound = _dfn_factor(T, hidden) * FP32_UNIT * DFN_ABS_SLACK * ref["dfn_abs"]
     excess = (fast["dfn"].to(F64) - det["dfn"].to(F64)).abs() - bound
@@ -159,8 +147,7 @@ def test_det_and_fast_match_the_fp64_reference_and_each_other(hidden: int, T: in
     assert_bitwise(connection.tensors(det[1]), connection.tensors(det[0]))  # det: run to run, one process
     for n, run in enumerate(fast):
         _assert_fast_against_det(run, det[0], ref, T, hidden, f"fast run {n} {label}")
-    for k in (*BF16_OUTPUTS, "dscale", "dbase"):
-        assert_bitwise(fast[1][k], fast[0][k])
+    assert_bitwise(connection.tensors(fast[1]), connection.tensors(fast[0]))  # fast: run to run, dfn included
 
 
 @pytest.mark.parametrize("variant", ["det", "fast"])
@@ -175,8 +162,7 @@ def test_another_sinkhorn_count_and_other_epsilons_match_the_fp64_reference(vari
     print(variant, "rel_rms", _assert_reference(runs[0], ref, f"{variant} iters=7", names))
     if variant == "fast":
         _assert_fp32(runs[0]["dfn"], ref["dfn"], "fast iters=7 dfn", per_element=False)
-    for k in names:
-        assert_bitwise(runs[1][k], runs[0][k])
+    assert_bitwise(connection.tensors(runs[1]), connection.tensors(runs[0]))
 
 
 # --- the variant of a call ---
@@ -203,14 +189,14 @@ def test_deterministic_mode_without_a_variant_runs_det_bits() -> None:
     assert_bitwise(connection.tensors(out), connection.tensors(det))
 
 
-def test_fast_under_torch_deterministic_algorithms_raises_torch_alert_and_det_runs() -> None:
+def test_either_variant_under_torch_deterministic_algorithms_runs_without_an_alert_and_gives_its_bits() -> None:
+    """No launch of either variant adds in a run-dependent order, so neither raises torch's alert."""
     i = connection.make_inputs(257, 4096, DEVICE)
-    det = _run(i, "det")
+    bits = {variant: _run(i, variant) for variant in ("det", "fast")}
     torch.use_deterministic_algorithms(True)
     try:
-        assert_bitwise(connection.tensors(_run(i, "det")), connection.tensors(det))
-        with pytest.raises(RuntimeError, match="does not have a deterministic implementation"):
-            _run(i, "fast")
+        for variant, out in bits.items():
+            assert_bitwise(connection.tensors(_run(i, variant)), connection.tensors(out))
     finally:
         torch.use_deterministic_algorithms(False)
 
@@ -230,8 +216,7 @@ def test_bf16_parameters_run_the_bits_of_their_fp32_values(variant: str) -> None
         assert_bitwise(bf16[k], fp32[k])
     for k in PARAMETER_GRADS:
         assert bf16[k].dtype == BF16, (k, bf16[k].dtype)
-        if variant == "det" or k != "dfn":  # fast's dfn varies in its low-order bits from run to run
-            assert_bitwise(bf16[k], fp32[k].to(BF16))
+        assert_bitwise(bf16[k], fp32[k].to(BF16))
 
 
 # --- determinism scope: process, stream, device; release ---
@@ -272,7 +257,6 @@ def test_calls_alternating_between_the_default_and_a_side_stream_repeat_the_bits
     i = connection.make_inputs(2049, 4096, DEVICE)
     first = _run(i, variant, pooled=True)
     side = torch.cuda.Stream(DEVICE)
-    names = OUTPUTS if variant == "det" else (*BF16_OUTPUTS, "dscale", "dbase")
     for _ in range(2):
         side.wait_stream(torch.cuda.current_stream(DEVICE))
         with torch.cuda.stream(side):
@@ -280,7 +264,7 @@ def test_calls_alternating_between_the_default_and_a_side_stream_repeat_the_bits
         torch.cuda.current_stream(DEVICE).wait_stream(side)
         on_default = _run(i, variant, pooled=True)
         for out in (on_side, on_default):
-            assert_bitwise({k: out[k] for k in names}, {k: first[k] for k in names})
+            assert_bitwise(connection.tensors(out), connection.tensors(first))
     assert workspace.stats()[DEVICE.index]["entries"] == 4  # the forward and backward roles on each stream
 
 
@@ -304,7 +288,7 @@ def test_the_pool_holds_the_workspaces_and_release_frees_them_and_the_next_call_
 
 def _bucket_bytes(variant: str, T: int, hidden: int) -> tuple[int, int]:
     """The forward and backward workspace bytes of a ``variant`` call of ``T`` tokens (sized for its power-of-two
-    bucket; the ``fast`` backward holds no ``dfn`` partials, so its buffer is the smaller one)."""
+    bucket)."""
     package = ops._det if variant == "det" else ops._fast
     bucket = 1 << (T - 1).bit_length()
     return tuple(package._workspace_bytes(kind, bucket, DEVICE, hidden) for kind in ("fwd", "bwd"))
@@ -314,26 +298,41 @@ def _bucket_bytes(variant: str, T: int, hidden: int) -> tuple[int, int]:
 @pytest.mark.parametrize("bound", ["off", "one buffer"])
 def test_the_bits_repeat_under_any_pool_bound(variant: str, bound: str) -> None:
     """The bits of a pooled call (``POOLED``) repeat under bound 0: every launch allocates a buffer of its own
-    (undefined content, tickets zeroed); and under one buffer: the forward's and the backward's buffers evict each
-    other on every call."""
+    (undefined content, counter regions zeroed); and under one buffer: the forward's and the backward's buffers evict
+    each other on every call."""
     i = connection.make_inputs(2049, 4096, DEVICE)
     first = _run(i, variant, pooled=True)
     cake.release("mhc")
-    names = OUTPUTS if variant == "det" else (*BF16_OUTPUTS, "dscale", "dbase")
     limit = 0 if bound == "off" else max(_bucket_bytes(variant, 2049, 4096))
     evictions = workspace.stats()[DEVICE.index]["evictions"]
     for _ in range(2):
         cake.configure(cake_mhc_variant=variant, cake_workspace_pool_bytes=limit)
         out = connection.run(i)
-        assert_bitwise({k: out[k] for k in names}, {k: first[k] for k in names})
+        assert_bitwise(connection.tensors(out), connection.tensors(first))
     stats = workspace.stats()[DEVICE.index]
     assert stats["bytes"] <= limit
     if bound == "one buffer":
         assert stats["evictions"] > evictions
 
 
+@pytest.mark.parametrize("variant", ["det", "fast"])
+def test_the_bits_repeat_on_pooled_buffers_filled_with_non_zero_bytes(variant: str) -> None:
+    """Every byte of the variant's pooled forward and backward buffers set to 0xFF before the call (stale counters,
+    as after an interrupted launch): each launch zeroes the counter regions of its layout (the tickets, and the
+    ``fast`` backward's ``slab_cnt``), so the bits repeat."""
+    i = connection.make_inputs(2049, 4096, DEVICE)
+    first = connection.tensors(_run(i, variant, pooled=True))
+    for kind, nbytes in zip(("fwd", "bwd"), _bucket_bytes(variant, 2049, 4096)):
+        workspace.take("mhc", f"{variant}-{kind}", (nbytes,), torch.uint8, DEVICE).fill_(255)
+    hits = workspace.stats()[DEVICE.index]["hits"]
+    again = connection.tensors(_run(i, variant, pooled=True))
+    assert workspace.stats()[DEVICE.index]["hits"] >= hits + 2  # the poisoned buffers served the call
+    assert_bitwise(again, first)
+
+
 def test_a_buffer_of_a_larger_call_serves_a_smaller_one_and_the_bits_repeat() -> None:
-    """The work tickets are the first 256 bytes of every layout, zeroed by every launch."""
+    """The work tickets are the first 256 bytes of every layout (the ``fast`` backward's arrival counts the next 512),
+    zeroed by every launch."""
     small = connection.make_inputs(257, 4096, DEVICE)
     first = connection.tensors(_run(small, "det", pooled=True))
     _run(connection.make_inputs(16263, SERVED[-1], DEVICE), "det", pooled=True)
@@ -352,7 +351,6 @@ def test_interleaved_connections_repeat_the_bits_of_isolated_ones(variant: str) 
     pooled buffers A's forward used, and each backward takes its workspace when it runs."""
     inputs = [connection.make_inputs(T, 4096, DEVICE, connection.SEED + T) for T in (257, 2049)]
     alone = [_run(i, variant) for i in inputs]
-    names = OUTPUTS if variant == "det" else (*BF16_OUTPUTS, "dscale", "dbase")
 
     cake.configure(cake_mhc_variant=variant, **POOLED)
     leaves, prepared = [], []
@@ -369,7 +367,7 @@ def test_interleaved_connections_repeat_the_bits_of_isolated_ones(variant: str) 
     for n, leaf in enumerate(leaves):
         out = {"U": prepared[n][0].detach(), "Y": Ys[n].detach(), "dB": leaf["B"].grad, "dX": leaf["X"].grad}
         out.update(dfn=leaf["fn"].grad, dscale=leaf["scale"].grad, dbase=leaf["base"].grad)
-        assert_bitwise({k: out[k] for k in names}, {k: alone[n][k] for k in names})
+        assert_bitwise(connection.tensors(out), connection.tensors(alone[n]))
 
 
 def _board(device: torch.device) -> tuple:

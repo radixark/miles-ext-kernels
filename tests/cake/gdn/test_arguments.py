@@ -17,7 +17,7 @@ from miles_ext_kernels.cake._runtime import config
 
 RECOMPUTE_REJECTION = "--cake-gdn-recompute-state requires --linear-attention-backend cake"
 VARIANT_REJECTION = "--cake-gdn-variant requires --linear-attention-backend cake"
-DETERMINISTIC_REJECTION = "--cake-gdn-variant fast is not bit-reproducible under --deterministic-mode"
+DETERMINISTIC_REJECTION = "--cake-gdn-variant fast is not the det variant that --deterministic-mode runs"
 
 
 def _parse(argv: list[str], **attributes) -> argparse.Namespace:

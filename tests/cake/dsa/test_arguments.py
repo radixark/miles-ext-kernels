@@ -63,7 +63,7 @@ def test_explicit_fast_is_rejected_under_deterministic_mode():
     # the fast backward sums dK/dV with FP32 atomics in a run-dependent order
     args = _parse(["--cake-dsa-variant", "fast"], dsa_attention_backend="cake", deterministic_mode=True)
 
-    with pytest.raises(ValueError, match="--cake-dsa-variant fast is not bit-reproducible"):
+    with pytest.raises(ValueError, match="--cake-dsa-variant fast is not the det variant"):
         miles_ext_kernels.validate_args(args)
 
 
@@ -125,7 +125,7 @@ def test_an_unconfigured_process_runs_det_with_the_default_options():
 def test_configure_rejects_an_unknown_variant_and_fast_in_deterministic_mode():
     with pytest.raises(ValueError, match="--cake-dsa-variant must be one of"):
         cake.configure(cake_dsa_variant="nd")
-    with pytest.raises(ValueError, match="not bit-reproducible"):
+    with pytest.raises(ValueError, match="not the det variant"):
         cake.configure(cake_dsa_variant="fast", deterministic_mode=True)
     cake.configure(deterministic_mode=True)
     assert cake.variant("dsa") == "det"

@@ -124,7 +124,7 @@ def test_an_explicit_fast_variant_is_kept_outside_deterministic_mode_and_rejecte
 
     # fast sums the dX K slices in a run-dependent order
     args = _served([VARIANT, "fast"], deterministic_mode=True)
-    with pytest.raises(ValueError, match=f"{VARIANT} fast is not bit-reproducible under --deterministic-mode"):
+    with pytest.raises(ValueError, match=f"{VARIANT} fast is not the det variant that --deterministic-mode runs"):
         miles_ext_kernels.validate_args(args)
 
 
@@ -235,7 +235,7 @@ def test_configure_applies_the_resolved_arguments(argv, deterministic, variant, 
 
 
 def test_configure_rejects_fast_under_deterministic_mode_and_an_unknown_variant():
-    with pytest.raises(ValueError, match=f"{VARIANT} fast is not bit-reproducible"):
+    with pytest.raises(ValueError, match=f"{VARIANT} fast is not the det variant"):
         cake.configure(deterministic_mode=True, cake_lm_head_variant="fast")
     with pytest.raises(ValueError, match=f"{VARIANT} must be one of"):
         cake.configure(cake_lm_head_variant="fastest")

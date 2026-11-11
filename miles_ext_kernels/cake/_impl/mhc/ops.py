@@ -27,12 +27,11 @@ The kernels are four vendored FlashInfer packages:
 
 * ``cake_mhc_det_train`` (``det``): forward, and a backward whose ``dfn`` / ``dscale`` / ``dbase`` are fixed-order
   reductions, bitwise reproducible for a token count on a device.
-* ``cake_mhc_nondet_train`` (``fast``): copies of the ``det`` forward programs (the same bits) and a backward that
-  adds the ``dfn`` partial of every (column slab, token chunk) unit with FP32 atomics, so only the summation order of
-  ``dfn`` varies from run to run (each element within ``P <= 32`` FP32 roundings of the fixed-order sum of its
-  per-chunk partials). ``dX`` is the ``det`` bits; ``dscale`` / ``dbase`` are the ``det`` package's per-CTA
-  reduction, whose low-order bits differ from ``det`` at hidden 4096 above 14927 tokens (``det`` sums them over
-  8-token group rows there).
+* ``cake_mhc_nondet_train`` (``fast``): copies of the ``det`` forward programs (the same bits) and a backward whose
+  column-slab pass folds ``dfn``, ``dscale`` and ``dbase`` itself, with no reduction kernel. Every output repeats bit
+  for bit from run to run on a device. ``dX``, ``dscale`` and ``dbase`` are the ``det`` bits; each ``dfn`` element is
+  a compensated FP32 sum of its ``P <= 32`` per-chunk partials in chunk order, where ``det`` sums its partials in
+  FP64, so only the low-order bits of ``dfn`` can differ from ``det``.
 * ``cake_mhc_head_det_train`` (``det``) and ``cake_mhc_head_nondet_train`` (``fast``): the model head's stream mean,
   bit for bit torch's BF16 ``X.mean(dim=1)``, and its gradient. The head is elementwise per token (no cross-token
   reduction, no atomics); the ``fast`` package runs the ``det`` package's kernels under its own library names, so
@@ -42,19 +41,20 @@ Variant. :func:`mhc_prepare` and :func:`mhc_head` read ``config.variant("mhc")``
 ``configure`` set ``fast`` (``validate_args`` resolves miles' default to ``fast`` and deterministic mode to ``det``).
 The handle :func:`mhc_prepare` returns belongs to that variant's package, so :func:`mhc_finish` and the backward of
 the pair run the variant of the prepare; the backward of the head runs the package of its forward. The variant comes
-from the configuration only: under ``torch.use_deterministic_algorithms(True)`` the backward of a ``fast`` connection
-raises PyTorch's alert for an operation without a deterministic implementation, and the head of either variant raises
-nothing (it has no order-varying step).
+from the configuration only: under ``torch.use_deterministic_algorithms(True)`` either variant, and the head of
+either, runs without PyTorch's alert (no launch adds in a run-dependent order).
 
 Workspaces. Each launch of the forward, the statistics replay and the backward takes its workspace from the runtime's
 workspace pool when it runs (roles ``"det-fwd"``, ``"det-bwd"``, ``"fast-fwd"``, ``"fast-bwd"``, sized for the call's
 power-of-two token-count bucket), never from the forward's autograd context; the packages' per-device default
-workspaces stay empty. The kernels' work tickets (the first 256 bytes of a workspace) must be zero before a launch,
-and the content of a workspace is undefined, so every launch zeroes its tickets first (256 bytes, on the stream of the
-call), whether the buffer comes from the pool or is allocated for the call alone (bound ``0``, a request above the
-bound, a CUDA graph capture). One op must not run on two streams at once; calls that alternate between streams use
-one buffer per stream. ``miles_ext_kernels.release()`` frees the pool's buffers, then :func:`release` drops the
-launch plans and the loaded libraries.
+workspaces stay empty. The counter regions at the start of a layout (:data:`_ZEROED_REGIONS`) must be zero before a
+launch: the kernels' work tickets (the first 256 bytes of every layout) and, in the ``fast`` backward, the column
+slab's arrival counts (``slab_cnt``, the 512 bytes after the tickets). The content of a workspace is undefined, so
+every launch zeroes the counter regions of its layout first (on the stream of the call), whether the buffer comes from
+the pool or is allocated for the call alone (bound ``0``, a request above the bound, a CUDA graph capture). One op
+must not run on two streams at once; calls that alternate between streams use one buffer per stream.
+``miles_ext_kernels.release()`` frees the pool's buffers, then :func:`release` drops the launch plans and the loaded
+libraries.
 
 :func:`prebuild` builds every library both variants and their heads may launch at one hidden size and Sinkhorn
 iteration count. The epsilons are launch arguments of every program: they select no library.
@@ -103,6 +103,11 @@ HC_EPS: float = _det.cake_jit.HC_EPS
 SINKHORN_ITERS: int = _det.cake_jit.SINKHORN_ITERS
 SINKHORN_ITERS_MAX: int = _det.cake_jit.SINKHORN_ITERS_MAX
 
+# The workspace regions a launch needs at zero (the packages' uint32 counter regions; the kernels leave them zero, but
+# a pooled or fresh buffer holds undefined bytes): the work tickets of every layout, and the column slab's arrival
+# counts of the ``fast`` backward.
+_ZEROED_REGIONS: tuple[str, ...] = ("ticket", "slab_cnt")
+
 # (cache directory, architecture, hidden, sinkhorn_iters) -> the library paths a prebuild returned
 _built: dict[tuple[str, str, int, int], list[Path]] = {}
 
@@ -140,8 +145,9 @@ def _pooled_workspaces(package: ModuleType, variant: str) -> Callable[..., dict[
             _OP, f"{variant}-{kind}", (nbytes_of(kind, bucket, device, hidden),), torch.uint8, device
         )
         views = views_of(region, kind, rows=rows, device=device, hidden=hidden)
-        if "ticket" in views:  # no region at T == 0
-            views["ticket"].zero_()
+        for name in _ZEROED_REGIONS:  # no region at T == 0; slab_cnt only in the fast backward
+            if name in views:
+                views[name].zero_()
         return views
 
     return workspace_for
@@ -246,9 +252,17 @@ def _route_libraries(jit: ModuleType, arch: str, hidden: int, sinkhorn_iters: in
     return tuple(dict.fromkeys(names))
 
 
-def _head_libraries(jit: ModuleType, arch: str) -> tuple[str, ...]:
-    """The ``build.json`` libraries of a head package's forward and backward on ``arch`` (one per role, any shape)."""
-    return tuple(jit.library_name(jit.ROLES[role], arch) for role in ("head_fwd", "head_bwd"))
+def _head_libraries(jit: ModuleType, arch: str, hidden: int) -> tuple[str, ...]:
+    """The ``build.json`` libraries of a head package's forward and backward of ``hidden`` on ``arch``, whatever the
+    token count: each role's library of ``hidden`` and, where the package routes a small problem to one, its library
+    of any hidden size. ``route_module`` switches between the two once, at a token count, so the most and the fewest
+    tokens name both."""
+    names = [
+        jit.library_name(jit.route_module(arch, role, hidden, rows), arch)
+        for role in ("head_fwd", "head_bwd")
+        for rows in (jit.MAX_TOKENS, 1)
+    ]
+    return tuple(dict.fromkeys(names))
 
 
 def libraries(arch: str, hidden: int, sinkhorn_iters: int) -> dict[str, tuple[str, ...]]:
@@ -275,8 +289,8 @@ def libraries(arch: str, hidden: int, sinkhorn_iters: int) -> dict[str, tuple[st
     return {
         "cake_mhc_det_train": _route_libraries(_det.cake_jit, arch, hidden, sinkhorn_iters),
         "cake_mhc_nondet_train": _route_libraries(_fast.cake_jit, arch, hidden, sinkhorn_iters),
-        "cake_mhc_head_det_train": _head_libraries(_det_head.cake_jit, arch),
-        "cake_mhc_head_nondet_train": _head_libraries(_fast_head.cake_jit, arch),
+        "cake_mhc_head_det_train": _head_libraries(_det_head.cake_jit, arch, hidden),
+        "cake_mhc_head_nondet_train": _head_libraries(_fast_head.cake_jit, arch, hidden),
     }
 
 

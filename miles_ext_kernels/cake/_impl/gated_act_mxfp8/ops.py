@@ -3,7 +3,7 @@ Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 Licensed under the Apache License, Version 2.0.
 https://www.apache.org/licenses/LICENSE-2.0
 
-Fused SwiGLU + MXFP8 quantization, forward and backward, on the vendored package ``cake_gated_act_mxfp8_backend``
+Fused SwiGLU + MXFP8 quantization, forward and backward, on the vendored package ``cake_gated_act_mxfp8_det_train``
 (SM100a / SM103a / SM107a).
 
 ``gated_input [M, 2K]`` holds the gate columns ``[0, K)`` and the up columns ``[K, 2K)``: BF16, contiguous, 32-byte
@@ -30,10 +30,11 @@ disabled orientation's pair is zero-size on the input device. At least one of ``
 kernels do not take (device, dtype, shape, strides, alignment) raises ``ValueError`` or ``TypeError``, another GPU
 ``RuntimeError``.
 
-The entry points are the package's own: it is vendored byte-identical and builds its libraries through
-:mod:`miles_ext_kernels.cake._runtime.loader` (nvcc and tvm-ffi, no FlashInfer). A call runs one program of its route
-(the direction and the output set), chosen by ``M * K`` alone, and every program of a route writes the same bytes: the
-outputs are a function of the inputs only, so they repeat bit for bit run to run (the op's one variant, ``det``).
+The entry points are the package's own (``silu_and_mul_mxfp8_quantize`` and its backward are its
+``cake_gated_act_mxfp8_det_train_forward`` and ``_backward``): it is vendored byte-identical and builds its libraries
+through :mod:`miles_ext_kernels.cake._runtime.loader` (nvcc and tvm-ffi, no FlashInfer). A call runs one program of its
+route (the direction and the output set), chosen by ``M * K`` alone, and every program of a route writes the same bytes:
+the outputs are a function of the inputs only, so they repeat bit for bit run to run (the op's one variant, ``det``).
 ``M`` and ``K`` are runtime arguments, so a new shape never builds a library once :func:`prebuild` has built the
 architecture's. The host reads no tensor and never synchronizes the device; the kernels run on the current torch stream
 and write fresh output tensors (no workspace), so the calls can be captured in a CUDA graph.
@@ -45,10 +46,12 @@ from pathlib import Path
 from typing import Any
 
 from miles_ext_kernels.cake._runtime import loader
-from miles_ext_kernels.cake._vendor import cake_gated_act_mxfp8_backend as backend
-from miles_ext_kernels.cake._vendor.cake_gated_act_mxfp8_backend import (
-    silu_and_mul_mxfp8_quantize,
-    silu_and_mul_mxfp8_quantize_backward,
+from miles_ext_kernels.cake._vendor import cake_gated_act_mxfp8_det_train as backend
+from miles_ext_kernels.cake._vendor.cake_gated_act_mxfp8_det_train import (
+    cake_gated_act_mxfp8_det_train_backward as silu_and_mul_mxfp8_quantize_backward,
+)
+from miles_ext_kernels.cake._vendor.cake_gated_act_mxfp8_det_train import (
+    cake_gated_act_mxfp8_det_train_forward as silu_and_mul_mxfp8_quantize,
 )
 
 __all__ = ["libraries", "prebuild", "release", "silu_and_mul_mxfp8_quantize", "silu_and_mul_mxfp8_quantize_backward"]
