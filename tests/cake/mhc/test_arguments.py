@@ -70,7 +70,7 @@ def test_an_explicit_variant_is_kept_outside_deterministic_mode(variant):
 
 
 def test_explicit_fast_is_rejected_under_deterministic_mode_and_det_is_kept():
-    # fast adds the dfn partials with FP32 atomics: deterministic mode cannot run it
+    # deterministic mode runs det: an explicit fast is refused there
     with pytest.raises(ValueError, match="--cake-mhc-variant fast is not bit-reproducible under --deterministic-mode"):
         miles_ext_kernels.validate_args(_parse([FLAG, "fast"], mhc_backend="cake", deterministic_mode=True))
 

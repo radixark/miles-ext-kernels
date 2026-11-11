@@ -27,12 +27,11 @@ The kernels are four vendored FlashInfer packages:
 
 * ``cake_mhc_det_train`` (``det``): forward, and a backward whose ``dfn`` / ``dscale`` / ``dbase`` are fixed-order
   reductions, bitwise reproducible for a token count on a device.
-* ``cake_mhc_nondet_train`` (``fast``): copies of the ``det`` forward programs (the same bits) and a backward that
-  adds the ``dfn`` partial of every (column slab, token chunk) unit with FP32 atomics, so only the summation order of
-  ``dfn`` varies from run to run (each element within ``P <= 32`` FP32 roundings of the fixed-order sum of its
-  per-chunk partials). ``dX`` is the ``det`` bits; ``dscale`` / ``dbase`` are the ``det`` package's per-CTA
-  reduction, whose low-order bits differ from ``det`` at hidden 4096 above 14927 tokens (``det`` sums them over
-  8-token group rows there).
+* ``cake_mhc_nondet_train`` (``fast``): copies of the ``det`` forward programs (the same bits) and a backward whose
+  column-slab pass folds ``dfn``, ``dscale`` and ``dbase`` itself, with no reduction kernel. Every output repeats bit
+  for bit from run to run on a device. ``dX``, ``dscale`` and ``dbase`` are the ``det`` bits; each ``dfn`` element is
+  a compensated FP32 sum of its ``P <= 32`` per-chunk partials in chunk order, where ``det`` sums its partials in
+  FP64, so only the low-order bits of ``dfn`` can differ from ``det``.
 * ``cake_mhc_head_det_train`` (``det``) and ``cake_mhc_head_nondet_train`` (``fast``): the model head's stream mean,
   bit for bit torch's BF16 ``X.mean(dim=1)``, and its gradient. The head is elementwise per token (no cross-token
   reduction, no atomics); the ``fast`` package runs the ``det`` package's kernels under its own library names, so
@@ -42,9 +41,8 @@ Variant. :func:`mhc_prepare` and :func:`mhc_head` read ``config.variant("mhc")``
 ``configure`` set ``fast`` (``validate_args`` resolves miles' default to ``fast`` and deterministic mode to ``det``).
 The handle :func:`mhc_prepare` returns belongs to that variant's package, so :func:`mhc_finish` and the backward of
 the pair run the variant of the prepare; the backward of the head runs the package of its forward. The variant comes
-from the configuration only: under ``torch.use_deterministic_algorithms(True)`` the backward of a ``fast`` connection
-raises PyTorch's alert for an operation without a deterministic implementation, and the head of either variant raises
-nothing (it has no order-varying step).
+from the configuration only: under ``torch.use_deterministic_algorithms(True)`` either variant, and the head of
+either, runs without PyTorch's alert (no launch adds in a run-dependent order).
 
 Workspaces. Each launch of the forward, the statistics replay and the backward takes its workspace from the runtime's
 workspace pool when it runs (roles ``"det-fwd"``, ``"det-bwd"``, ``"fast-fwd"``, ``"fast-bwd"``, sized for the call's
@@ -246,9 +244,17 @@ def _route_libraries(jit: ModuleType, arch: str, hidden: int, sinkhorn_iters: in
     return tuple(dict.fromkeys(names))
 
 
-def _head_libraries(jit: ModuleType, arch: str) -> tuple[str, ...]:
-    """The ``build.json`` libraries of a head package's forward and backward on ``arch`` (one per role, any shape)."""
-    return tuple(jit.library_name(jit.ROLES[role], arch) for role in ("head_fwd", "head_bwd"))
+def _head_libraries(jit: ModuleType, arch: str, hidden: int) -> tuple[str, ...]:
+    """The ``build.json`` libraries of a head package's forward and backward of ``hidden`` on ``arch``, whatever the
+    token count: each role's library of ``hidden`` and, where the package routes a small problem to one, its library
+    of any hidden size. ``route_module`` switches between the two once, at a token count, so the most and the fewest
+    tokens name both."""
+    names = [
+        jit.library_name(jit.route_module(arch, role, hidden, rows), arch)
+        for role in ("head_fwd", "head_bwd")
+        for rows in (jit.MAX_TOKENS, 1)
+    ]
+    return tuple(dict.fromkeys(names))
 
 
 def libraries(arch: str, hidden: int, sinkhorn_iters: int) -> dict[str, tuple[str, ...]]:
@@ -275,8 +281,8 @@ def libraries(arch: str, hidden: int, sinkhorn_iters: int) -> dict[str, tuple[st
     return {
         "cake_mhc_det_train": _route_libraries(_det.cake_jit, arch, hidden, sinkhorn_iters),
         "cake_mhc_nondet_train": _route_libraries(_fast.cake_jit, arch, hidden, sinkhorn_iters),
-        "cake_mhc_head_det_train": _head_libraries(_det_head.cake_jit, arch),
-        "cake_mhc_head_nondet_train": _head_libraries(_fast_head.cake_jit, arch),
+        "cake_mhc_head_det_train": _head_libraries(_det_head.cake_jit, arch, hidden),
+        "cake_mhc_head_nondet_train": _head_libraries(_fast_head.cake_jit, arch, hidden),
     }
 
 

@@ -2,8 +2,9 @@
 
 Each package's ``cake_jit.py`` is loaded by file path (its module level imports neither torch nor the package): every
 library a route (or a head) can launch on sm_100a / sm_103a / sm_107a has its ``build.json`` entry, and the shapes,
-constants, architectures and per-architecture hidden sizes (4096 only on sm_107a) of the four packages are the ones
-``miles_ext_kernels.cake.mhc`` validates against. The nondet head is the det head's kernels under its own names.
+constants, architectures and per-architecture hidden sizes of the four packages are the ones
+``miles_ext_kernels.cake.mhc`` validates against (on sm_107a the det package serves every hidden size, the other three
+4096 only, so the op serves 4096 there). The nondet head is the det head's kernels under its own names.
 """
 
 import importlib.util
@@ -19,16 +20,22 @@ from miles_ext_kernels.cake._runtime import loader
 VENDOR = Path(cake.__file__).resolve().parent / "_vendor"
 DET, FAST = "cake_mhc_det_train", "cake_mhc_nondet_train"
 DET_HEAD, FAST_HEAD = "cake_mhc_head_det_train", "cake_mhc_head_nondet_train"
-FI_COMMIT = "3bc3b4351f1da01d2613f36d429602da9a6c8c17"
+FI_COMMIT = "c5c39b0e87f027011c86881aa2935a83e1ce53e7"
 FI_PATHS = {
     DET: "flashinfer/experimental/cake/cake_mhc_det_train",
     FAST: "flashinfer/experimental/cake/cake_mhc_nondet_train",
     DET_HEAD: "flashinfer/experimental/cake/cake_mhc_head_det_train",
     FAST_HEAD: "flashinfer/experimental/cake/cake_mhc_head_nondet_train",
 }
-# the hidden sizes every route (and each head) serves on each architecture
+# the hidden sizes the op serves on each architecture: the nondet package's and each head's (det serves them all)
 HIDDEN_BY_ARCH = {"sm_100a": mhc._HIDDEN_SIZES, "sm_103a": mhc._HIDDEN_SIZES, "sm_107a": (4096,)}
 ARCHES = tuple(HIDDEN_BY_ARCH)
+SERVED = {
+    DET: {arch: mhc._HIDDEN_SIZES for arch in ARCHES},
+    FAST: HIDDEN_BY_ARCH,
+    DET_HEAD: HIDDEN_BY_ARCH,
+    FAST_HEAD: HIDDEN_BY_ARCH,
+}
 
 
 def _cake_jit(package: str):
@@ -65,8 +72,8 @@ def test_every_route_library_is_in_the_manifest(package, arch):
     jit = _cake_jit(package)
     libraries = _libraries(package)
 
-    assert jit.supported_hidden_sizes(arch) == HIDDEN_BY_ARCH[arch]
-    for hidden in HIDDEN_BY_ARCH[arch]:
+    assert jit.supported_hidden_sizes(arch) == SERVED[package][arch]
+    for hidden in SERVED[package][arch]:
         for kind in jit.KINDS:
             for record in jit.route_modules(arch, hidden, kind):
                 assert jit.MODULES[record]["hidden"] == hidden
@@ -87,13 +94,23 @@ def test_the_connection_constants_are_the_ones_the_op_validates(package):
 @pytest.mark.parametrize("arch", ARCHES)
 @pytest.mark.parametrize("package", [DET_HEAD, FAST_HEAD])
 def test_the_head_libraries_are_in_the_manifest(package, arch):
+    """Each role's library of every served hidden size (built for that size), and the any-size library of a role the
+    package routes small problems to (built for hidden 0)."""
     jit = _cake_jit(package)
     libraries = _libraries(package)
 
-    assert jit.supported_hidden_sizes(arch) == HIDDEN_BY_ARCH[arch]
+    assert jit.supported_hidden_sizes(arch) == SERVED[package][arch]
     assert jit.STREAMS == mhc._STREAMS
-    for role in ("head_fwd", "head_bwd"):
-        assert jit.library_name(jit.ROLES[role], arch) in libraries
+    for role in ("head_fwd", "head_bwd", "head_bwd_acc"):
+        routes = jit.ROUTES[arch][role]
+        assert tuple(routes) == SERVED[package][arch], (arch, role)
+        for hidden, record in routes.items():
+            assert jit.MODULES[record]["hidden"] == hidden and jit.MODULES[record]["role"] == role
+            assert jit.library_name(record, arch) in libraries, (package, arch, role, hidden)
+        small = jit.SMALL_ROUTES.get(arch, {}).get(role)
+        if small is not None:
+            assert jit.MODULES[small]["hidden"] == 0 and jit.MODULES[small]["role"] == role
+            assert jit.library_name(small, arch) in libraries, (package, arch, role)
 
 
 @pytest.mark.parametrize("package", [DET, FAST])
@@ -103,7 +120,7 @@ def test_another_sinkhorn_count_runs_run_time_count_programs(package, arch):
     (the coefficient pass and the token-owner pass), which a build for the count of record does not need."""
     jit = _cake_jit(package)
 
-    for hidden in HIDDEN_BY_ARCH[arch]:
+    for hidden in SERVED[package][arch]:
         run_time = {
             jit.MODULES[record]["role"]
             for kind in jit.KINDS
@@ -125,14 +142,18 @@ def test_the_nondet_head_is_the_det_heads_kernels_under_its_own_names():
     det_csrc, fast_csrc = VENDOR / DET_HEAD / "csrc", VENDOR / FAST_HEAD / "csrc"
     det_sources = {_stem(path.name): path for path in det_csrc.glob("*.cu")}
     fast_sources = {path.name: path for path in fast_csrc.glob("*.cu")}
-    assert set(fast_sources) == set(det_sources) and len(fast_sources) == 6
+    assert set(fast_sources) == set(det_sources) and len(fast_sources) == 42
     for name, path in fast_sources.items():
         assert path.read_text() == _stem(det_sources[name].read_text()), name
     assert (fast_csrc / "cake_ffi_checks.h").read_bytes() == (det_csrc / "cake_ffi_checks.h").read_bytes()
 
     det_jit, fast_jit = _cake_jit(DET_HEAD), _cake_jit(FAST_HEAD)
     assert json.loads(_stem(json.dumps(det_jit.MODULES))) == json.loads(json.dumps(fast_jit.MODULES))
-    assert {role: _stem(name) for role, name in det_jit.ROLES.items()} == fast_jit.ROLES
+    for table in ("ROUTES", "SMALL_ROUTES"):
+        det_table, fast_table = (json.dumps(getattr(jit, table)) for jit in (det_jit, fast_jit))
+        assert json.loads(_stem(det_table)) == json.loads(fast_table), table
+    assert det_jit.SMALL_ELEMENTS == fast_jit.SMALL_ELEMENTS
+    assert det_jit.SMALL_ELEMENTS_BY_ROUTE == fast_jit.SMALL_ELEMENTS_BY_ROUTE
 
     det_build = json.loads((VENDOR / DET_HEAD / "build.json").read_text())
     fast_build = json.loads((VENDOR / FAST_HEAD / "build.json").read_text())
@@ -142,4 +163,4 @@ def test_the_nondet_head_is_the_det_heads_kernels_under_its_own_names():
     def build_flags(build: dict) -> dict:
         return {_stem(library["name"]): [library[key] for key in flags] for library in build["libraries"]}
 
-    assert build_flags(det_build) == build_flags(fast_build) and len(build_flags(fast_build)) == 9
+    assert build_flags(det_build) == build_flags(fast_build) and len(build_flags(fast_build)) == 26
