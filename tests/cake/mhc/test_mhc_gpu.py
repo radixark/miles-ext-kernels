@@ -298,8 +298,8 @@ def _bucket_bytes(variant: str, T: int, hidden: int) -> tuple[int, int]:
 @pytest.mark.parametrize("bound", ["off", "one buffer"])
 def test_the_bits_repeat_under_any_pool_bound(variant: str, bound: str) -> None:
     """The bits of a pooled call (``POOLED``) repeat under bound 0: every launch allocates a buffer of its own
-    (undefined content, tickets zeroed); and under one buffer: the forward's and the backward's buffers evict each
-    other on every call."""
+    (undefined content, counter regions zeroed); and under one buffer: the forward's and the backward's buffers evict
+    each other on every call."""
     i = connection.make_inputs(2049, 4096, DEVICE)
     first = _run(i, variant, pooled=True)
     cake.release("mhc")
@@ -315,8 +315,24 @@ def test_the_bits_repeat_under_any_pool_bound(variant: str, bound: str) -> None:
         assert stats["evictions"] > evictions
 
 
+@pytest.mark.parametrize("variant", ["det", "fast"])
+def test_the_bits_repeat_on_pooled_buffers_filled_with_non_zero_bytes(variant: str) -> None:
+    """Every byte of the variant's pooled forward and backward buffers set to 0xFF before the call (stale counters,
+    as after an interrupted launch): each launch zeroes the counter regions of its layout (the tickets, and the
+    ``fast`` backward's ``slab_cnt``), so the bits repeat."""
+    i = connection.make_inputs(2049, 4096, DEVICE)
+    first = connection.tensors(_run(i, variant, pooled=True))
+    for kind, nbytes in zip(("fwd", "bwd"), _bucket_bytes(variant, 2049, 4096)):
+        workspace.take("mhc", f"{variant}-{kind}", (nbytes,), torch.uint8, DEVICE).fill_(255)
+    hits = workspace.stats()[DEVICE.index]["hits"]
+    again = connection.tensors(_run(i, variant, pooled=True))
+    assert workspace.stats()[DEVICE.index]["hits"] >= hits + 2  # the poisoned buffers served the call
+    assert_bitwise(again, first)
+
+
 def test_a_buffer_of_a_larger_call_serves_a_smaller_one_and_the_bits_repeat() -> None:
-    """The work tickets are the first 256 bytes of every layout, zeroed by every launch."""
+    """The work tickets are the first 256 bytes of every layout (the ``fast`` backward's arrival counts the next 512),
+    zeroed by every launch."""
     small = connection.make_inputs(257, 4096, DEVICE)
     first = connection.tensors(_run(small, "det", pooled=True))
     _run(connection.make_inputs(16263, SERVED[-1], DEVICE), "det", pooled=True)

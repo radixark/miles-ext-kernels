@@ -389,7 +389,7 @@ def test_both_packages_take_every_launch_workspace_through_the_pooled_resolver()
 
 class _Package:
     """What the pooled resolver reads of a vendored package: 512 bytes per token of the bucket, the 256-byte ticket
-    region first."""
+    region first (the ``det`` layouts and the ``fast`` forward)."""
 
     def __init__(self):
         self.caller = []
@@ -405,6 +405,21 @@ class _Package:
     def _caller_views(self, caller, kind, rows, hidden, device):
         self.caller.append((caller, kind, rows, hidden, device))
         return {"caller": caller}
+
+
+class _FastPackage(_Package):
+    """The ``fast`` package's layouts: its backward holds the column slab's 512-byte arrival counts (``slab_cnt``)
+    right after the tickets, which must be zero before a launch too."""
+
+    @staticmethod
+    def _workspace_bytes(kind, rows, device, hidden):
+        return 1024 * rows
+
+    @staticmethod
+    def _workspace_views(region, kind, *, rows, device, hidden):
+        if kind != "bwd":
+            return _Package._workspace_views(region, kind, rows=rows, device=device, hidden=hidden)
+        return {"ticket": region[:256], "slab_cnt": region[256:768], "data": region[768 : 1024 * rows]}
 
 
 CPU = torch.device("cpu")
@@ -433,6 +448,50 @@ def test_a_pooled_workspace_has_zero_tickets_every_time_the_pool_hands_it_out(po
 
     assert cake.release("mhc") == 8192
     assert not resolve(None, "fwd", 5, 4096, CPU)["ticket"].any()  # a new buffer after release
+
+
+def test_the_resolver_zeroes_every_counter_region_of_the_vendored_layouts():
+    """The regions a launch needs at zero are the uint32 counter regions of the vendored layouts: the tickets of every
+    layout and the ``fast`` backward's ``slab_cnt`` (its first 768 bytes must be zero before a launch). A FlashInfer
+    update that adds or renames a counter region fails here."""
+    counters = {
+        (package.__name__, kind): [region["name"] for region in regions if region["dtype"] == "uint32"]
+        for package in (ops._det, ops._fast)
+        for kind, regions in package.cake_jit.WORKSPACE_REGIONS.items()
+    }
+    det, fast = ops._det.__name__, ops._fast.__name__
+    assert counters == {
+        (det, "fwd"): ["ticket"],
+        (det, "bwd"): ["ticket"],
+        (fast, "fwd"): ["ticket"],
+        (fast, "bwd"): ["ticket", "slab_cnt"],
+    }
+    assert set(ops._ZEROED_REGIONS) == {name for names in counters.values() for name in names}
+    for package in (ops._det, ops._fast):  # the counters lead every layout
+        for kind, regions in package.cake_jit.WORKSPACE_REGIONS.items():
+            names = [region["name"] for region in regions]
+            leading = names[: len(counters[(package.__name__, kind)])]
+            assert leading == counters[(package.__name__, kind)], (package.__name__, kind, names)
+    assert dict(ops._fast._WORKSPACE_VALUES["bwd_finish"]).get("slab_cnt") == "slab_cnt"
+
+
+@pytest.mark.parametrize("bound", [0, 1 << 20])
+def test_a_fast_backward_workspace_has_zero_tickets_and_arrival_counts_every_call(bound):
+    """The pooled buffer of ``fast-bwd`` (or a fresh one at bound 0) holds undefined bytes; the resolver zeroes the
+    tickets and the arrival counts and leaves every other byte alone."""
+    resolve = ops._pooled_workspaces(_FastPackage(), "fast")
+    cake.configure(cake_workspace_pool_bytes=bound)
+    for rows in (3, 3, 5):
+        if bound:  # the pool's buffer of the bucket, filled with non-zero bytes
+            bucket = 1 << (rows - 1).bit_length()
+            workspace.take("mhc", "fast-bwd", (1024 * bucket,), torch.uint8, CPU).fill_(255)
+        views = resolve(None, "bwd", rows, 4096, CPU)
+        assert not views["ticket"].any() and not views["slab_cnt"].any(), rows
+        if bound:
+            assert bool((views["data"] == 255).all()), rows
+        views["slab_cnt"].fill_(7)  # an interrupted launch's leftovers: the next call zeroes them again
+    forward = resolve(None, "fwd", 3, 4096, CPU)
+    assert "slab_cnt" not in forward and not forward["ticket"].any()
 
 
 def test_a_workspace_outside_the_pool_has_its_tickets_zeroed_every_call():

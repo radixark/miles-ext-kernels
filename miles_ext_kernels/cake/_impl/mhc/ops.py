@@ -47,12 +47,14 @@ either, runs without PyTorch's alert (no launch adds in a run-dependent order).
 Workspaces. Each launch of the forward, the statistics replay and the backward takes its workspace from the runtime's
 workspace pool when it runs (roles ``"det-fwd"``, ``"det-bwd"``, ``"fast-fwd"``, ``"fast-bwd"``, sized for the call's
 power-of-two token-count bucket), never from the forward's autograd context; the packages' per-device default
-workspaces stay empty. The kernels' work tickets (the first 256 bytes of a workspace) must be zero before a launch,
-and the content of a workspace is undefined, so every launch zeroes its tickets first (256 bytes, on the stream of the
-call), whether the buffer comes from the pool or is allocated for the call alone (bound ``0``, a request above the
-bound, a CUDA graph capture). One op must not run on two streams at once; calls that alternate between streams use
-one buffer per stream. ``miles_ext_kernels.release()`` frees the pool's buffers, then :func:`release` drops the
-launch plans and the loaded libraries.
+workspaces stay empty. The counter regions at the start of a layout (:data:`_ZEROED_REGIONS`) must be zero before a
+launch: the kernels' work tickets (the first 256 bytes of every layout) and, in the ``fast`` backward, the column
+slab's arrival counts (``slab_cnt``, the 512 bytes after the tickets). The content of a workspace is undefined, so
+every launch zeroes the counter regions of its layout first (on the stream of the call), whether the buffer comes from
+the pool or is allocated for the call alone (bound ``0``, a request above the bound, a CUDA graph capture). One op
+must not run on two streams at once; calls that alternate between streams use one buffer per stream.
+``miles_ext_kernels.release()`` frees the pool's buffers, then :func:`release` drops the launch plans and the loaded
+libraries.
 
 :func:`prebuild` builds every library both variants and their heads may launch at one hidden size and Sinkhorn
 iteration count. The epsilons are launch arguments of every program: they select no library.
@@ -101,6 +103,11 @@ HC_EPS: float = _det.cake_jit.HC_EPS
 SINKHORN_ITERS: int = _det.cake_jit.SINKHORN_ITERS
 SINKHORN_ITERS_MAX: int = _det.cake_jit.SINKHORN_ITERS_MAX
 
+# The workspace regions a launch needs at zero (the packages' uint32 counter regions; the kernels leave them zero, but
+# a pooled or fresh buffer holds undefined bytes): the work tickets of every layout, and the column slab's arrival
+# counts of the ``fast`` backward.
+_ZEROED_REGIONS: tuple[str, ...] = ("ticket", "slab_cnt")
+
 # (cache directory, architecture, hidden, sinkhorn_iters) -> the library paths a prebuild returned
 _built: dict[tuple[str, str, int, int], list[Path]] = {}
 
@@ -138,8 +145,9 @@ def _pooled_workspaces(package: ModuleType, variant: str) -> Callable[..., dict[
             _OP, f"{variant}-{kind}", (nbytes_of(kind, bucket, device, hidden),), torch.uint8, device
         )
         views = views_of(region, kind, rows=rows, device=device, hidden=hidden)
-        if "ticket" in views:  # no region at T == 0
-            views["ticket"].zero_()
+        for name in _ZEROED_REGIONS:  # no region at T == 0; slab_cnt only in the fast backward
+            if name in views:
+                views[name].zero_()
         return views
 
     return workspace_for
