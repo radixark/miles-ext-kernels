@@ -2,11 +2,6 @@
   "ops": {
     "conv1d": {
       "cake_causal_conv1d_det_train": {
-        "allow": {
-          "env_read": [
-            "kcp.py"
-          ]
-        },
         "cake_revision": "17bfcfa574c4daf09b5f1bf4dfbb2cf97e9877a8",
         "files": {
           ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
@@ -126,11 +121,6 @@
         }
       },
       "cake_causal_conv1d_nondet_train": {
-        "allow": {
-          "env_read": [
-            "kcp.py"
-          ]
-        },
         "cake_revision": "8091548fbf58a4d949e214b70da4c931ad8010dc",
         "files": {
           ".gitignore": "e5fd70b13ee2e116ccd3094d1035544ee7f627ed",
@@ -1973,9 +1963,6 @@
       },
       "cake_kda_nondet_train": {
         "allow": {
-          "env_read": [
-            "cake_backend.py"
-          ],
           "flashinfer_import": [
             "cake_backend.py:_jit_nvcc_version"
           ]
