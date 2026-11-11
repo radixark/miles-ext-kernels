@@ -45,7 +45,7 @@ DEVICE = torch.device("cuda", torch.cuda.current_device())
 ARCH = loader.device_arch(DEVICE)
 PACKAGE = ops.backend
 # (M, K, values) of the run-to-run test: three programs of each route on every architecture
-REPEAT_CASES = ((256, 256, "special"), (4096, 2048, "scaled"), (8192, 4096, "normal"))
+REPEAT_CASES = ((256, 256, "special"), (2048, 1024, "scaled"), (8192, 8192, "normal"))
 # |dequantized - FP64| <= |FP64| * (E4M3 half ulp + BF16 rounding and FP32 slack) + the block's E4M3 subnormal half ulp
 E4M3_REL = 2.0**-4
 BF16_FP32_REL = 2.0**-7
@@ -73,8 +73,12 @@ def expected(gated_input, grad_output, *, backward, rowwise, colwise):
 
 def run_program(name, gated_input, grad_output, *, backward, rowwise, colwise):
     """Run the vendored program ``name`` directly, not through the selection rule."""
-    M, K = PACKAGE.check_inputs(gated_input, grad_output if backward else None, rowwise=rowwise, colwise=colwise)
-    outputs = PACKAGE.empty_outputs(gated_input, backward=backward, rowwise=rowwise, colwise=colwise)
+    M, K = PACKAGE.cake_gated_act_mxfp8_det_train_check_inputs(
+        gated_input, grad_output if backward else None, rowwise=rowwise, colwise=colwise
+    )
+    outputs = PACKAGE.cake_gated_act_mxfp8_det_train_empty_outputs(
+        gated_input, backward=backward, rowwise=rowwise, colwise=colwise
+    )
     row_output, col_output, row_scales, col_scales = outputs
     values = {
         "gated_input": gated_input,
@@ -88,7 +92,7 @@ def run_program(name, gated_input, grad_output, *, backward, rowwise, colwise):
     if backward:
         values["grad_output"] = grad_output
     PACKAGE.cake_jit.run_module(name, values, device_index=gated_input.device.index)
-    return PACKAGE.logical_outputs(outputs)
+    return PACKAGE.cake_gated_act_mxfp8_det_train_logical_outputs(outputs)
 
 
 def assert_bytes(outputs, want, *, rowwise, colwise, what):

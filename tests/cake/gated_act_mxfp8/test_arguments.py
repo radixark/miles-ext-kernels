@@ -27,7 +27,7 @@ def test_the_op_is_declared_with_one_det_variant_and_no_miles_selector():
     assert op.cli_choices == ("det",)
     assert op.selected_by == () and op.flags == () and op.validate is None
     assert not op.has_variant_flag
-    assert op.packages == ("cake_gated_act_mxfp8_backend",)
+    assert op.packages == ("cake_gated_act_mxfp8_det_train",)
     assert op.exports == ENTRY_POINTS
     assert gated_act_mxfp8.__all__ == ["OP", *ENTRY_POINTS]
 

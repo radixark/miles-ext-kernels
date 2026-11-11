@@ -24,7 +24,7 @@ from miles_ext_kernels.cake._runtime import loader
 from ._shapes import ENTRY_SHAPES
 
 PACKAGE_DIR = (
-    Path(__file__).resolve().parents[3] / "miles_ext_kernels" / "cake" / "_vendor" / "cake_gated_act_mxfp8_backend"
+    Path(__file__).resolve().parents[3] / "miles_ext_kernels" / "cake" / "_vendor" / "cake_gated_act_mxfp8_det_train"
 )
 _STAND_IN = "_vendored_gated_act_mxfp8"
 
