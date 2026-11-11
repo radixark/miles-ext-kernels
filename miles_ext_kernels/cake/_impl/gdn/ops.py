@@ -78,6 +78,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.utils.deterministic
 
 from miles_ext_kernels.cake._runtime import config, loader, registry, workspace
 
@@ -2159,6 +2160,10 @@ def _vendored_call(
     }
     if variant == "det":
         return package.cake_gdn_det(q, k, v, g, beta, **kwargs)
+    if torch.are_deterministic_algorithms_enabled() and torch.utils.deterministic.fill_uninitialized_memory:
+        # The package's two-stream backward allocates its outputs after it forks the side stream; torch then fills them
+        # on the caller's stream unordered with the side stream's writes. One stream keeps the same bits.
+        kwargs["streams"] = 1
     return package.cake_gdn_nondet(q, k, v, g, beta, **kwargs)
 
 
