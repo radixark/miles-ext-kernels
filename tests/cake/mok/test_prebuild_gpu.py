@@ -56,6 +56,9 @@ if triton is not None:
 
 
 DEVICE = torch.device("cuda", torch.cuda.current_device())
+ARCH = cake.device_arch(DEVICE)
+# on SM107a, the one architecture it is built for, each MXFP8 forward loads its multimacro library beside it
+MULTIMACRO = 1 if ARCH == "sm_107a" else 0
 MODEL = _cases.model()
 # the problem of the routes, created by the first route (inside the check), with the adapters of STATE["wgrads"]
 _STATE: dict = {}
@@ -202,10 +205,10 @@ def _check(tmp_path, monkeypatch, model: dict, routes: dict, *, libraries: int, 
 
 
 def test_after_prebuild_no_route_compiles(group, tmp_path, monkeypatch):
-    _check(tmp_path, monkeypatch, MODEL, ROUTES, libraries=27, wgrads=(False, True))
+    _check(tmp_path, monkeypatch, MODEL, ROUTES, libraries=27 + 2 * MULTIMACRO, wgrads=(False, True))
 
 
-@pytest.mark.parametrize("mxfp8,libraries", [(True, 16), (False, 13)], ids=["mxfp8", "bf16"])
+@pytest.mark.parametrize("mxfp8,libraries", [(True, 16 + MULTIMACRO), (False, 13)], ids=["mxfp8", "bf16"])
 def test_after_a_prebuild_of_one_form_its_routes_compile_nothing(group, tmp_path, monkeypatch, mxfp8, libraries):
     """``clamped_swiglu=False`` and ``fp32_wgrad=False`` set: the narrower prebuild still serves the routes of the
     model, adapters included."""

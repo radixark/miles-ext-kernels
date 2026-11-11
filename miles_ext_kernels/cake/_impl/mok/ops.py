@@ -37,8 +37,9 @@ toolkit. The MXFP8 kernels convert BF16 pairs to E4M3 with ``cvt.rn.satfinite.e4
 FP32 form of the same conversion for an nvcc older than CUDA 13.1, which the runtime's CUDA 13.4 floor never uses.
 
 :func:`prebuild` builds the libraries of a model before its first call: every scheduler layout, top-k, SwiGLU form,
-weight-gradient precision and routed precision the model parameters leave open, the context recompute and every token
-count; with MXFP8 it also compiles the weight quantizer's Triton kernel for the routed weight shape. Prebuild before
+weight-gradient precision and routed precision the model parameters leave open, the BF16 context-free forward, the
+context recompute and every token count; with MXFP8 it also compiles the weight quantizer's Triton kernel for the routed
+weight shape. Prebuild before
 CUDA graph capture: an adapter loads its libraries when it is created (and in ``prepare`` / ``prepare_recompute``).
 """
 
@@ -210,9 +211,8 @@ def prebuild(
     Covered whatever the token counts: the BF16 and MXFP8 forward, the BF16 context-free forward, the context
     recompute, the backward, the scheduler and the epilogues. With the layout, ``topk``, ``clamped_swiglu`` and
     ``fp32_wgrad`` unset that is all 50 libraries of the architecture (52 on SM107a); with the four set, 16 (17 on
-    SM107a; 13 without MXFP8). ``ValueError`` for
-    parameters the kernels do not serve, ``NotImplementedError`` for another GPU, ``RuntimeError`` for a toolkit
-    older than CUDA 13.4.
+    SM107a; 13 without MXFP8). ``ValueError`` for parameters the kernels do not serve, ``NotImplementedError`` for
+    another GPU, ``RuntimeError`` for a toolkit older than CUDA 13.4.
     """
     selection = dict(
         ep_size=ep_size,

@@ -1,12 +1,12 @@
 """The MoK implementation without a GPU (needs torch; the runtime-API test also tvm_ffi).
 
-Checked: the libraries ``prebuild`` selects for each model (every library of the build manifest with nothing set, the
-16 (17 on SM107a) or 13 of one model, every value of an unset parameter); its parameter checks, which raise before
-any device is touched; the vendored package imports with this PyTorch and tvm-ffi and has what it uses of them
-(symmetric memory, ``Work.block_current_stream``, ``tvm_ffi.Shape`` and the raw-stream context) and builds through
-the runtime's loader; the workspace check refuses a multi-rank group without a multicast address; the weight
-quantizer's PyTorch path (CPU tensors) writes the bytes of the independent MXFP8 recipe, whatever the layout of the
-weights; ``release`` drops the package's caches.
+Checked: the libraries ``prebuild`` selects for each model (every library of the build manifest with nothing set, the 16
+(17 on SM107a) or 13 of one model, the counts the GPU tests assert for their model, every value of an unset parameter);
+its parameter checks, which raise before any device is touched; the vendored package imports with this PyTorch and
+tvm-ffi and has what it uses of them (symmetric memory, ``Work.block_current_stream``, ``tvm_ffi.Shape`` and the
+raw-stream context) and builds through the runtime's loader; the workspace check refuses a multi-rank group without a
+multicast address; the weight quantizer's PyTorch path (CPU tensors) writes the bytes of the independent MXFP8 recipe,
+whatever the layout of the weights; ``release`` drops the package's caches.
 """
 
 import functools
@@ -56,6 +56,22 @@ def test_one_model_builds_its_layout_topk_form_and_weight_gradients(arch):
 
     assert sorted(ops.libraries(arch, **ONE_MODEL)) == sorted(f"cake_mok_{stem}_{arch}" for stem in stems)
     assert len(ops.libraries(arch, **ONE_MODEL, mxfp8=False)) == 13
+
+
+@pytest.mark.parametrize("arch", ARCHES)
+def test_the_gpu_tests_model_selects_27_libraries_29_on_sm107a(arch):
+    """The counts the GPU prebuild tests assert for ``_cases.model()``: on SM107a each SwiGLU form's MXFP8 forward
+    adds its multimacro library."""
+    from . import _cases
+
+    model = _cases.model()
+    layout = dict(ep_size=model["ep_size"], local_experts=model["local_experts"], topk=model["topk"])
+    one_form = dict(layout, clamped_swiglu=False, fp32_wgrad=False)
+    multimacro = 1 if arch == "sm_107a" else 0
+
+    assert len(ops.libraries(arch, **layout)) == 27 + 2 * multimacro
+    assert len(ops.libraries(arch, **one_form)) == 16 + multimacro
+    assert len(ops.libraries(arch, **one_form, mxfp8=False)) == 13
 
 
 def test_an_unset_parameter_builds_every_value():
