@@ -3,9 +3,10 @@ count (``fast_projection_programs`` / ``fast_router_programs``: the vendored non
 ``meta`` views; needs torch and tvm_ffi, no device).
 
 The tables below record which operations run programs from the non-deterministic package on B200, GB200, B300, GB300
-and R200 parts. The current upstream planner selects short-token SIMT router weight and input gradients on some parts;
-it selects the deterministic sibling elsewhere. The cases cover miles' projections and routers and the single-head
-dense projections named in the package's routing tables.
+and R200 parts. The current upstream tables select short-token SIMT router weight and input gradients on some parts,
+split-K, two-chain and stream-K weight gradients of some single-head projections, and the deterministic sibling
+elsewhere; on 208-SM R200 parts every case runs the deterministic sibling. The cases cover miles' projections and
+routers and the single-head dense projections named in the package's routing tables.
 """
 
 import json
@@ -44,8 +45,8 @@ ROUTERS = {f"router-e{e}-h{h}": (e, h) for e in (128, 256, 288, 384, 512) for h 
 
 K1_N64 = "dense_proj_gemm_atomic_nn_n64_t"
 K1_N128 = "dense_proj_gemm_atomic_nn_n128_t"
-K2_HEAD_TAIL = "router_fp32_gemm_atomic_nn_t_ht_c3_nreg"
-K2_HEAD_TAIL_TS = "router_fp32_gemm_ts_r6p6_atomic_nn_t_ht_c2_nreg"
+K1_N256_C2 = "dense_proj_gemm_atomic_nn_n256_t_c2"
+K1_SK_N256 = "dense_proj_gemm_sk_nn_n256_t"
 SIMT_N64 = "router_fp32_gemm_simt_n64m64s2"
 SIMT_N128 = "router_fp32_gemm_simt_n128m64s2"
 DGRAD_M32_S4 = "router_fp32_dgrad_simt_m32n64s4"
@@ -65,6 +66,7 @@ def _without(tokens, *dropped) -> tuple[int, ...]:
 # (arch, SM count) -> case -> {token count: template of the weight gradient's program}
 EXPECTED_WEIGHT_GRAD: dict[tuple[str, int], dict[str, dict[int, str]]] = {
     ("sm_100a", 148): {
+        "dsv4-o-group-g1": _at(K1_N256_C2, (1001, 4096, 10240, 16384)),
         "dense-4096-32": _at(K1_N64, _without(FROM_128, 65536)),
         "dense-5120-64": _at(K1_N64, _without(FROM_128, 1001)),
         "router-e256-h4096": _at(SIMT_N128, (64, 128, 192)),
@@ -75,7 +77,7 @@ EXPECTED_WEIGHT_GRAD: dict[tuple[str, int], dict[str, dict[int, str]]] = {
         "dense-4096-32": _at(K1_N64, _without(FROM_128, 65536)),
         "dense-5120-64": _at(K1_N64, _without(FROM_128, 1001)),
         "router-e256-h4096": _at(SIMT_N128, (64, 128, 192)),
-        "router-e256-h5120": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL, (10240, 16384, 20480))},
+        "router-e256-h5120": _at(SIMT_N64, (64, 128, 192)),
         "router-e256-h6144": _at(SIMT_N64, (64, 128, 192)),
     },
     ("sm_103a", 148): {
@@ -90,28 +92,25 @@ EXPECTED_WEIGHT_GRAD: dict[tuple[str, int], dict[str, dict[int, str]]] = {
         "dense-4096-32": _at(K1_N64, _without(FROM_128, 65536)),
         "dense-5120-64": _at(K1_N64, (128, 192, 4096, 10240, 16384, 20480, 32768)),
         "dense-6144-128": _at(K1_N128, _without(FROM_128, 1001, 4096)),
-        "router-e256-h4096": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL_TS, (20480, 32768, 49152))},
-        "router-e256-h5120": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL_TS, (16384, 20480, 32768))},
-        "router-e256-h6144": {**_at(SIMT_N64, (64, 128, 192)), **_at(K2_HEAD_TAIL_TS, (20480,))},
+        "router-e256-h4096": _at(SIMT_N64, (64, 128, 192)),
+        "router-e256-h5120": _at(SIMT_N64, (64, 128, 192)),
+        "router-e256-h6144": _at(SIMT_N64, (64, 128, 192)),
     },
     ("sm_103a", 160): {
         "dense-4096-32": _at(K1_N64, _without(FROM_128, 65536)),
         "dense-5120-64": _at(K1_N64, (128, 192, 4096, 10240, 16384, 20480, 32768)),
         "dense-6144-128": _at(K1_N128, _without(FROM_128, 1001, 4096)),
     },
-    ("sm_107a", 208): {
-        "router-e256-h5120": _at(K2_HEAD_TAIL, (16384,)),
-    },
+    ("sm_107a", 208): {},
     ("sm_107a", 212): {
+        "dsv4-o-group-g1": _at(K1_SK_N256, (16384,)),
         "dense-8192-128": _at(K1_N128, (4096, 10240, 16384, 20480, 32768)),
         "router-e256-h4096": _at(SIMT_N128, (64, 128, 192)),
-        "router-e256-h5120": {**_at(SIMT_N128, (64, 128, 192)), **_at(K2_HEAD_TAIL_TS, (16384,))},
-        "router-e256-h6144": {**_at(SIMT_N128, (64, 128, 192)), **_at(K2_HEAD_TAIL_TS, (16384,))},
+        "router-e256-h5120": _at(SIMT_N128, (64, 128, 192)),
+        "router-e256-h6144": _at(SIMT_N128, (64, 128, 192)),
     },
     ("sm_107a", 216): {
-        "dense-4096-32": _at(K1_N64, _without(FROM_128, 128, 192)),
         "dense-8192-128": _at(K1_N128, _without(FROM_128, 65536)),
-        "router-e256-h5120": _at(K2_HEAD_TAIL, (16384,)),
     },
 }
 EXPECTED_INPUT_GRAD = {
@@ -185,15 +184,24 @@ def test_router_input_gradients_and_no_forwards_run_programs_of_their_own(table)
 def test_the_programs_fast_runs_are_the_recorded_ones(table):
     found = {part: {name: ops_["weight_grad"] for name, ops_ in cases.items()} for part, cases in table.items()}
 
-    assert found == EXPECTED_WEIGHT_GRAD, json.dumps(
-        {f"{arch} {sms}": cases for (arch, sms), cases in found.items()}, indent=1, sort_keys=True
-    )
+    assert set(found) == set(EXPECTED_WEIGHT_GRAD) == set(PARTS)
+    # the cases whose programs differ from the record: (arch, SM count, case) -> {token count: template} found
+    differing = {
+        f"{arch} {sms} {name}": found[(arch, sms)].get(name)
+        for (arch, sms), expected in EXPECTED_WEIGHT_GRAD.items()
+        for name in {*found[(arch, sms)], *expected}
+        if found[(arch, sms)].get(name) != expected.get(name)
+    }
+    assert not differing, json.dumps(differing, indent=1, sort_keys=True)
 
 
-def test_148_sm_short_token_router_routes_and_160_sm_det_routes(table):
+def test_148_sm_short_token_router_and_group_projection_routes_and_160_sm_det_routes(table):
+    routers = {"router-e256-h4096", "router-e256-h5120", "router-e256-h6144"}
+    # the two-chain weight gradient of DeepSeek-V4's single-group output projection, 961 to 16384 tokens on B200
+    assert set(table[("sm_100a", 148)]) & set(MILES_CASES) == routers | {"dsv4-o-group-g1"}
+    assert set(table[("sm_103a", 148)]) & set(MILES_CASES) == routers
     for part in (("sm_100a", 148), ("sm_103a", 148)):
-        assert set(table[part]) & set(MILES_CASES) == {"router-e256-h4096", "router-e256-h5120", "router-e256-h6144"}
-        for name in set(table[part]) & set(MILES_CASES):
+        for name in routers:
             assert set(table[part][name]["weight_grad"]) == {64, 128, 192}
     assert not set(table[("sm_103a", 160)]) & set(MILES_CASES)
 
@@ -224,9 +232,10 @@ def test_the_documented_accuracy_misses_now_route_to_det(d_out):
     assert on_152["weight_grad"] is None
 
 
-def test_fast_runs_a_program_of_its_own_on_every_part(table):
-    # the variant changes which program runs for some supported input on every part
-    assert all(table[part] for part in PARTS)
+def test_fast_runs_a_program_of_its_own_on_every_part_but_208_sm_r200(table):
+    # the variant changes which program runs for some supported input on every part but 208-SM sm_107a parts, where
+    # the package's tables keep every case on the deterministic program (no router window, no BF16 split-K row)
+    assert [part for part in PARTS if not table[part]] == [("sm_107a", 208)]
 
 
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])

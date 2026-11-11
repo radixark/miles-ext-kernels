@@ -5,9 +5,9 @@ torch and tvm_ffi, no device).
 because the plan of a call changes with the token count. Here the packages' own planners run on ``meta`` views of
 miles' projections and routers, as the entry points call them, for every part (architecture and SM count) and a sweep
 of token counts: every count up to 300, the neighbours of the tile, split and window boundaries, the token counts of
-the exact-token rules, 239 and seeded random counts up to 70000; in both variants (``fast`` plans only weight
-gradients of its own). Each planned program must be in the set ``prebuild`` builds for that GEMM kind. The GPU check
-of the same guarantee is ``test_prebuild_gpu.py``.
+the exact-token rules, 239 and seeded random counts up to 70000; in both variants (``fast`` reads its program tables,
+then plans weight gradients of its own). Each planned program must be in the set ``prebuild`` builds for that GEMM
+kind. The GPU check of the same guarantee is ``test_prebuild_gpu.py``.
 """
 
 import random
@@ -48,7 +48,7 @@ TOKENS = sorted(
         *random.Random(20261105).sample(range(301, 70001), 24),
     }
 )
-# name -> (heads, d_in, d_out, weight layout): miles' projections and two single-head rows fast plans on some parts
+# name -> (heads, d_in, d_out, weight layout): miles' projections and three single-head rows fast plans on some parts
 # (a single-head out_in weight gradient is a call of the packages' weight-gradient entry points)
 PROJECTIONS = {
     **{f"glm5-q-absorb-h{h}": (h, 192, 512, "in_out") for h in (8, 16, 64)},
@@ -57,6 +57,7 @@ PROJECTIONS = {
     **{f"dsv4-o-group-g{g}": (g, 4096, 1024, "out_in") for g in (1, 2, 8)},
     "dense-4096-32": (1, 4096, 32, "out_in"),
     "dense-6144-128": (1, 6144, 128, "out_in"),
+    "dense-8192-128": (1, 8192, 128, "out_in"),
 }
 # name -> (experts, hidden)
 ROUTERS = {f"router-e{e}-h{h}": (e, h) for e, h in ((256, 4096), (256, 5120), (256, 6144), (384, 7168), (128, 2048))}
@@ -166,6 +167,8 @@ def test_every_planned_program_at_any_token_count_is_prebuilt(arch, sm_count):
                             missing.append((name, tokens, variant, *library))
 
     assert not missing, missing[:20]
-    # the sweep reaches programs of both packages, so the check is not vacuous
-    assert {package for package, _ in reached} == {DET, FAST}, sorted(reached)
+    # the sweep reaches programs of both packages, so the check is not vacuous; on 208-SM sm_107a parts the package's
+    # tables keep every case on the deterministic program
+    packages = {DET} if (arch, sm_count) == ("sm_107a", 208) else {DET, FAST}
+    assert {package for package, _ in reached} == packages, sorted(reached)
     assert len(reached) >= 8, sorted(reached)

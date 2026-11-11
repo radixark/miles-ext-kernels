@@ -18,7 +18,12 @@ from miles_ext_kernels import cake
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VENDORED = REPO_ROOT / "miles_ext_kernels" / "cake" / "_vendor" / "VENDORED.json"
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-FI_COMMIT = "f5ab85cc77edbd0257b0145eefe0113074dc6ee2"
+FI_COMMIT = "c5c39b0e87f027011c86881aa2935a83e1ce53e7"
+# FlashInfer exports the two packages in separate changes: each records the Cake revision of its own export
+CAKE_REVISIONS = {
+    "cake_dense_gemm_det_train": "72d0af54b2ddd96cd9f931508e70999338e18cce",
+    "cake_dense_gemm_nondet_train": "749760171088226c39074b121579802137265034",
+}
 
 
 def _ops():
@@ -28,12 +33,12 @@ def _ops():
     return ops
 
 
-def test_both_packages_come_from_one_flashinfer_commit_and_cake_revision():
+def test_both_packages_come_from_one_flashinfer_commit_and_the_recorded_cake_revisions():
     block = json.loads(VENDORED.read_text())["ops"]["dense_gemm"]
 
     assert set(block) == {"cake_dense_gemm_det_train", "cake_dense_gemm_nondet_train"}
     assert {entry["source"]["commit"] for entry in block.values()} == {FI_COMMIT}
-    assert len({entry["cake_revision"] for entry in block.values()}) == 1
+    assert {package: entry["cake_revision"] for package, entry in block.items()} == CAKE_REVISIONS
     assert (
         block["cake_dense_gemm_nondet_train"]["source"]["path"]
         == "flashinfer/experimental/cake/cake_dense_gemm_nondet_train"

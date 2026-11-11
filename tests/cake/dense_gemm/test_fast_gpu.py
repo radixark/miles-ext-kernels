@@ -3,16 +3,17 @@
 
 For every case the programs the non-deterministic package launches are the ones ``fast_projection_programs`` /
 ``fast_router_programs`` report for the device's architecture and SM count. The forward is bitwise ``det``'s, and so
-is each gradient where ``fast`` runs the deterministic program. Where it runs a program of its own (a weight gradient,
-or a router input gradient on a short-token SIMT program), that gradient is within the deterministic package's accuracy
-budget against FP64 (BF16 output: atol = rtol = 1e-2 and a relative RMS of 3e-3; the router's FP32 gradients: relative
-Frobenius error 2e-6). The cases are miles' projections and routers and the single-head projections and 256-expert
-routers whose gradients the package's tables give a program of its own on some part, at token counts inside those
-tables. The rows where ``fast``'s two-split weight gradient missed the BF16 budget with the package vendored before
-(148-SM sm_103a parts, the op module's historical accuracy misses) now run the deterministic program, with ``det``'s
-bits. The single-head rows whose ``det`` weight gradient runs the deterministic package's weight-gradient entry point
-(the transposed-store ``X.T @ G``) are held to the relative RMS budget against FP64, ``det`` and ``fast`` where it runs
-the deterministic program, also at a token count past 49152. Then ``fast`` running ``det`` under
+is each gradient where ``fast`` runs ``det``'s plan of the deterministic program. Where it runs a program of its own (a
+weight gradient, or a router input gradient on a short-token SIMT program), or the router weight gradient on the
+deterministic program at another split count than ``det``'s, that gradient is within the deterministic package's
+accuracy budget against FP64 (BF16 output: atol = rtol = 1e-2 and a relative RMS of 3e-3; the router's FP32 gradients:
+relative Frobenius error 2e-6). The cases are miles' projections and routers and the single-head projections and
+256-expert routers whose gradients the package's tables give a program of its own on some part, at token counts inside
+those tables. The rows where ``fast``'s two-split weight gradient missed the BF16 budget with the package vendored
+before (148-SM sm_103a parts, the op module's historical accuracy misses) now run the deterministic program, with
+``det``'s bits. The single-head rows whose ``det`` weight gradient runs the deterministic package's weight-gradient
+entry point (the transposed-store ``X.T @ G``) are held to the relative RMS budget against FP64, ``det`` and ``fast``
+where it runs the deterministic program, also at a token count past 49152. Then ``fast`` running ``det`` under
 ``torch.use_deterministic_algorithms``. The prebuild of ``fast`` is checked in ``test_prebuild_gpu.py``, ``det``
 repeating bit for bit in ``test_determinism_gpu.py``. Needs a CUDA device; the tests need SM100a / SM103a / SM107a and
 skip elsewhere.
@@ -270,16 +271,18 @@ def test_router_fast_runs_the_planned_programs_with_det_bits_or_budget(name):
         assert _rel_fro(dx32, want_dx) <= ROUTER_REL_FRO_MAX, planned["input_grad"]
         dx = fast[1].reshape(-1, hidden)
         assert dx.dtype == torch.bfloat16 and _rel_fro(dx, want_dx) <= BF16_ROUNDED_REL_FRO_MAX, planned["input_grad"]
-    if planned["weight_grad"] is None:
+    det_splits = ops._fast_router_wgrad_splits(experts, hidden, tokens=tokens, arch=ARCH, sm_count=SM_COUNT)
+    if planned["weight_grad"] is None and det_splits is None:
         assert torch.equal(fast[2], det[2]), "weight gradient differs from det on the deterministic program"
         return
+    program = planned["weight_grad"] or f"the deterministic program at {det_splits} splits"
     want = g.T @ x2
     # the package's FP32 weight gradient (the program router_gating runs) within the router budget, and the BF16
     # gradient router_gating returns within one rounding of it
     dw32 = _fast_backend().cake_dense_gemm_nondet_train_router_wgrad(
         grad.reshape(-1, experts).float(), x.reshape(-1, hidden).float()
     )
-    assert _rel_fro(dw32, want) <= ROUTER_REL_FRO_MAX, planned["weight_grad"]
+    assert _rel_fro(dw32, want) <= ROUTER_REL_FRO_MAX, program
     assert fast[2].dtype == torch.bfloat16 and _rel_fro(fast[2], want) <= BF16_ROUNDED_REL_FRO_MAX
     assert_rel_rms({"weight gradient": fast[2]}, {"weight gradient": want}, {"weight gradient": BF16_REL_RMS})
 
@@ -291,8 +294,8 @@ def test_router_fast_runs_the_planned_programs_with_det_bits_or_budget(name):
 @pytest.mark.parametrize("warn_only", [False, True], ids=["alert", "warn_only"])
 def test_fast_runs_det_under_torch_deterministic_algorithms(caplog, monkeypatch, warn_only):
     """While torch's deterministic algorithms are enabled (``warn_only=True`` included) a ``fast`` call runs ``det``:
-    ``det``'s bits, one log line, no alert of the non-deterministic package, whose own programs of these rows (a
-    stream-K router weight gradient, a split-K projection weight gradient) can raise it on some parts."""
+    ``det``'s bits (``fast`` gives these rows other bits on some parts), one log line, no alert of the
+    non-deterministic package."""
     monkeypatch.setattr(config, "_warned", set())
     router = _router_leaves(*ROUTERS["router-e256-h5120-t16384"][:2], 16384, SEED)
     heads, d_in, d_out, layout, tokens = PROJECTIONS["dense-4096-32-t16384"]
