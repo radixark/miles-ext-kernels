@@ -65,7 +65,7 @@ ROUTES = {
     },
     # padding rows past the last group end
     "padded": lambda variant: _call(_cases.sizes_of(8), 3072, 2048, rows=sum(_cases.sizes_of(8)) + 300),
-    # the weight gradient's 512-wide k tile, whose split tail fast adds unordered
+    # the weight gradient's 512-wide k tile and its split tail
     "k512-split-tail": lambda variant: _call(list(K512_SIZES), *K512_SHAPE),
     # many rows per expert at K >= 4096: the evict-first / 3-3 data-gradient twins and the wave-synchronised wgrad
     "wide-k-many-rows": lambda variant: _call([16400, 16400], 4096, 4096),
