@@ -18,10 +18,13 @@ into fixed-point digits with integer atomics and rounds the sum once, so the wei
 same rows on a device of the same SM count; from 2560 rows per SM on sm_100a and sm_103a and 1536 on sm_107a, packed
 rows run a look-ahead program of the same bits. ``fast`` runs the non-deterministic package
 (``_vendor/cake_rmsnorm_silu_gate_nondet_train``), which picks a program by the rows per SM and the layout
-(``cake_jit.module_for_rows``): its ``y``, ``dx`` and ``dz`` repeat bit for bit and stay within one BF16 ulp of FP64,
-and they are ``det``'s bits where its program is ``det``'s (the pipelined forwards' ``y``, the fused and the
-repeatable backwards' ``dx`` and ``dz``). Its weight gradient is a fixed-order on-chip sum up to 256 rows (512 on
-sm_100a and sm_107a) and ``det``'s exact sum past the fused band; in the fused band, up to 1000 rows per SM on sm_100a
+(``cake_jit.module_for_rows``): its ``y``, ``dx`` and ``dz`` repeat bit for bit for the same inputs and layout on
+the same device and stay within one BF16 ulp of FP64. Its programs may associate a row's sum of squares differently,
+so ``y``'s bits can differ between row-count bands and between layouts, and ``fast``'s bits need not be ``det``'s
+(the package documents ``det``'s bits only for the pipelined forwards' ``y`` where ``det``'s gate does not flush, and
+for the fused and the repeatable backwards' ``dx`` and ``dz``). Its weight gradient is a fixed-order on-chip sum up to
+256 rows (512 on sm_100a and sm_107a) and ``det``'s exact sum in the repeatable bands (past the fused band, and on
+sm_107a also from 513 rows up to 64 rows per SM); in the fused band, up to 1000 rows per SM on sm_100a
 and sm_103a and from 64 to 256 on sm_107a, its CTAs add FP32 two-sum runs to FP64 accumulators with atomics
 (flashinfer-ai/flashinfer#9182). The order of those additions depends on scheduling, so there the weight gradient may
 differ between runs, within ``det``'s bound ``|dw| * 2^-7 + sum|terms| * 2^-20``. ``fast`` serves every call ``det``
@@ -136,9 +139,10 @@ def rmsnorm_silu_gate(x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor, ep
 
     ``x`` and ``z``: BF16 of one ``[..., 128]`` shape. A gate that is a column slice of a wider projection is read in
     place when its last stride is 1, its storage offset and token and head strides are multiples of 16 elements and
-    its storage is 32-byte aligned, else copied once (per call; the result is the same bits either way). ``weight``:
-    BF16 ``[128]``, shared by every token and head of the call. Returns BF16 ``y`` of ``x``'s shape; the weight
-    gradient comes in BF16. The autograd node saves only ``x``, ``z`` and ``weight``.
+    its storage is 32-byte aligned, else copied once (per call). ``det`` gives the same bits either way; for ``fast``
+    a copied gate can select another forward program, so ``y`` may differ in its last bits (within one BF16 ulp of
+    FP64). ``weight``: BF16 ``[128]``, shared by every token and head of the call. Returns BF16 ``y`` of ``x``'s
+    shape; the weight gradient comes in BF16. The autograd node saves only ``x``, ``z`` and ``weight``.
 
     The weight gradient sums over the rows of this call only. Under tensor parallelism each rank normalizes its own
     heads with the same replicated ``weight``, so the caller all-reduces the weight gradient over the tensor-parallel

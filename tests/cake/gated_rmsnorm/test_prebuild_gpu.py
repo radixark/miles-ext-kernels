@@ -78,6 +78,7 @@ def test_the_token_sweep_reaches_every_row_count_module():
     sm_count = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
     missing = unreached_roles(jit, arch, sm_count)
 
+    assert jit.routes_every_call(arch), f"{arch}: a band names a module the package does not route"
     assert len(selected_modules(jit, arch, sm_count)) > len(CALL_ROLES), f"{arch}: no row-count tier is routed"
     assert missing == [], f"{arch} with {sm_count} SMs: no route reaches {missing}"
 
