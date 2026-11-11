@@ -1,16 +1,17 @@
 """The MoK expert-parallel MoE training layer (``miles_ext_kernels.cake.mok``) on one GPU: an expert-parallel group of
 one rank, the scheduler layout (1, 4) with top-2.
 
-Every case of ``_cases.CASES`` (BF16 and MXFP8 routed experts; plain and clamped SwiGLU; context recompute; BF16 and
-FP32 weight-gradient accumulation) runs a full iteration (schedule, forward, backward) over several macro-batches, and
-with experts that receive no token. Checked (``_cases``): every output and gradient against the FP32 reference within
-twice the BF16 reference's error (MXFP8: FlashInfer's bound on the quantized path; clamped SwiGLU: the tensors its
-derivative reaches also against the FP32 reference with BF16 clamp decisions), FlashInfer's own gates, and the
-nine outputs repeating bit for bit across two eager calls, CUDA graph replays, two other fixed communication-SM splits
-(one with the imbalance switch off) and a fresh process; the checkpointed iteration equals the saved-context one.
-Also: a call with no token; calls alternating between the default and a side stream; the weight quantizer's bytes on
-the device, whatever the layout of the weights; the libraries ``prebuild`` returns and a new token count loading none;
-unsupported layouts raising; no FlashInfer module imported. Needs SM100a / SM103a / SM107a; skips elsewhere.
+Every case of ``_cases.CASES`` (BF16 and MXFP8 routed experts; plain and clamped SwiGLU; context recompute, after a
+saved or a context-free forward; BF16 and FP32 weight-gradient accumulation) runs a full iteration (schedule, forward,
+backward) over several macro-batches, and with experts that receive no token. Checked (``_cases``): every output and
+gradient against the FP32 reference within twice the BF16 reference's error (MXFP8: FlashInfer's bound on the quantized
+path; clamped SwiGLU: the tensors its derivative reaches also against the FP32 reference with BF16 clamp decisions),
+FlashInfer's own gates, and the nine outputs repeating bit for bit across two eager calls, CUDA graph replays, two
+other fixed communication-SM splits (one with the imbalance switch off) and a fresh process; the checkpointed iteration
+equals the saved-context one. Also: a call with no token; calls alternating between the default and a side stream; the
+weight quantizer's bytes on the device, whatever the layout of the weights; the libraries ``prebuild`` returns and a
+new token count loading none; unsupported layouts raising; no FlashInfer module imported. Needs SM100a / SM103a /
+SM107a; skips elsewhere.
 """
 
 import json
@@ -185,7 +186,7 @@ def test_the_weight_quantizer_writes_the_recipe_bytes_on_the_device():
 def test_prebuild_builds_the_model_libraries_and_new_token_counts_load_none(group, problem, built):
     model = _cases.model()
     names = ops.libraries(ARCH, ep_size=model["ep_size"], local_experts=model["local_experts"], topk=model["topk"])
-    assert len(names) == 25
+    assert len(names) == 27
     # <library>_<closure digest>_<cache key>.so in the runtime's cache, one per library of the model
     assert sorted(Path(path).name.rsplit("_", 2)[0] for path in built) == sorted(names)
     assert all(Path(path).is_file() and Path(path).is_relative_to(loader.cache_dir()) for path in built)

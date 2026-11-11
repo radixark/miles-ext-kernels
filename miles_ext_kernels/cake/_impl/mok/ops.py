@@ -117,7 +117,8 @@ def roles(
     """The kernel roles (``sources.json`` keys) a model may launch: its scheduler layout ``(ep_size, local_experts)``,
     ``topk``, SwiGLU form and weight-gradient precision, each of them every value when ``None``; the MXFP8 routed
     kernels unless ``mxfp8`` is false (an adapter loads the BF16 ones when it is created, so they are always in). Every
-    role includes the context recompute, and the MXFP8 forward its multimacro program
+    form includes the context recompute; the BF16 forward its context-free program (``forward[_clamped]_noctx``,
+    which ``forward(..., save_context=False)`` runs), and the MXFP8 forward its multimacro program
     (``forward_mxfp8[_clamped]_multimacro``), which the package loads beside it on SM107a, the one architecture it is
     built for. ``ValueError`` for a value the kernels do not serve."""
     kernels = _vendored("_kernels")
@@ -140,9 +141,9 @@ def roles(
     names += [f"epilogue_{direction}_{k}" for k in topks for direction in ("forward", "backward")]
     for precision in ("", "_mxfp8") if mxfp8 else ("",):
         for clamped in forms:
-            names += [kernels._role(f"forward{precision}", clamped), kernels._role(f"recompute{precision}", clamped)]
-            if precision:
-                names.append(kernels._role(f"forward{precision}", clamped) + "_multimacro")
+            forward = kernels._role(f"forward{precision}", clamped)
+            names += [forward, kernels._role(f"recompute{precision}", clamped)]
+            names.append(forward + ("_multimacro" if precision else "_noctx"))
             names += [kernels._role(f"backward{precision}", clamped, wgrad) for wgrad in wgrads]
     return list(dict.fromkeys(names))
 
@@ -206,9 +207,10 @@ def prebuild(
     The model: its scheduler layout ``(ep_size, local_experts)``, ``topk``, SwiGLU form (``clamped_swiglu``) and
     weight-gradient precision (``fp32_wgrad``), each of them every value the kernels serve when unset; ``mxfp8``
     (default true) whether its routed experts may run in MXFP8, which needs ``hidden_size`` and ``intermediate_size``.
-    Covered whatever the token counts: the BF16 and MXFP8 forward, the context recompute, the backward, the scheduler
-    and the epilogues. With the layout, ``topk``, ``clamped_swiglu`` and ``fp32_wgrad`` unset that is all 48 libraries
-    of the architecture (50 on SM107a); with the four set, 15 (16 on SM107a; 12 without MXFP8). ``ValueError`` for
+    Covered whatever the token counts: the BF16 and MXFP8 forward, the BF16 context-free forward, the context
+    recompute, the backward, the scheduler and the epilogues. With the layout, ``topk``, ``clamped_swiglu`` and
+    ``fp32_wgrad`` unset that is all 50 libraries of the architecture (52 on SM107a); with the four set, 16 (17 on
+    SM107a; 13 without MXFP8). ``ValueError`` for
     parameters the kernels do not serve, ``NotImplementedError`` for another GPU, ``RuntimeError`` for a toolkit
     older than CUDA 13.4.
     """
@@ -256,9 +258,11 @@ def prepare_mok_bf16(*, ep_size=16, local_experts=16, topk=8, clamped_swiglu=Fal
     Loads the BF16 forward and backward kernels of the SwiGLU form ``clamped_swiglu`` selects now (``swiglu_limit``
     stays a per-call value) and the others on first use: ``prebuild`` the model, or call the adapter's
     ``prepare(swiglu_limit, mxfp8)`` and ``prepare_recompute(swiglu_limit, mxfp8)`` for every other form, before CUDA
-    graph capture. With ``fp32_wgrad``, ``backward`` adds every weight gradient into the six FP32
-    ``weight_grad_accumulators`` it is passed and returns them. A layout or top-k the kernels do not serve raises
-    ``ValueError``.
+    graph capture; ``prepare(swiglu_limit, save_context=False)`` also loads the context-free forward that
+    ``forward(..., save_context=False)`` runs for an activation-checkpointed step (BF16 routed experts: ``y`` bit for
+    bit the context forward's, no context; ``recompute_forward_context`` rebuilds it before ``backward``). With
+    ``fp32_wgrad``, ``backward`` adds every weight gradient into the six FP32 ``weight_grad_accumulators`` it is passed
+    and returns them. A layout or top-k the kernels do not serve raises ``ValueError``.
     """
     return _api().prepare_mok_bf16(
         ep_size=ep_size,

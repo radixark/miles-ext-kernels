@@ -1,7 +1,7 @@
 """The MoK implementation without a GPU (needs torch; the runtime-API test also tvm_ffi).
 
 Checked: the libraries ``prebuild`` selects for each model (every library of the build manifest with nothing set, the
-15 (16 on SM107a) or 12 of one model, every value of an unset parameter); its parameter checks, which raise before
+16 (17 on SM107a) or 13 of one model, every value of an unset parameter); its parameter checks, which raise before
 any device is touched; the vendored package imports with this PyTorch and tvm-ffi and has what it uses of them
 (symmetric memory, ``Work.block_current_stream``, ``tvm_ffi.Shape`` and the raw-stream context) and builds through
 the runtime's loader; the workspace check refuses a multi-rank group without a multicast address; the weight
@@ -39,7 +39,7 @@ def test_with_nothing_set_the_libraries_are_the_build_manifest(arch):
 
     # SM107a also builds the MXFP8 forward's multimacro programs
     multimacro = 2 if arch == "sm_107a" else 0
-    assert len(every) == len(set(every)) == 48 + multimacro
+    assert len(every) == len(set(every)) == 50 + multimacro
     assert set(every) == _manifest(arch)
     assert set(every) - set(bf16) == {name for name in every if "_mxfp8" in name}
     assert len(set(every) - set(bf16)) == 8 + multimacro
@@ -49,13 +49,13 @@ def test_with_nothing_set_the_libraries_are_the_build_manifest(arch):
 def test_one_model_builds_its_layout_topk_form_and_weight_gradients(arch):
     stems = (
         "zero expert_layout gather barrier count_8_36 rows_8_36 pad_8 epilogue_forward_8 epilogue_backward_8 "
-        "forward recompute backward forward_mxfp8 recompute_mxfp8 backward_mxfp8"
+        "forward forward_noctx recompute backward forward_mxfp8 recompute_mxfp8 backward_mxfp8"
     ).split()
     if arch == "sm_107a":
         stems.append("forward_mxfp8_multimacro")
 
     assert sorted(ops.libraries(arch, **ONE_MODEL)) == sorted(f"cake_mok_{stem}_{arch}" for stem in stems)
-    assert len(ops.libraries(arch, **ONE_MODEL, mxfp8=False)) == 12
+    assert len(ops.libraries(arch, **ONE_MODEL, mxfp8=False)) == 13
 
 
 def test_an_unset_parameter_builds_every_value():
@@ -63,6 +63,7 @@ def test_an_unset_parameter_builds_every_value():
 
     assert both - set(ops.roles(**ONE_MODEL)) == {
         "forward_clamped",
+        "forward_clamped_noctx",
         "recompute_clamped",
         "backward_clamped",
         "backward_fp32",
