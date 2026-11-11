@@ -323,7 +323,9 @@ def test_the_prebuild_routes_reach_every_program(arch):
         if arch in kcp.FWD_MAIN_ARCHS | kcp.MULTI_FWD_MAIN_ARCHS:
             points = [(C, sum(KCP_DOCUMENTS)) for C in KCP_CHANNELS]
             points.append((KCP_LONG_POINT[0], sum(KCP_LONG_POINT[1])))
-            reached = {module for C, S in points for module in jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=C, S=S)}
+            reached = {
+                module for C, S in points for module in jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=C, S=S)
+            }
             assert reached == set(jit.route_modules(arch, kcp.FWD_MAIN_ROUTE)), (variant, "kcp main forward")
 
 

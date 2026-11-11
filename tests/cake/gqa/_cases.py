@@ -16,7 +16,7 @@ from miles_ext_kernels.cake._impl.gqa import ops
 from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_backend
 
 # the miles micro-batch, re-exported for the GPU tests
-from ._chunks import MILES_SEGMENTS as MILES_SEGMENTS
+from ._chunks import MILES_SEGMENTS  # noqa: F401
 
 D = 256
 SCALE = D**-0.5  # the default, as miles runs it
@@ -29,7 +29,6 @@ BOUND_INDEPENDENT = ("out", "lse", "dk", "dv")
 # reordering error where partials cancel, DQ_ATOL_FRACTION of the tensor's largest magnitude
 DQ_RTOL = 2**-7
 DQ_ATOL_FRACTION = 2**-16
-
 
 
 def cu(lens) -> list[int]:

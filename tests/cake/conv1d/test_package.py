@@ -33,7 +33,7 @@ def test_the_manifest_records_both_packages_at_one_flashinfer_commit():
             "path": FI_PATHS[package],
             "repo": "https://github.com/flashinfer-ai/flashinfer",
         }
-        assert entry["allow"] == {"env_read": ["kcp.py"]}
+        assert "allow" not in entry  # no package module reads the environment or imports flashinfer
         assert entry["files"]["cake_build.py"] == CAKE_BUILD_BLOB
         assert {"__init__.py", "build.json", "cake_jit.py", "kcp.py", "kcp_jit.py"} <= set(entry["files"])
 

@@ -49,6 +49,8 @@ from miles_ext_kernels.cake._runtime import loader
 from miles_ext_kernels.cake._vendor import cake_gated_act_mxfp8_det_train as backend
 from miles_ext_kernels.cake._vendor.cake_gated_act_mxfp8_det_train import (
     cake_gated_act_mxfp8_det_train_backward as silu_and_mul_mxfp8_quantize_backward,
+)
+from miles_ext_kernels.cake._vendor.cake_gated_act_mxfp8_det_train import (
     cake_gated_act_mxfp8_det_train_forward as silu_and_mul_mxfp8_quantize,
 )
 
