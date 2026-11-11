@@ -3,13 +3,12 @@
 ``build_kcp_context``: both variants see the same local tokens, a contiguous partition is FLA's, and one context
 serves every layer of a batch layout. A ``KcpContext`` call reaches the KCP package of the configured variant with
 contiguous FP32 g and beta (BF16 beta cast exactly), dense q / k / v rows, ``save_mode`` from
-``--cake-gdn-recompute-state`` (``"full"``, else the package's light set: ``"light"``, or ``None`` for ``fast``, whose
-default is ``"light_akk"`` with the in-kernel L2 norm) and the default scale. The context-parallel contract is FLA's:
-an initial state or a final state is rejected when the call is made, and the context's boundaries replace
-``cu_seqlens`` / ``cu_seqlens_cpu``. A call the package does not serve runs the det kernels of FLA's context
-parallelism on the context's FLA context, logged once per reason; a call no kernel set serves raises. On the packages'
-torch emulation (``backend="fake"``, which runs on the CPU) the call gives the bits of the package's own entry point
-and its gradients reach every input.
+``--cake-gdn-recompute-state`` and the default scale. The context-parallel contract is FLA's: an initial state or a
+final state is rejected when the call is made, and the context's boundaries replace ``cu_seqlens`` /
+``cu_seqlens_cpu``. A call the package does not serve runs the det kernels of FLA's context parallelism on the
+context's FLA context, logged once per reason; a call no kernel set serves raises. On the packages' torch emulation
+(``backend="fake"``, which runs on the CPU) the call gives the bits of the package's own entry point and its gradients
+reach every input.
 
 The non-deterministic package recognises the deterministic package's packed q / k / v split by its class name and
 the last two parts of its module (``cake_gdn_det_train_kcp.cake_kcp``), so under ``_vendor/`` too; that only decides
@@ -39,8 +38,6 @@ HEAD_DIM = 128
 LAYOUT = (130, 190, 140, 52)
 HEADS = (2, 4)  # key heads, value heads
 ENTRIES = {"det": "cake_gdn_det_kcp", "fast": "cake_gdn_nondet_kcp"}
-# the save mode of a call under --cake-gdn-recompute-state: the package's light set (None: the fast package's default)
-LIGHT = {"det": "light", "fast": None}
 
 
 def _cu(seq_lens) -> tuple[int, ...]:
@@ -168,7 +165,7 @@ def test_a_kcp_context_call_reaches_the_kcp_package_of_the_variant(monkeypatch, 
     assert len(calls) == 1 and other == []
     call = calls[0]
     assert call["ctx"] is ctx.context(variant)
-    assert call["save_mode"] == ("full" if save_state else LIGHT[variant])
+    assert call["save_mode"] == ("full" if save_state else "light")
     # the default scale of every kernel set, 1 / sqrt(K): the package's own default in FP32
     assert call["scale"] == 1.0 / math.sqrt(HEAD_DIM)
     package = ops._package(f"{variant}_kcp")
@@ -433,7 +430,7 @@ def test_on_the_emulation_a_call_gives_the_bits_of_the_package_entry_point(monke
         beta32,
         ctx.context(variant),
         scale=HEAD_DIM**-0.5,
-        save_mode="full" if save_state else LIGHT[variant],
+        save_mode="full" if save_state else "light",
         use_qk_l2norm_in_kernel=True,
         options={"backend": "fake"},
     )

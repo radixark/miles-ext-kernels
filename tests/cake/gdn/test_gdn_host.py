@@ -6,7 +6,8 @@ launching a split the pre-scan cannot serve. A call without a token returns an e
 final state is the initial state (zeros without one), and its gradients are zeros and the final state's gradient. Host
 boundaries that end before the call's tokens are rejected before any CUDA call. The 0-element state placeholder of a
 launch without an initial or final state is one tensor per device, shape and dtype, not an allocation per call; every
-other scratch take of the det and fast packages goes through the workspace pool.
+other scratch take of the det and fast packages goes through the workspace pool. ``release`` drops the fast
+package's self-zeroing buffers and the recorded backward plans that hold them.
 """
 
 import math
@@ -218,3 +219,17 @@ def test_the_packages_take_their_scratch_from_the_pool_and_share_the_state_place
     assert dh.data_ptr() != again.data_ptr() and len(made) == 2
     stats = workspace.stats()["cpu"]
     assert stats["misses"] == misses + 2 and (stats["bytes"], stats["entries"]) == (0, 0)
+
+
+def test_release_drops_the_self_zeroing_buffers_and_the_backward_plans_of_the_fast_package(monkeypatch):
+    # the fast package keeps self-zeroing buffers per (device, stream) and recorded backward plans that hold them; the
+    # det package keeps neither, so a release that skipped one of them would keep device memory alive
+    fast = ops._package("fast").cake_chain
+    det = ops._package("det").cake_chain
+    assert not hasattr(det._POOLED, "zeroed") and not hasattr(det, "_BWD_PLANS")
+    monkeypatch.setitem(fast._POOLED.zeroed, ("stand-in", 0), {"role": torch.zeros(1)})
+    monkeypatch.setitem(fast._BWD_PLANS, ("stand-in",), object())
+
+    cake.release("gdn")
+
+    assert fast._POOLED.zeroed == {} and fast._BWD_PLANS == {}
