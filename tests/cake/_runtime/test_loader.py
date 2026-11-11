@@ -3,7 +3,8 @@
 ``tools/templates/cake_build.py`` is FlashInfer's Cake package loader, byte-identical (flashinfer-ai/flashinfer
 c5db8d3ccd3fa3842812280f7f208718dc0b8610, blob 00756137eb159e30a77907eda84fd245123d87ea, the loader of every vendored
 package). The reference command is ``entry_flags`` / ``compile_command`` of FlashInfer's
-``scripts/check_cake_build_manifests.py`` at the same commit, the plain-nvcc build of its vendored-package gate.
+``scripts/check_cake_build_manifests.py`` at the same commit, the plain-nvcc build of its vendored-package gate. Its
+one copy in this repository is in ``tools/check_standalone.py``, which builds the vendored packages with it.
 """
 
 import dataclasses
@@ -21,7 +22,6 @@ import sys
 import threading
 import types
 import uuid
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -30,9 +30,10 @@ import pytest
 import miles_ext_kernels.cake._vendor
 from miles_ext_kernels.cake._runtime import loader
 
-from . import synthetic
+from . import fake_nvcc, synthetic
 
-CAKE_BUILD = Path(__file__).resolve().parents[3] / "tools" / "templates" / "cake_build.py"
+TOOLS = Path(__file__).resolve().parents[3] / "tools"
+CAKE_BUILD = TOOLS / "templates" / "cake_build.py"
 CAKE_BUILD_BLOB = "00756137eb159e30a77907eda84fd245123d87ea"
 INCLUDES = ("/synthetic/tvm_ffi/include", "/synthetic/tvm_ffi/dlpack/include")
 CLOSURE = "c0105e" + "0" * 58
@@ -45,91 +46,10 @@ SOURCES = {
 # every flag of the synthetic manifest that depends on the toolkit
 CONDITIONAL = {"-static-global-template-stub=false", "-DSYNTHETIC_COMMON_13_4", "-Xptxas", "-O0", "-DSYNTHETIC_NEWER"}
 
-FAKE_NVCC = """#!@PYTHON@
-import json
-import sys
-from pathlib import Path
-
-if sys.argv[1:] == ["--version"]:
-    print("nvcc: NVIDIA (R) Cuda compiler driver")
-    print("Cuda compilation tools, release @MAJOR@.@MINOR@, V@FULL@")
-    print("Build cuda_@MAJOR@.@MINOR@.r@MAJOR@.@MINOR@/compiler.0_0")
-    sys.exit(0)
-with open(Path(__file__).with_name("calls.jsonl"), "a") as log:
-    log.write(json.dumps(sys.argv[1:]) + "\\n")
-if Path(__file__).with_name("fail").exists():
-    sys.stderr.write("error: synthetic failure\\n")
-    sys.exit(2)
-Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"synthetic library")
-"""
-
-
-# --- FlashInfer scripts/check_cake_build_manifests.py at c5db8d3c (reformatted to this repository's line length) ---
-CUDA_CONSTRAINT_RE = re.compile(r"(==|>=)([0-9]+)\.([0-9]+)")
-
-
-def cuda_constraint_matches(constraint: str, cuda: tuple[int, int]) -> bool:
-    """Does toolkit ``cuda`` satisfy ``"==X.Y"`` / ``">=X.Y"``?
-
-    The rule of ``cake_build._cuda_constraint_matches``, re-implemented so that
-    nothing of the package is imported here.
-    """
-    match = CUDA_CONSTRAINT_RE.fullmatch(str(constraint))
-    if match is None:
-        raise ValueError(f"unsupported CUDA constraint {constraint!r}; expected '==X.Y' or '>=X.Y'")
-    operator, major, minor = match.groups()
-    version = (int(major), int(minor))
-    return cuda == version if operator == "==" else cuda >= version
-
-
-def conditional_flags(items: list[Any], cuda: tuple[int, int]) -> list[str]:
-    """The flags of every ``nvcc_flags_if`` item whose ``cuda`` constraint matches."""
-    flags: list[str] = []
-    for item in items:
-        if cuda_constraint_matches(item["cuda"], cuda):
-            flags.extend(item["flags"])
-    return flags
-
-
-def entry_flags(manifest: dict[str, Any], entry: dict[str, Any], cuda: tuple[int, int]) -> list[str]:
-    """The nvcc flags of ``entry`` from the manifest alone: ``common.nvcc_flags`` +
-    the matching ``common.nvcc_flags_if`` + ``arch_flags[arch]`` + the entry's
-    ``nvcc_flags`` + its matching ``nvcc_flags_if``."""
-    common = manifest["common"]
-    return [
-        *common["nvcc_flags"],
-        *conditional_flags(common["nvcc_flags_if"], cuda),
-        *manifest["arch_flags"][entry["arch"]],
-        *entry["nvcc_flags"],
-        *conditional_flags(entry["nvcc_flags_if"], cuda),
-    ]
-
-
-def compile_command(
-    nvcc: str,
-    copy: Path,
-    manifest: dict[str, Any],
-    entry: dict[str, Any],
-    cuda: tuple[int, int],
-    includes: Iterable[str],
-) -> list[str]:
-    """The plain-nvcc command of ``entry``, run from ``copy``: the manifest flags,
-    ``-I`` for ``common.include_dirs`` and ``includes`` (tvm-ffi, dlpack), the
-    copy-relative sources, ``common.link_flags`` and ``-o <copy>/<entry.path>``."""
-    common = manifest["common"]
-    include_dirs = [str(copy / d) for d in common["include_dirs"]] + list(includes)
-    return [
-        nvcc,
-        *entry_flags(manifest, entry, cuda),
-        *(f"-I{d}" for d in include_dirs),
-        *entry["sources"],
-        *common["link_flags"],
-        "-o",
-        str(copy / entry["path"]),
-    ]
-
-
-# --- end of the FlashInfer copy ---
+_spec = importlib.util.spec_from_file_location("check_standalone", TOOLS / "check_standalone.py")
+check_standalone = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(check_standalone)
+compile_command = check_standalone.compile_command
 
 
 def _manifest(digests: dict[str, str]) -> dict[str, Any]:
@@ -232,12 +152,7 @@ def toolkit(tmp_path, monkeypatch):
     """``toolkit("13.4.92")``: a fake nvcc of that version as ``$CUDA_HOME/bin/nvcc``."""
 
     def make(full: str) -> Path:
-        major, minor, _ = full.split(".")
-        nvcc = tmp_path / f"cuda-{full}" / "bin" / "nvcc"
-        nvcc.parent.mkdir(parents=True)
-        script = FAKE_NVCC.replace("@PYTHON@", sys.executable).replace("@FULL@", full)
-        nvcc.write_text(script.replace("@MAJOR@", major).replace("@MINOR@", minor))
-        nvcc.chmod(0o755)
+        nvcc = fake_nvcc.write(tmp_path / f"cuda-{full}" / "bin" / "nvcc", full)
         monkeypatch.setenv("CUDA_HOME", str(nvcc.parents[1]))
         return nvcc
 
@@ -258,11 +173,6 @@ def package(tmp_path):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def _calls(nvcc: Path) -> list[list[str]]:
-    log = nvcc.with_name("calls.jsonl")
-    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
 
 def _entry(package, name: str) -> dict[str, Any]:
@@ -313,7 +223,7 @@ def test_the_command_is_flashinfer_compile_command(package, toolkit, tvm_ffi, ca
     # FlashInfer's gate compiles from the package copy with relative sources into aot/; the loader passes absolute
     # sources and compiles into a temporary file next to the cached library
     reference = [str(root / arg) if arg in entry["sources"] else arg for arg in reference]
-    (call,) = _calls(nvcc)
+    (call,) = fake_nvcc.calls(nvcc)
     assert call[:-1] == reference[1:-1]
     assert Path(call[-1]).parent == library.parent == cache / PACKAGE
     assert [flag for flag in call if flag in CONDITIONAL] == conditional
@@ -332,7 +242,7 @@ def test_a_library_above_the_toolkit_raises_and_warmups_leave_it_out(package, to
     assert [spec.name for spec in package.jit_specs("sm_103a")] == [f"prog_sm_103a_{CLOSURE[:20]}"]
     with pytest.raises(RuntimeError, match=r"needs CUDA 13\.5 or newer"):
         loader.prebuild_libraries(package, ["prog_sm_107a"])
-    assert _calls(nvcc) == []
+    assert fake_nvcc.calls(nvcc) == []
 
 
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
@@ -348,7 +258,7 @@ def test_an_architecture_above_the_toolkit_raises_whatever_its_entry_records(pac
         package.jit_spec(f"prog_{arch}")
     with pytest.raises(RuntimeError, match=rf"for {arch} needs CUDA 13\.4 or newer"):
         loader.prebuild_libraries(package, [f"prog_{arch}"])
-    assert _calls(nvcc) == []
+    assert fake_nvcc.calls(nvcc) == []
 
 
 @pytest.mark.parametrize(
@@ -424,7 +334,7 @@ def test_a_cached_library_is_built_once(package, toolkit, tvm_ffi):
     second = package.jit_spec("prog_sm_100a").build()
 
     assert first == second
-    assert len(_calls(nvcc)) == 1
+    assert len(fake_nvcc.calls(nvcc)) == 1
     assert sorted(path.name for path in first.parent.iterdir()) == sorted([first.name, first.stem + ".lock"])
 
 
@@ -486,7 +396,7 @@ def test_a_held_build_lock_is_reported_and_given_up_on(package, toolkit, tvm_ffi
             spec.build()
 
     assert any(f"for the build lock {lock} of {spec.name}" in record.getMessage() for record in caplog.records)
-    assert _calls(nvcc) == []
+    assert fake_nvcc.calls(nvcc) == []
     assert not spec.get_library_path().exists()
 
 
@@ -502,7 +412,7 @@ def test_a_build_waits_for_a_released_lock(package, toolkit, tvm_ffi, held_lock,
     release.join()
 
     assert path.is_file()
-    assert len(_calls(nvcc)) == 1
+    assert len(fake_nvcc.calls(nvcc)) == 1
 
 
 def test_prebuild_returns_every_library_and_compiles_only_the_missing_ones(package, toolkit, tvm_ffi):
@@ -516,7 +426,7 @@ def test_prebuild_returns_every_library_and_compiles_only_the_missing_ones(packa
     again = loader.prebuild_libraries(package, names)
 
     assert first == again == [package.jit_spec("prog_sm_100a").get_library_path(), aot / "prog_sm_103a.so"]
-    assert len(_calls(nvcc)) == 1
+    assert len(fake_nvcc.calls(nvcc)) == 1
 
 
 def test_the_toolkit_is_cuda_home_else_path(toolkit, monkeypatch):
@@ -623,11 +533,11 @@ def test_no_build_raises_instead_of_compiling_and_names_the_op(vendored, toolkit
                 cake_build.load_library("prog_sm_100a")
         with pytest.raises(RuntimeError, match=error):
             loader.prebuild_libraries(vendored, ["prog_sm_100a"])
-    assert _calls(nvcc) == []
+    assert fake_nvcc.calls(nvcc) == []
     loader.prebuild_libraries(vendored, ["prog_sm_100a"])
     with loader.no_build():
         assert cake_build.load_library("prog_sm_100a").build_cuda_version() == 13040
-    assert len(_calls(nvcc)) == 1
+    assert len(fake_nvcc.calls(nvcc)) == 1
 
 
 @pytest.mark.parametrize(("capability", "arch"), [((10, 0), "sm_100a"), ((10, 3), "sm_103a"), ((10, 7), "sm_107a")])
@@ -688,7 +598,7 @@ def test_a_generated_build_json_compiles_with_flashinfer_compile_command(tmp_pat
     for arch in ("sm_100a", "sm_103a", "sm_107a"):
         package.jit_spec(f"gen_fwd_{arch}").build()
 
-    calls = _calls(nvcc)
+    calls = fake_nvcc.calls(nvcc)
     assert len(calls) == 3
     for arch, call in zip(("sm_100a", "sm_103a", "sm_107a"), calls):
         entry = _entry(package, f"gen_fwd_{arch}")
