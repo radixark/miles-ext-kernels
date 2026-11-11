@@ -121,12 +121,6 @@ __device__ __forceinline__ void elect_commit_cg2_multicast(int mbar_addr, uint16
 }
 
 
-__device__ __forceinline__ void mbarrier_arrive(int mbar_addr) {
-    asm volatile(
-        "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
-        :: "r"(mbar_addr) : "memory");
-}
-
 
 
 
@@ -160,7 +154,7 @@ __device__ __forceinline__ void tmem_ld_x16(float* dst, int tmem_addr) {
 extern "C" {
 
 __global__ __launch_bounds__(320) __cluster_dims__(2,1,1) void
-kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, float* __restrict__ C, int* __restrict__ offs, uint8_t* __restrict__ tensormap_workspace, float* __restrict__ tail_sums, unsigned int* __restrict__ tail_tickets, int tail_splits, int raster_rows, int num_groups, int sum_m, int N, int K, int ldc, int stride_e, unsigned int* __restrict__ wave_sync, int wave_mode)
+kernel_cake_moe_grouped_det_gemm_bcd90000cc752d22a392_wgrad_out32(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, float* __restrict__ C, int* __restrict__ offs, uint8_t* __restrict__ tensormap_workspace, float* __restrict__ partials, int tail_splits, int raster_rows, int num_groups, int sum_m, int N, int K, int ldc, int stride_e, unsigned int* __restrict__ wave_sync, int wave_mode)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -181,7 +175,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
     #define mainloop_done_addr (mbar_base + 64)
     #define epilogue_done_addr (mbar_base + 72)
     #define epi_free0_addr (mbar_base + 80)
-    #define order_ready_addr (mbar_base + 88)
 
     const int bid = blockIdx.x;
     const int num_bids = gridDim.x;
@@ -199,10 +192,8 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
     const int smem_b0_addr = smem + 17408;
     __nv_bfloat16* smem_b1 = reinterpret_cast<__nv_bfloat16*>(smem_raw + 33792);
     const int smem_b1_addr = smem + 33792;
-    int* og_a = reinterpret_cast<int*>(smem_raw + 197632);
-    const int og_a_addr = smem + 197632;
 
-    // Mbarrier init (12 barriers at smem_raw[0..96))
+    // Mbarrier init (11 barriers at smem_raw[0..88))
 
     if (warp == 0) {
         uint32_t leader = elect_sync();
@@ -225,8 +216,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
             mbarrier_init(smem + 72, 16);
             // epi_free0: 1 barriers, init_count=16
             mbarrier_init(smem + 80, 16);
-            // order_ready: 1 barriers, init_count=32
-            mbarrier_init(smem + 88, 32);
             asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
         }
     }
@@ -236,9 +225,9 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
     asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");
 
     // TMEM alloc (512 columns, 512 used)
-    volatile int* tmem_addr_storage = (volatile int*)(smem_raw + 96);
+    volatile int* tmem_addr_storage = (volatile int*)(smem_raw + 88);
     if (warp == 0) {
-        int _tmem_hold = smem + 96;
+        int _tmem_hold = smem + 88;
         asm volatile("tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [%0], %1;" :: "r"(_tmem_hold), "r"(512) : "memory");
         __syncwarp();
         asm volatile("tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned;");
@@ -297,7 +286,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                 if (tail_splits > 1) {
                     reg_end = tail_base;
                 }
-                mbarrier_wait(order_ready_addr, 0);
                 #pragma unroll 1
                 for (unsigned int t = cluster_u; t < reg_end; t += num_clusters_u) {
                     unsigned int w = t / num_clusters_u;
@@ -320,28 +308,16 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                                     }
                                     int ws_e_lo = (int)((w - 1) * num_clusters_u / tiles_per_group);
                                     int ws_e_hi = (int)(ws_u_hi / tiles_per_group);
-                                    int ws_p_lo = ws_e_lo;
-                                    if (num_groups <= 128) {
-                                        ws_p_lo = og_a[(int)ws_e_lo];
-                                    }
-                                    int ws_end = offs[ws_p_lo];
+                                    int ws_end = offs[ws_e_lo];
                                     int ws_beg = 0;
-                                    if (ws_p_lo > 0) {
-                                        ws_beg = offs[ws_p_lo - 1];
+                                    if (ws_e_lo > 0) {
+                                        ws_beg = offs[ws_e_lo - 1];
                                     }
                                     int ws_mn = (ws_end - ws_beg + (BLOCK_K - 1)) / BLOCK_K;
                                     int ws_mx = ws_mn;
                                     #pragma unroll 1
                                     for (int ws_e = ws_e_lo + 1; ws_e < ws_e_hi + 1; ws_e++) {
-                                        int ws_p = ws_e;
-                                        if (num_groups <= 128) {
-                                            ws_p = og_a[(int)ws_e];
-                                        }
-                                        int ws_pb = 0;
-                                        if (ws_p > 0) {
-                                            ws_pb = offs[ws_p - 1];
-                                        }
-                                        int ws_len = (offs[ws_p] - ws_pb + (BLOCK_K - 1)) / BLOCK_K;
+                                        int ws_len = (offs[ws_e] - offs[ws_e - 1] + (BLOCK_K - 1)) / BLOCK_K;
                                         if (ws_len < ws_mn) {
                                             ws_mn = ws_len;
                                         }
@@ -381,9 +357,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                     unsigned int kr_n_block = rem / grid_n_u;
                     n_block = nc_n_block * (1 - rr_n_block) + (rem - kr_n_block * grid_n_u) * rr_n_block;
                     k_block = (rem - nc_n_block * grid_k_u) * (1 - rr_n_block) + kr_n_block * rr_n_block;
-                    if (num_groups <= 128) {
-                        e_u = (unsigned int)og_a[(int)e_u];
-                    }
                     int e_i = (int)e_u;
                     int end_e = offs[e_i];
                     int prev_i = e_i - 1;
@@ -462,9 +435,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                         unsigned int kr_n_blockt = remt / grid_n_u;
                         n_blockt = nc_n_blockt * (1 - rr_n_blockt) + (remt - kr_n_blockt * grid_n_u) * rr_n_blockt;
                         k_blockt = (remt - nc_n_blockt * grid_k_u) * (1 - rr_n_blockt) + kr_n_blockt * rr_n_blockt;
-                        if (num_groups <= 128) {
-                            e_ut = (unsigned int)og_a[(int)e_ut];
-                        }
                         int e_it = (int)e_ut;
                         int end_et = offs[e_it];
                         int prev_it = e_it - 1;
@@ -561,7 +531,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                 if (tail_splits > 1) {
                     reg_end_m = tail_base_m;
                 }
-                mbarrier_wait(order_ready_addr, 0);
                 #pragma unroll 1
                 for (unsigned int t_m = cluster_m; t_m < reg_end_m; t_m += num_clusters_m) {
                     unsigned int w_m = t_m / num_clusters_m;
@@ -573,9 +542,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                     }
                     unsigned int ts_m = w_m * num_clusters_m + p_m;
                     unsigned int e_um = ts_m / tiles_per_group_m;
-                    if (num_groups <= 128) {
-                        e_um = (unsigned int)og_a[(int)e_um];
-                    }
                     int e_im = (int)e_um;
                     int end_m = offs[e_im];
                     int prev_m = e_im - 1;
@@ -1105,9 +1071,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                         unsigned int j_u_tm = u_tm - s_u_tm * num_tail_tm;
                         unsigned int tt_m = tail_base_m + j_u_tm;
                         unsigned int e_umt = tt_m / tiles_per_group_m;
-                        if (num_groups <= 128) {
-                            e_umt = (unsigned int)og_a[(int)e_umt];
-                        }
                         int e_imt = (int)e_umt;
                         int end_mt = offs[e_imt];
                         int prev_mt = e_imt - 1;
@@ -1560,2339 +1523,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
             if (tail_splits > 1) {
                 reg_end_e = tail_base_e;
             }
-            if (warp == 2) {
-                if (num_groups <= 128) {
-                    int og_n = num_groups;
-                    int og_m[4];
-                    int og_g[4];
-                    #pragma unroll
-                    for (int ok = 0; ok < 4; ok++) {
-                        og_m[ok] = -1;
-                        og_g[ok] = 0;
-                        int ok_e = lane + 32 * ok;
-                        if (ok_e < og_n) {
-                            og_g[ok] = ok_e;
-                            int ok_lo = 0;
-                            if (ok_e > 0) {
-                                ok_lo = offs[ok_e - 1];
-                            }
-                            og_m[ok] = offs[ok_e] - ok_lo;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_0 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 1);
-                        int bl_pg_0 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 1);
-                        int bl_pf_0 = 0;
-                        if (bl_pm_0 > og_m[0]) {
-                            bl_pf_0 = 1;
-                        }
-                        if (bl_pm_0 == og_m[0]) {
-                            if (bl_pg_0 < og_g[0]) {
-                                bl_pf_0 = 1;
-                            }
-                        }
-                        int bl_i_0 = lane;
-                        int bl_want_0 = 0;
-                        if (lane % 2 == (bl_i_0 >> 1) % 2) {
-                            bl_want_0 = 1;
-                        }
-                        if (bl_pf_0 == bl_want_0) {
-                            og_m[0] = bl_pm_0;
-                            og_g[0] = bl_pg_0;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_1 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 1);
-                        int bl_pg_1 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 1);
-                        int bl_pf_1 = 0;
-                        if (bl_pm_1 > og_m[1]) {
-                            bl_pf_1 = 1;
-                        }
-                        if (bl_pm_1 == og_m[1]) {
-                            if (bl_pg_1 < og_g[1]) {
-                                bl_pf_1 = 1;
-                            }
-                        }
-                        int bl_i_1 = lane + 32;
-                        int bl_want_1 = 0;
-                        if (lane % 2 == (bl_i_1 >> 1) % 2) {
-                            bl_want_1 = 1;
-                        }
-                        if (bl_pf_1 == bl_want_1) {
-                            og_m[1] = bl_pm_1;
-                            og_g[1] = bl_pg_1;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_2 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 1);
-                        int bl_pg_2 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 1);
-                        int bl_pf_2 = 0;
-                        if (bl_pm_2 > og_m[2]) {
-                            bl_pf_2 = 1;
-                        }
-                        if (bl_pm_2 == og_m[2]) {
-                            if (bl_pg_2 < og_g[2]) {
-                                bl_pf_2 = 1;
-                            }
-                        }
-                        int bl_i_2 = lane + 64;
-                        int bl_want_2 = 0;
-                        if (lane % 2 == (bl_i_2 >> 1) % 2) {
-                            bl_want_2 = 1;
-                        }
-                        if (bl_pf_2 == bl_want_2) {
-                            og_m[2] = bl_pm_2;
-                            og_g[2] = bl_pg_2;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_3 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 1);
-                        int bl_pg_3 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 1);
-                        int bl_pf_3 = 0;
-                        if (bl_pm_3 > og_m[3]) {
-                            bl_pf_3 = 1;
-                        }
-                        if (bl_pm_3 == og_m[3]) {
-                            if (bl_pg_3 < og_g[3]) {
-                                bl_pf_3 = 1;
-                            }
-                        }
-                        int bl_i_3 = lane + 96;
-                        int bl_want_3 = 0;
-                        if (lane % 2 == (bl_i_3 >> 1) % 2) {
-                            bl_want_3 = 1;
-                        }
-                        if (bl_pf_3 == bl_want_3) {
-                            og_m[3] = bl_pm_3;
-                            og_g[3] = bl_pg_3;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_4 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 2);
-                        int bl_pg_4 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 2);
-                        int bl_pf_4 = 0;
-                        if (bl_pm_4 > og_m[0]) {
-                            bl_pf_4 = 1;
-                        }
-                        if (bl_pm_4 == og_m[0]) {
-                            if (bl_pg_4 < og_g[0]) {
-                                bl_pf_4 = 1;
-                            }
-                        }
-                        int bl_i_4 = lane;
-                        int bl_want_4 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_4 >> 2) % 2) {
-                            bl_want_4 = 1;
-                        }
-                        if (bl_pf_4 == bl_want_4) {
-                            og_m[0] = bl_pm_4;
-                            og_g[0] = bl_pg_4;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_5 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 2);
-                        int bl_pg_5 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 2);
-                        int bl_pf_5 = 0;
-                        if (bl_pm_5 > og_m[1]) {
-                            bl_pf_5 = 1;
-                        }
-                        if (bl_pm_5 == og_m[1]) {
-                            if (bl_pg_5 < og_g[1]) {
-                                bl_pf_5 = 1;
-                            }
-                        }
-                        int bl_i_5 = lane + 32;
-                        int bl_want_5 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_5 >> 2) % 2) {
-                            bl_want_5 = 1;
-                        }
-                        if (bl_pf_5 == bl_want_5) {
-                            og_m[1] = bl_pm_5;
-                            og_g[1] = bl_pg_5;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_6 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 2);
-                        int bl_pg_6 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 2);
-                        int bl_pf_6 = 0;
-                        if (bl_pm_6 > og_m[2]) {
-                            bl_pf_6 = 1;
-                        }
-                        if (bl_pm_6 == og_m[2]) {
-                            if (bl_pg_6 < og_g[2]) {
-                                bl_pf_6 = 1;
-                            }
-                        }
-                        int bl_i_6 = lane + 64;
-                        int bl_want_6 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_6 >> 2) % 2) {
-                            bl_want_6 = 1;
-                        }
-                        if (bl_pf_6 == bl_want_6) {
-                            og_m[2] = bl_pm_6;
-                            og_g[2] = bl_pg_6;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_7 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 2);
-                        int bl_pg_7 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 2);
-                        int bl_pf_7 = 0;
-                        if (bl_pm_7 > og_m[3]) {
-                            bl_pf_7 = 1;
-                        }
-                        if (bl_pm_7 == og_m[3]) {
-                            if (bl_pg_7 < og_g[3]) {
-                                bl_pf_7 = 1;
-                            }
-                        }
-                        int bl_i_7 = lane + 96;
-                        int bl_want_7 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_7 >> 2) % 2) {
-                            bl_want_7 = 1;
-                        }
-                        if (bl_pf_7 == bl_want_7) {
-                            og_m[3] = bl_pm_7;
-                            og_g[3] = bl_pg_7;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_8 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 1);
-                        int bl_pg_8 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 1);
-                        int bl_pf_8 = 0;
-                        if (bl_pm_8 > og_m[0]) {
-                            bl_pf_8 = 1;
-                        }
-                        if (bl_pm_8 == og_m[0]) {
-                            if (bl_pg_8 < og_g[0]) {
-                                bl_pf_8 = 1;
-                            }
-                        }
-                        int bl_i_8 = lane;
-                        int bl_want_8 = 0;
-                        if (lane % 2 == (bl_i_8 >> 2) % 2) {
-                            bl_want_8 = 1;
-                        }
-                        if (bl_pf_8 == bl_want_8) {
-                            og_m[0] = bl_pm_8;
-                            og_g[0] = bl_pg_8;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_9 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 1);
-                        int bl_pg_9 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 1);
-                        int bl_pf_9 = 0;
-                        if (bl_pm_9 > og_m[1]) {
-                            bl_pf_9 = 1;
-                        }
-                        if (bl_pm_9 == og_m[1]) {
-                            if (bl_pg_9 < og_g[1]) {
-                                bl_pf_9 = 1;
-                            }
-                        }
-                        int bl_i_9 = lane + 32;
-                        int bl_want_9 = 0;
-                        if (lane % 2 == (bl_i_9 >> 2) % 2) {
-                            bl_want_9 = 1;
-                        }
-                        if (bl_pf_9 == bl_want_9) {
-                            og_m[1] = bl_pm_9;
-                            og_g[1] = bl_pg_9;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_10 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 1);
-                        int bl_pg_10 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 1);
-                        int bl_pf_10 = 0;
-                        if (bl_pm_10 > og_m[2]) {
-                            bl_pf_10 = 1;
-                        }
-                        if (bl_pm_10 == og_m[2]) {
-                            if (bl_pg_10 < og_g[2]) {
-                                bl_pf_10 = 1;
-                            }
-                        }
-                        int bl_i_10 = lane + 64;
-                        int bl_want_10 = 0;
-                        if (lane % 2 == (bl_i_10 >> 2) % 2) {
-                            bl_want_10 = 1;
-                        }
-                        if (bl_pf_10 == bl_want_10) {
-                            og_m[2] = bl_pm_10;
-                            og_g[2] = bl_pg_10;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_11 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 1);
-                        int bl_pg_11 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 1);
-                        int bl_pf_11 = 0;
-                        if (bl_pm_11 > og_m[3]) {
-                            bl_pf_11 = 1;
-                        }
-                        if (bl_pm_11 == og_m[3]) {
-                            if (bl_pg_11 < og_g[3]) {
-                                bl_pf_11 = 1;
-                            }
-                        }
-                        int bl_i_11 = lane + 96;
-                        int bl_want_11 = 0;
-                        if (lane % 2 == (bl_i_11 >> 2) % 2) {
-                            bl_want_11 = 1;
-                        }
-                        if (bl_pf_11 == bl_want_11) {
-                            og_m[3] = bl_pm_11;
-                            og_g[3] = bl_pg_11;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_12 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 4);
-                        int bl_pg_12 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 4);
-                        int bl_pf_12 = 0;
-                        if (bl_pm_12 > og_m[0]) {
-                            bl_pf_12 = 1;
-                        }
-                        if (bl_pm_12 == og_m[0]) {
-                            if (bl_pg_12 < og_g[0]) {
-                                bl_pf_12 = 1;
-                            }
-                        }
-                        int bl_i_12 = lane;
-                        int bl_want_12 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_12 >> 3) % 2) {
-                            bl_want_12 = 1;
-                        }
-                        if (bl_pf_12 == bl_want_12) {
-                            og_m[0] = bl_pm_12;
-                            og_g[0] = bl_pg_12;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_13 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 4);
-                        int bl_pg_13 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 4);
-                        int bl_pf_13 = 0;
-                        if (bl_pm_13 > og_m[1]) {
-                            bl_pf_13 = 1;
-                        }
-                        if (bl_pm_13 == og_m[1]) {
-                            if (bl_pg_13 < og_g[1]) {
-                                bl_pf_13 = 1;
-                            }
-                        }
-                        int bl_i_13 = lane + 32;
-                        int bl_want_13 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_13 >> 3) % 2) {
-                            bl_want_13 = 1;
-                        }
-                        if (bl_pf_13 == bl_want_13) {
-                            og_m[1] = bl_pm_13;
-                            og_g[1] = bl_pg_13;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_14 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 4);
-                        int bl_pg_14 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 4);
-                        int bl_pf_14 = 0;
-                        if (bl_pm_14 > og_m[2]) {
-                            bl_pf_14 = 1;
-                        }
-                        if (bl_pm_14 == og_m[2]) {
-                            if (bl_pg_14 < og_g[2]) {
-                                bl_pf_14 = 1;
-                            }
-                        }
-                        int bl_i_14 = lane + 64;
-                        int bl_want_14 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_14 >> 3) % 2) {
-                            bl_want_14 = 1;
-                        }
-                        if (bl_pf_14 == bl_want_14) {
-                            og_m[2] = bl_pm_14;
-                            og_g[2] = bl_pg_14;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_15 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 4);
-                        int bl_pg_15 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 4);
-                        int bl_pf_15 = 0;
-                        if (bl_pm_15 > og_m[3]) {
-                            bl_pf_15 = 1;
-                        }
-                        if (bl_pm_15 == og_m[3]) {
-                            if (bl_pg_15 < og_g[3]) {
-                                bl_pf_15 = 1;
-                            }
-                        }
-                        int bl_i_15 = lane + 96;
-                        int bl_want_15 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_15 >> 3) % 2) {
-                            bl_want_15 = 1;
-                        }
-                        if (bl_pf_15 == bl_want_15) {
-                            og_m[3] = bl_pm_15;
-                            og_g[3] = bl_pg_15;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_16 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 2);
-                        int bl_pg_16 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 2);
-                        int bl_pf_16 = 0;
-                        if (bl_pm_16 > og_m[0]) {
-                            bl_pf_16 = 1;
-                        }
-                        if (bl_pm_16 == og_m[0]) {
-                            if (bl_pg_16 < og_g[0]) {
-                                bl_pf_16 = 1;
-                            }
-                        }
-                        int bl_i_16 = lane;
-                        int bl_want_16 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_16 >> 3) % 2) {
-                            bl_want_16 = 1;
-                        }
-                        if (bl_pf_16 == bl_want_16) {
-                            og_m[0] = bl_pm_16;
-                            og_g[0] = bl_pg_16;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_17 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 2);
-                        int bl_pg_17 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 2);
-                        int bl_pf_17 = 0;
-                        if (bl_pm_17 > og_m[1]) {
-                            bl_pf_17 = 1;
-                        }
-                        if (bl_pm_17 == og_m[1]) {
-                            if (bl_pg_17 < og_g[1]) {
-                                bl_pf_17 = 1;
-                            }
-                        }
-                        int bl_i_17 = lane + 32;
-                        int bl_want_17 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_17 >> 3) % 2) {
-                            bl_want_17 = 1;
-                        }
-                        if (bl_pf_17 == bl_want_17) {
-                            og_m[1] = bl_pm_17;
-                            og_g[1] = bl_pg_17;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_18 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 2);
-                        int bl_pg_18 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 2);
-                        int bl_pf_18 = 0;
-                        if (bl_pm_18 > og_m[2]) {
-                            bl_pf_18 = 1;
-                        }
-                        if (bl_pm_18 == og_m[2]) {
-                            if (bl_pg_18 < og_g[2]) {
-                                bl_pf_18 = 1;
-                            }
-                        }
-                        int bl_i_18 = lane + 64;
-                        int bl_want_18 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_18 >> 3) % 2) {
-                            bl_want_18 = 1;
-                        }
-                        if (bl_pf_18 == bl_want_18) {
-                            og_m[2] = bl_pm_18;
-                            og_g[2] = bl_pg_18;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_19 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 2);
-                        int bl_pg_19 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 2);
-                        int bl_pf_19 = 0;
-                        if (bl_pm_19 > og_m[3]) {
-                            bl_pf_19 = 1;
-                        }
-                        if (bl_pm_19 == og_m[3]) {
-                            if (bl_pg_19 < og_g[3]) {
-                                bl_pf_19 = 1;
-                            }
-                        }
-                        int bl_i_19 = lane + 96;
-                        int bl_want_19 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_19 >> 3) % 2) {
-                            bl_want_19 = 1;
-                        }
-                        if (bl_pf_19 == bl_want_19) {
-                            og_m[3] = bl_pm_19;
-                            og_g[3] = bl_pg_19;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_20 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 1);
-                        int bl_pg_20 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 1);
-                        int bl_pf_20 = 0;
-                        if (bl_pm_20 > og_m[0]) {
-                            bl_pf_20 = 1;
-                        }
-                        if (bl_pm_20 == og_m[0]) {
-                            if (bl_pg_20 < og_g[0]) {
-                                bl_pf_20 = 1;
-                            }
-                        }
-                        int bl_i_20 = lane;
-                        int bl_want_20 = 0;
-                        if (lane % 2 == (bl_i_20 >> 3) % 2) {
-                            bl_want_20 = 1;
-                        }
-                        if (bl_pf_20 == bl_want_20) {
-                            og_m[0] = bl_pm_20;
-                            og_g[0] = bl_pg_20;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_21 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 1);
-                        int bl_pg_21 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 1);
-                        int bl_pf_21 = 0;
-                        if (bl_pm_21 > og_m[1]) {
-                            bl_pf_21 = 1;
-                        }
-                        if (bl_pm_21 == og_m[1]) {
-                            if (bl_pg_21 < og_g[1]) {
-                                bl_pf_21 = 1;
-                            }
-                        }
-                        int bl_i_21 = lane + 32;
-                        int bl_want_21 = 0;
-                        if (lane % 2 == (bl_i_21 >> 3) % 2) {
-                            bl_want_21 = 1;
-                        }
-                        if (bl_pf_21 == bl_want_21) {
-                            og_m[1] = bl_pm_21;
-                            og_g[1] = bl_pg_21;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_22 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 1);
-                        int bl_pg_22 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 1);
-                        int bl_pf_22 = 0;
-                        if (bl_pm_22 > og_m[2]) {
-                            bl_pf_22 = 1;
-                        }
-                        if (bl_pm_22 == og_m[2]) {
-                            if (bl_pg_22 < og_g[2]) {
-                                bl_pf_22 = 1;
-                            }
-                        }
-                        int bl_i_22 = lane + 64;
-                        int bl_want_22 = 0;
-                        if (lane % 2 == (bl_i_22 >> 3) % 2) {
-                            bl_want_22 = 1;
-                        }
-                        if (bl_pf_22 == bl_want_22) {
-                            og_m[2] = bl_pm_22;
-                            og_g[2] = bl_pg_22;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_23 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 1);
-                        int bl_pg_23 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 1);
-                        int bl_pf_23 = 0;
-                        if (bl_pm_23 > og_m[3]) {
-                            bl_pf_23 = 1;
-                        }
-                        if (bl_pm_23 == og_m[3]) {
-                            if (bl_pg_23 < og_g[3]) {
-                                bl_pf_23 = 1;
-                            }
-                        }
-                        int bl_i_23 = lane + 96;
-                        int bl_want_23 = 0;
-                        if (lane % 2 == (bl_i_23 >> 3) % 2) {
-                            bl_want_23 = 1;
-                        }
-                        if (bl_pf_23 == bl_want_23) {
-                            og_m[3] = bl_pm_23;
-                            og_g[3] = bl_pg_23;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_24 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 8);
-                        int bl_pg_24 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 8);
-                        int bl_pf_24 = 0;
-                        if (bl_pm_24 > og_m[0]) {
-                            bl_pf_24 = 1;
-                        }
-                        if (bl_pm_24 == og_m[0]) {
-                            if (bl_pg_24 < og_g[0]) {
-                                bl_pf_24 = 1;
-                            }
-                        }
-                        int bl_i_24 = lane;
-                        int bl_want_24 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_24 >> 4) % 2) {
-                            bl_want_24 = 1;
-                        }
-                        if (bl_pf_24 == bl_want_24) {
-                            og_m[0] = bl_pm_24;
-                            og_g[0] = bl_pg_24;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_25 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 8);
-                        int bl_pg_25 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 8);
-                        int bl_pf_25 = 0;
-                        if (bl_pm_25 > og_m[1]) {
-                            bl_pf_25 = 1;
-                        }
-                        if (bl_pm_25 == og_m[1]) {
-                            if (bl_pg_25 < og_g[1]) {
-                                bl_pf_25 = 1;
-                            }
-                        }
-                        int bl_i_25 = lane + 32;
-                        int bl_want_25 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_25 >> 4) % 2) {
-                            bl_want_25 = 1;
-                        }
-                        if (bl_pf_25 == bl_want_25) {
-                            og_m[1] = bl_pm_25;
-                            og_g[1] = bl_pg_25;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_26 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 8);
-                        int bl_pg_26 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 8);
-                        int bl_pf_26 = 0;
-                        if (bl_pm_26 > og_m[2]) {
-                            bl_pf_26 = 1;
-                        }
-                        if (bl_pm_26 == og_m[2]) {
-                            if (bl_pg_26 < og_g[2]) {
-                                bl_pf_26 = 1;
-                            }
-                        }
-                        int bl_i_26 = lane + 64;
-                        int bl_want_26 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_26 >> 4) % 2) {
-                            bl_want_26 = 1;
-                        }
-                        if (bl_pf_26 == bl_want_26) {
-                            og_m[2] = bl_pm_26;
-                            og_g[2] = bl_pg_26;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_27 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 8);
-                        int bl_pg_27 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 8);
-                        int bl_pf_27 = 0;
-                        if (bl_pm_27 > og_m[3]) {
-                            bl_pf_27 = 1;
-                        }
-                        if (bl_pm_27 == og_m[3]) {
-                            if (bl_pg_27 < og_g[3]) {
-                                bl_pf_27 = 1;
-                            }
-                        }
-                        int bl_i_27 = lane + 96;
-                        int bl_want_27 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_27 >> 4) % 2) {
-                            bl_want_27 = 1;
-                        }
-                        if (bl_pf_27 == bl_want_27) {
-                            og_m[3] = bl_pm_27;
-                            og_g[3] = bl_pg_27;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_28 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 4);
-                        int bl_pg_28 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 4);
-                        int bl_pf_28 = 0;
-                        if (bl_pm_28 > og_m[0]) {
-                            bl_pf_28 = 1;
-                        }
-                        if (bl_pm_28 == og_m[0]) {
-                            if (bl_pg_28 < og_g[0]) {
-                                bl_pf_28 = 1;
-                            }
-                        }
-                        int bl_i_28 = lane;
-                        int bl_want_28 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_28 >> 4) % 2) {
-                            bl_want_28 = 1;
-                        }
-                        if (bl_pf_28 == bl_want_28) {
-                            og_m[0] = bl_pm_28;
-                            og_g[0] = bl_pg_28;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_29 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 4);
-                        int bl_pg_29 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 4);
-                        int bl_pf_29 = 0;
-                        if (bl_pm_29 > og_m[1]) {
-                            bl_pf_29 = 1;
-                        }
-                        if (bl_pm_29 == og_m[1]) {
-                            if (bl_pg_29 < og_g[1]) {
-                                bl_pf_29 = 1;
-                            }
-                        }
-                        int bl_i_29 = lane + 32;
-                        int bl_want_29 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_29 >> 4) % 2) {
-                            bl_want_29 = 1;
-                        }
-                        if (bl_pf_29 == bl_want_29) {
-                            og_m[1] = bl_pm_29;
-                            og_g[1] = bl_pg_29;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_30 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 4);
-                        int bl_pg_30 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 4);
-                        int bl_pf_30 = 0;
-                        if (bl_pm_30 > og_m[2]) {
-                            bl_pf_30 = 1;
-                        }
-                        if (bl_pm_30 == og_m[2]) {
-                            if (bl_pg_30 < og_g[2]) {
-                                bl_pf_30 = 1;
-                            }
-                        }
-                        int bl_i_30 = lane + 64;
-                        int bl_want_30 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_30 >> 4) % 2) {
-                            bl_want_30 = 1;
-                        }
-                        if (bl_pf_30 == bl_want_30) {
-                            og_m[2] = bl_pm_30;
-                            og_g[2] = bl_pg_30;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_31 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 4);
-                        int bl_pg_31 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 4);
-                        int bl_pf_31 = 0;
-                        if (bl_pm_31 > og_m[3]) {
-                            bl_pf_31 = 1;
-                        }
-                        if (bl_pm_31 == og_m[3]) {
-                            if (bl_pg_31 < og_g[3]) {
-                                bl_pf_31 = 1;
-                            }
-                        }
-                        int bl_i_31 = lane + 96;
-                        int bl_want_31 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_31 >> 4) % 2) {
-                            bl_want_31 = 1;
-                        }
-                        if (bl_pf_31 == bl_want_31) {
-                            og_m[3] = bl_pm_31;
-                            og_g[3] = bl_pg_31;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_32 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 2);
-                        int bl_pg_32 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 2);
-                        int bl_pf_32 = 0;
-                        if (bl_pm_32 > og_m[0]) {
-                            bl_pf_32 = 1;
-                        }
-                        if (bl_pm_32 == og_m[0]) {
-                            if (bl_pg_32 < og_g[0]) {
-                                bl_pf_32 = 1;
-                            }
-                        }
-                        int bl_i_32 = lane;
-                        int bl_want_32 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_32 >> 4) % 2) {
-                            bl_want_32 = 1;
-                        }
-                        if (bl_pf_32 == bl_want_32) {
-                            og_m[0] = bl_pm_32;
-                            og_g[0] = bl_pg_32;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_33 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 2);
-                        int bl_pg_33 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 2);
-                        int bl_pf_33 = 0;
-                        if (bl_pm_33 > og_m[1]) {
-                            bl_pf_33 = 1;
-                        }
-                        if (bl_pm_33 == og_m[1]) {
-                            if (bl_pg_33 < og_g[1]) {
-                                bl_pf_33 = 1;
-                            }
-                        }
-                        int bl_i_33 = lane + 32;
-                        int bl_want_33 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_33 >> 4) % 2) {
-                            bl_want_33 = 1;
-                        }
-                        if (bl_pf_33 == bl_want_33) {
-                            og_m[1] = bl_pm_33;
-                            og_g[1] = bl_pg_33;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_34 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 2);
-                        int bl_pg_34 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 2);
-                        int bl_pf_34 = 0;
-                        if (bl_pm_34 > og_m[2]) {
-                            bl_pf_34 = 1;
-                        }
-                        if (bl_pm_34 == og_m[2]) {
-                            if (bl_pg_34 < og_g[2]) {
-                                bl_pf_34 = 1;
-                            }
-                        }
-                        int bl_i_34 = lane + 64;
-                        int bl_want_34 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_34 >> 4) % 2) {
-                            bl_want_34 = 1;
-                        }
-                        if (bl_pf_34 == bl_want_34) {
-                            og_m[2] = bl_pm_34;
-                            og_g[2] = bl_pg_34;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_35 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 2);
-                        int bl_pg_35 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 2);
-                        int bl_pf_35 = 0;
-                        if (bl_pm_35 > og_m[3]) {
-                            bl_pf_35 = 1;
-                        }
-                        if (bl_pm_35 == og_m[3]) {
-                            if (bl_pg_35 < og_g[3]) {
-                                bl_pf_35 = 1;
-                            }
-                        }
-                        int bl_i_35 = lane + 96;
-                        int bl_want_35 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_35 >> 4) % 2) {
-                            bl_want_35 = 1;
-                        }
-                        if (bl_pf_35 == bl_want_35) {
-                            og_m[3] = bl_pm_35;
-                            og_g[3] = bl_pg_35;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_36 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 1);
-                        int bl_pg_36 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 1);
-                        int bl_pf_36 = 0;
-                        if (bl_pm_36 > og_m[0]) {
-                            bl_pf_36 = 1;
-                        }
-                        if (bl_pm_36 == og_m[0]) {
-                            if (bl_pg_36 < og_g[0]) {
-                                bl_pf_36 = 1;
-                            }
-                        }
-                        int bl_i_36 = lane;
-                        int bl_want_36 = 0;
-                        if (lane % 2 == (bl_i_36 >> 4) % 2) {
-                            bl_want_36 = 1;
-                        }
-                        if (bl_pf_36 == bl_want_36) {
-                            og_m[0] = bl_pm_36;
-                            og_g[0] = bl_pg_36;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_37 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 1);
-                        int bl_pg_37 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 1);
-                        int bl_pf_37 = 0;
-                        if (bl_pm_37 > og_m[1]) {
-                            bl_pf_37 = 1;
-                        }
-                        if (bl_pm_37 == og_m[1]) {
-                            if (bl_pg_37 < og_g[1]) {
-                                bl_pf_37 = 1;
-                            }
-                        }
-                        int bl_i_37 = lane + 32;
-                        int bl_want_37 = 0;
-                        if (lane % 2 == (bl_i_37 >> 4) % 2) {
-                            bl_want_37 = 1;
-                        }
-                        if (bl_pf_37 == bl_want_37) {
-                            og_m[1] = bl_pm_37;
-                            og_g[1] = bl_pg_37;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_38 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 1);
-                        int bl_pg_38 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 1);
-                        int bl_pf_38 = 0;
-                        if (bl_pm_38 > og_m[2]) {
-                            bl_pf_38 = 1;
-                        }
-                        if (bl_pm_38 == og_m[2]) {
-                            if (bl_pg_38 < og_g[2]) {
-                                bl_pf_38 = 1;
-                            }
-                        }
-                        int bl_i_38 = lane + 64;
-                        int bl_want_38 = 0;
-                        if (lane % 2 == (bl_i_38 >> 4) % 2) {
-                            bl_want_38 = 1;
-                        }
-                        if (bl_pf_38 == bl_want_38) {
-                            og_m[2] = bl_pm_38;
-                            og_g[2] = bl_pg_38;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_39 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 1);
-                        int bl_pg_39 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 1);
-                        int bl_pf_39 = 0;
-                        if (bl_pm_39 > og_m[3]) {
-                            bl_pf_39 = 1;
-                        }
-                        if (bl_pm_39 == og_m[3]) {
-                            if (bl_pg_39 < og_g[3]) {
-                                bl_pf_39 = 1;
-                            }
-                        }
-                        int bl_i_39 = lane + 96;
-                        int bl_want_39 = 0;
-                        if (lane % 2 == (bl_i_39 >> 4) % 2) {
-                            bl_want_39 = 1;
-                        }
-                        if (bl_pf_39 == bl_want_39) {
-                            og_m[3] = bl_pm_39;
-                            og_g[3] = bl_pg_39;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_40 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 16);
-                        int bl_pg_40 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 16);
-                        int bl_pf_40 = 0;
-                        if (bl_pm_40 > og_m[0]) {
-                            bl_pf_40 = 1;
-                        }
-                        if (bl_pm_40 == og_m[0]) {
-                            if (bl_pg_40 < og_g[0]) {
-                                bl_pf_40 = 1;
-                            }
-                        }
-                        int bl_i_40 = lane;
-                        int bl_want_40 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_40 >> 5) % 2) {
-                            bl_want_40 = 1;
-                        }
-                        if (bl_pf_40 == bl_want_40) {
-                            og_m[0] = bl_pm_40;
-                            og_g[0] = bl_pg_40;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_41 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 16);
-                        int bl_pg_41 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 16);
-                        int bl_pf_41 = 0;
-                        if (bl_pm_41 > og_m[1]) {
-                            bl_pf_41 = 1;
-                        }
-                        if (bl_pm_41 == og_m[1]) {
-                            if (bl_pg_41 < og_g[1]) {
-                                bl_pf_41 = 1;
-                            }
-                        }
-                        int bl_i_41 = lane + 32;
-                        int bl_want_41 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_41 >> 5) % 2) {
-                            bl_want_41 = 1;
-                        }
-                        if (bl_pf_41 == bl_want_41) {
-                            og_m[1] = bl_pm_41;
-                            og_g[1] = bl_pg_41;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_42 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 16);
-                        int bl_pg_42 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 16);
-                        int bl_pf_42 = 0;
-                        if (bl_pm_42 > og_m[2]) {
-                            bl_pf_42 = 1;
-                        }
-                        if (bl_pm_42 == og_m[2]) {
-                            if (bl_pg_42 < og_g[2]) {
-                                bl_pf_42 = 1;
-                            }
-                        }
-                        int bl_i_42 = lane + 64;
-                        int bl_want_42 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_42 >> 5) % 2) {
-                            bl_want_42 = 1;
-                        }
-                        if (bl_pf_42 == bl_want_42) {
-                            og_m[2] = bl_pm_42;
-                            og_g[2] = bl_pg_42;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_43 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 16);
-                        int bl_pg_43 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 16);
-                        int bl_pf_43 = 0;
-                        if (bl_pm_43 > og_m[3]) {
-                            bl_pf_43 = 1;
-                        }
-                        if (bl_pm_43 == og_m[3]) {
-                            if (bl_pg_43 < og_g[3]) {
-                                bl_pf_43 = 1;
-                            }
-                        }
-                        int bl_i_43 = lane + 96;
-                        int bl_want_43 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_43 >> 5) % 2) {
-                            bl_want_43 = 1;
-                        }
-                        if (bl_pf_43 == bl_want_43) {
-                            og_m[3] = bl_pm_43;
-                            og_g[3] = bl_pg_43;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_44 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 8);
-                        int bl_pg_44 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 8);
-                        int bl_pf_44 = 0;
-                        if (bl_pm_44 > og_m[0]) {
-                            bl_pf_44 = 1;
-                        }
-                        if (bl_pm_44 == og_m[0]) {
-                            if (bl_pg_44 < og_g[0]) {
-                                bl_pf_44 = 1;
-                            }
-                        }
-                        int bl_i_44 = lane;
-                        int bl_want_44 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_44 >> 5) % 2) {
-                            bl_want_44 = 1;
-                        }
-                        if (bl_pf_44 == bl_want_44) {
-                            og_m[0] = bl_pm_44;
-                            og_g[0] = bl_pg_44;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_45 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 8);
-                        int bl_pg_45 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 8);
-                        int bl_pf_45 = 0;
-                        if (bl_pm_45 > og_m[1]) {
-                            bl_pf_45 = 1;
-                        }
-                        if (bl_pm_45 == og_m[1]) {
-                            if (bl_pg_45 < og_g[1]) {
-                                bl_pf_45 = 1;
-                            }
-                        }
-                        int bl_i_45 = lane + 32;
-                        int bl_want_45 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_45 >> 5) % 2) {
-                            bl_want_45 = 1;
-                        }
-                        if (bl_pf_45 == bl_want_45) {
-                            og_m[1] = bl_pm_45;
-                            og_g[1] = bl_pg_45;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_46 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 8);
-                        int bl_pg_46 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 8);
-                        int bl_pf_46 = 0;
-                        if (bl_pm_46 > og_m[2]) {
-                            bl_pf_46 = 1;
-                        }
-                        if (bl_pm_46 == og_m[2]) {
-                            if (bl_pg_46 < og_g[2]) {
-                                bl_pf_46 = 1;
-                            }
-                        }
-                        int bl_i_46 = lane + 64;
-                        int bl_want_46 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_46 >> 5) % 2) {
-                            bl_want_46 = 1;
-                        }
-                        if (bl_pf_46 == bl_want_46) {
-                            og_m[2] = bl_pm_46;
-                            og_g[2] = bl_pg_46;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_47 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 8);
-                        int bl_pg_47 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 8);
-                        int bl_pf_47 = 0;
-                        if (bl_pm_47 > og_m[3]) {
-                            bl_pf_47 = 1;
-                        }
-                        if (bl_pm_47 == og_m[3]) {
-                            if (bl_pg_47 < og_g[3]) {
-                                bl_pf_47 = 1;
-                            }
-                        }
-                        int bl_i_47 = lane + 96;
-                        int bl_want_47 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_47 >> 5) % 2) {
-                            bl_want_47 = 1;
-                        }
-                        if (bl_pf_47 == bl_want_47) {
-                            og_m[3] = bl_pm_47;
-                            og_g[3] = bl_pg_47;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_48 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 4);
-                        int bl_pg_48 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 4);
-                        int bl_pf_48 = 0;
-                        if (bl_pm_48 > og_m[0]) {
-                            bl_pf_48 = 1;
-                        }
-                        if (bl_pm_48 == og_m[0]) {
-                            if (bl_pg_48 < og_g[0]) {
-                                bl_pf_48 = 1;
-                            }
-                        }
-                        int bl_i_48 = lane;
-                        int bl_want_48 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_48 >> 5) % 2) {
-                            bl_want_48 = 1;
-                        }
-                        if (bl_pf_48 == bl_want_48) {
-                            og_m[0] = bl_pm_48;
-                            og_g[0] = bl_pg_48;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_49 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 4);
-                        int bl_pg_49 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 4);
-                        int bl_pf_49 = 0;
-                        if (bl_pm_49 > og_m[1]) {
-                            bl_pf_49 = 1;
-                        }
-                        if (bl_pm_49 == og_m[1]) {
-                            if (bl_pg_49 < og_g[1]) {
-                                bl_pf_49 = 1;
-                            }
-                        }
-                        int bl_i_49 = lane + 32;
-                        int bl_want_49 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_49 >> 5) % 2) {
-                            bl_want_49 = 1;
-                        }
-                        if (bl_pf_49 == bl_want_49) {
-                            og_m[1] = bl_pm_49;
-                            og_g[1] = bl_pg_49;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_50 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 4);
-                        int bl_pg_50 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 4);
-                        int bl_pf_50 = 0;
-                        if (bl_pm_50 > og_m[2]) {
-                            bl_pf_50 = 1;
-                        }
-                        if (bl_pm_50 == og_m[2]) {
-                            if (bl_pg_50 < og_g[2]) {
-                                bl_pf_50 = 1;
-                            }
-                        }
-                        int bl_i_50 = lane + 64;
-                        int bl_want_50 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_50 >> 5) % 2) {
-                            bl_want_50 = 1;
-                        }
-                        if (bl_pf_50 == bl_want_50) {
-                            og_m[2] = bl_pm_50;
-                            og_g[2] = bl_pg_50;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_51 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 4);
-                        int bl_pg_51 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 4);
-                        int bl_pf_51 = 0;
-                        if (bl_pm_51 > og_m[3]) {
-                            bl_pf_51 = 1;
-                        }
-                        if (bl_pm_51 == og_m[3]) {
-                            if (bl_pg_51 < og_g[3]) {
-                                bl_pf_51 = 1;
-                            }
-                        }
-                        int bl_i_51 = lane + 96;
-                        int bl_want_51 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_51 >> 5) % 2) {
-                            bl_want_51 = 1;
-                        }
-                        if (bl_pf_51 == bl_want_51) {
-                            og_m[3] = bl_pm_51;
-                            og_g[3] = bl_pg_51;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_52 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 2);
-                        int bl_pg_52 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 2);
-                        int bl_pf_52 = 0;
-                        if (bl_pm_52 > og_m[0]) {
-                            bl_pf_52 = 1;
-                        }
-                        if (bl_pm_52 == og_m[0]) {
-                            if (bl_pg_52 < og_g[0]) {
-                                bl_pf_52 = 1;
-                            }
-                        }
-                        int bl_i_52 = lane;
-                        int bl_want_52 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_52 >> 5) % 2) {
-                            bl_want_52 = 1;
-                        }
-                        if (bl_pf_52 == bl_want_52) {
-                            og_m[0] = bl_pm_52;
-                            og_g[0] = bl_pg_52;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_53 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 2);
-                        int bl_pg_53 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 2);
-                        int bl_pf_53 = 0;
-                        if (bl_pm_53 > og_m[1]) {
-                            bl_pf_53 = 1;
-                        }
-                        if (bl_pm_53 == og_m[1]) {
-                            if (bl_pg_53 < og_g[1]) {
-                                bl_pf_53 = 1;
-                            }
-                        }
-                        int bl_i_53 = lane + 32;
-                        int bl_want_53 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_53 >> 5) % 2) {
-                            bl_want_53 = 1;
-                        }
-                        if (bl_pf_53 == bl_want_53) {
-                            og_m[1] = bl_pm_53;
-                            og_g[1] = bl_pg_53;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_54 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 2);
-                        int bl_pg_54 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 2);
-                        int bl_pf_54 = 0;
-                        if (bl_pm_54 > og_m[2]) {
-                            bl_pf_54 = 1;
-                        }
-                        if (bl_pm_54 == og_m[2]) {
-                            if (bl_pg_54 < og_g[2]) {
-                                bl_pf_54 = 1;
-                            }
-                        }
-                        int bl_i_54 = lane + 64;
-                        int bl_want_54 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_54 >> 5) % 2) {
-                            bl_want_54 = 1;
-                        }
-                        if (bl_pf_54 == bl_want_54) {
-                            og_m[2] = bl_pm_54;
-                            og_g[2] = bl_pg_54;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_55 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 2);
-                        int bl_pg_55 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 2);
-                        int bl_pf_55 = 0;
-                        if (bl_pm_55 > og_m[3]) {
-                            bl_pf_55 = 1;
-                        }
-                        if (bl_pm_55 == og_m[3]) {
-                            if (bl_pg_55 < og_g[3]) {
-                                bl_pf_55 = 1;
-                            }
-                        }
-                        int bl_i_55 = lane + 96;
-                        int bl_want_55 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_55 >> 5) % 2) {
-                            bl_want_55 = 1;
-                        }
-                        if (bl_pf_55 == bl_want_55) {
-                            og_m[3] = bl_pm_55;
-                            og_g[3] = bl_pg_55;
-                        }
-                    }
-                    if (og_n > 0) {
-                        int bl_pm_56 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 1);
-                        int bl_pg_56 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 1);
-                        int bl_pf_56 = 0;
-                        if (bl_pm_56 > og_m[0]) {
-                            bl_pf_56 = 1;
-                        }
-                        if (bl_pm_56 == og_m[0]) {
-                            if (bl_pg_56 < og_g[0]) {
-                                bl_pf_56 = 1;
-                            }
-                        }
-                        int bl_i_56 = lane;
-                        int bl_want_56 = 0;
-                        if (lane % 2 == (bl_i_56 >> 5) % 2) {
-                            bl_want_56 = 1;
-                        }
-                        if (bl_pf_56 == bl_want_56) {
-                            og_m[0] = bl_pm_56;
-                            og_g[0] = bl_pg_56;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_57 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 1);
-                        int bl_pg_57 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 1);
-                        int bl_pf_57 = 0;
-                        if (bl_pm_57 > og_m[1]) {
-                            bl_pf_57 = 1;
-                        }
-                        if (bl_pm_57 == og_m[1]) {
-                            if (bl_pg_57 < og_g[1]) {
-                                bl_pf_57 = 1;
-                            }
-                        }
-                        int bl_i_57 = lane + 32;
-                        int bl_want_57 = 0;
-                        if (lane % 2 == (bl_i_57 >> 5) % 2) {
-                            bl_want_57 = 1;
-                        }
-                        if (bl_pf_57 == bl_want_57) {
-                            og_m[1] = bl_pm_57;
-                            og_g[1] = bl_pg_57;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_58 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 1);
-                        int bl_pg_58 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 1);
-                        int bl_pf_58 = 0;
-                        if (bl_pm_58 > og_m[2]) {
-                            bl_pf_58 = 1;
-                        }
-                        if (bl_pm_58 == og_m[2]) {
-                            if (bl_pg_58 < og_g[2]) {
-                                bl_pf_58 = 1;
-                            }
-                        }
-                        int bl_i_58 = lane + 64;
-                        int bl_want_58 = 0;
-                        if (lane % 2 == (bl_i_58 >> 5) % 2) {
-                            bl_want_58 = 1;
-                        }
-                        if (bl_pf_58 == bl_want_58) {
-                            og_m[2] = bl_pm_58;
-                            og_g[2] = bl_pg_58;
-                        }
-                    }
-                    if (og_n > 96) {
-                        int bl_pm_59 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 1);
-                        int bl_pg_59 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 1);
-                        int bl_pf_59 = 0;
-                        if (bl_pm_59 > og_m[3]) {
-                            bl_pf_59 = 1;
-                        }
-                        if (bl_pm_59 == og_m[3]) {
-                            if (bl_pg_59 < og_g[3]) {
-                                bl_pf_59 = 1;
-                            }
-                        }
-                        int bl_i_59 = lane + 96;
-                        int bl_want_59 = 0;
-                        if (lane % 2 == (bl_i_59 >> 5) % 2) {
-                            bl_want_59 = 1;
-                        }
-                        if (bl_pf_59 == bl_want_59) {
-                            og_m[3] = bl_pm_59;
-                            og_g[3] = bl_pg_59;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bs_first_0 = 0;
-                        if (og_m[1] > og_m[0]) {
-                            bs_first_0 = 1;
-                        }
-                        if (og_m[1] == og_m[0]) {
-                            if (og_g[1] < og_g[0]) {
-                                bs_first_0 = 1;
-                            }
-                        }
-                        int bs_m_0 = og_m[0];
-                        int bs_g_0 = og_g[0];
-                        og_m[0] = ((bs_first_0 == 1) ? og_m[1] : bs_m_0);
-                        og_g[0] = ((bs_first_0 == 1) ? og_g[1] : bs_g_0);
-                        og_m[1] = ((bs_first_0 == 1) ? bs_m_0 : og_m[1]);
-                        og_g[1] = ((bs_first_0 == 1) ? bs_g_0 : og_g[1]);
-                    }
-                    if (og_n > 32) {
-                        int bs_first_1 = 0;
-                        if (og_m[3] > og_m[2]) {
-                            bs_first_1 = 1;
-                        }
-                        if (og_m[3] == og_m[2]) {
-                            if (og_g[3] < og_g[2]) {
-                                bs_first_1 = 1;
-                            }
-                        }
-                        bs_first_1 = 1 - bs_first_1;
-                        int bs_m_1 = og_m[2];
-                        int bs_g_1 = og_g[2];
-                        og_m[2] = ((bs_first_1 == 1) ? og_m[3] : bs_m_1);
-                        og_g[2] = ((bs_first_1 == 1) ? og_g[3] : bs_g_1);
-                        og_m[3] = ((bs_first_1 == 1) ? bs_m_1 : og_m[3]);
-                        og_g[3] = ((bs_first_1 == 1) ? bs_g_1 : og_g[3]);
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_60 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 16);
-                        int bl_pg_60 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 16);
-                        int bl_pf_60 = 0;
-                        if (bl_pm_60 > og_m[0]) {
-                            bl_pf_60 = 1;
-                        }
-                        if (bl_pm_60 == og_m[0]) {
-                            if (bl_pg_60 < og_g[0]) {
-                                bl_pf_60 = 1;
-                            }
-                        }
-                        int bl_i_60 = lane;
-                        int bl_want_60 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_60 >> 6) % 2) {
-                            bl_want_60 = 1;
-                        }
-                        if (bl_pf_60 == bl_want_60) {
-                            og_m[0] = bl_pm_60;
-                            og_g[0] = bl_pg_60;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_61 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 16);
-                        int bl_pg_61 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 16);
-                        int bl_pf_61 = 0;
-                        if (bl_pm_61 > og_m[1]) {
-                            bl_pf_61 = 1;
-                        }
-                        if (bl_pm_61 == og_m[1]) {
-                            if (bl_pg_61 < og_g[1]) {
-                                bl_pf_61 = 1;
-                            }
-                        }
-                        int bl_i_61 = lane + 32;
-                        int bl_want_61 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_61 >> 6) % 2) {
-                            bl_want_61 = 1;
-                        }
-                        if (bl_pf_61 == bl_want_61) {
-                            og_m[1] = bl_pm_61;
-                            og_g[1] = bl_pg_61;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_62 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 16);
-                        int bl_pg_62 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 16);
-                        int bl_pf_62 = 0;
-                        if (bl_pm_62 > og_m[2]) {
-                            bl_pf_62 = 1;
-                        }
-                        if (bl_pm_62 == og_m[2]) {
-                            if (bl_pg_62 < og_g[2]) {
-                                bl_pf_62 = 1;
-                            }
-                        }
-                        int bl_i_62 = lane + 64;
-                        int bl_want_62 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_62 >> 6) % 2) {
-                            bl_want_62 = 1;
-                        }
-                        if (bl_pf_62 == bl_want_62) {
-                            og_m[2] = bl_pm_62;
-                            og_g[2] = bl_pg_62;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_63 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 16);
-                        int bl_pg_63 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 16);
-                        int bl_pf_63 = 0;
-                        if (bl_pm_63 > og_m[3]) {
-                            bl_pf_63 = 1;
-                        }
-                        if (bl_pm_63 == og_m[3]) {
-                            if (bl_pg_63 < og_g[3]) {
-                                bl_pf_63 = 1;
-                            }
-                        }
-                        int bl_i_63 = lane + 96;
-                        int bl_want_63 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_63 >> 6) % 2) {
-                            bl_want_63 = 1;
-                        }
-                        if (bl_pf_63 == bl_want_63) {
-                            og_m[3] = bl_pm_63;
-                            og_g[3] = bl_pg_63;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_64 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 8);
-                        int bl_pg_64 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 8);
-                        int bl_pf_64 = 0;
-                        if (bl_pm_64 > og_m[0]) {
-                            bl_pf_64 = 1;
-                        }
-                        if (bl_pm_64 == og_m[0]) {
-                            if (bl_pg_64 < og_g[0]) {
-                                bl_pf_64 = 1;
-                            }
-                        }
-                        int bl_i_64 = lane;
-                        int bl_want_64 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_64 >> 6) % 2) {
-                            bl_want_64 = 1;
-                        }
-                        if (bl_pf_64 == bl_want_64) {
-                            og_m[0] = bl_pm_64;
-                            og_g[0] = bl_pg_64;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_65 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 8);
-                        int bl_pg_65 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 8);
-                        int bl_pf_65 = 0;
-                        if (bl_pm_65 > og_m[1]) {
-                            bl_pf_65 = 1;
-                        }
-                        if (bl_pm_65 == og_m[1]) {
-                            if (bl_pg_65 < og_g[1]) {
-                                bl_pf_65 = 1;
-                            }
-                        }
-                        int bl_i_65 = lane + 32;
-                        int bl_want_65 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_65 >> 6) % 2) {
-                            bl_want_65 = 1;
-                        }
-                        if (bl_pf_65 == bl_want_65) {
-                            og_m[1] = bl_pm_65;
-                            og_g[1] = bl_pg_65;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_66 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 8);
-                        int bl_pg_66 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 8);
-                        int bl_pf_66 = 0;
-                        if (bl_pm_66 > og_m[2]) {
-                            bl_pf_66 = 1;
-                        }
-                        if (bl_pm_66 == og_m[2]) {
-                            if (bl_pg_66 < og_g[2]) {
-                                bl_pf_66 = 1;
-                            }
-                        }
-                        int bl_i_66 = lane + 64;
-                        int bl_want_66 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_66 >> 6) % 2) {
-                            bl_want_66 = 1;
-                        }
-                        if (bl_pf_66 == bl_want_66) {
-                            og_m[2] = bl_pm_66;
-                            og_g[2] = bl_pg_66;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_67 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 8);
-                        int bl_pg_67 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 8);
-                        int bl_pf_67 = 0;
-                        if (bl_pm_67 > og_m[3]) {
-                            bl_pf_67 = 1;
-                        }
-                        if (bl_pm_67 == og_m[3]) {
-                            if (bl_pg_67 < og_g[3]) {
-                                bl_pf_67 = 1;
-                            }
-                        }
-                        int bl_i_67 = lane + 96;
-                        int bl_want_67 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_67 >> 6) % 2) {
-                            bl_want_67 = 1;
-                        }
-                        if (bl_pf_67 == bl_want_67) {
-                            og_m[3] = bl_pm_67;
-                            og_g[3] = bl_pg_67;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_68 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 4);
-                        int bl_pg_68 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 4);
-                        int bl_pf_68 = 0;
-                        if (bl_pm_68 > og_m[0]) {
-                            bl_pf_68 = 1;
-                        }
-                        if (bl_pm_68 == og_m[0]) {
-                            if (bl_pg_68 < og_g[0]) {
-                                bl_pf_68 = 1;
-                            }
-                        }
-                        int bl_i_68 = lane;
-                        int bl_want_68 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_68 >> 6) % 2) {
-                            bl_want_68 = 1;
-                        }
-                        if (bl_pf_68 == bl_want_68) {
-                            og_m[0] = bl_pm_68;
-                            og_g[0] = bl_pg_68;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_69 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 4);
-                        int bl_pg_69 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 4);
-                        int bl_pf_69 = 0;
-                        if (bl_pm_69 > og_m[1]) {
-                            bl_pf_69 = 1;
-                        }
-                        if (bl_pm_69 == og_m[1]) {
-                            if (bl_pg_69 < og_g[1]) {
-                                bl_pf_69 = 1;
-                            }
-                        }
-                        int bl_i_69 = lane + 32;
-                        int bl_want_69 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_69 >> 6) % 2) {
-                            bl_want_69 = 1;
-                        }
-                        if (bl_pf_69 == bl_want_69) {
-                            og_m[1] = bl_pm_69;
-                            og_g[1] = bl_pg_69;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_70 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 4);
-                        int bl_pg_70 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 4);
-                        int bl_pf_70 = 0;
-                        if (bl_pm_70 > og_m[2]) {
-                            bl_pf_70 = 1;
-                        }
-                        if (bl_pm_70 == og_m[2]) {
-                            if (bl_pg_70 < og_g[2]) {
-                                bl_pf_70 = 1;
-                            }
-                        }
-                        int bl_i_70 = lane + 64;
-                        int bl_want_70 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_70 >> 6) % 2) {
-                            bl_want_70 = 1;
-                        }
-                        if (bl_pf_70 == bl_want_70) {
-                            og_m[2] = bl_pm_70;
-                            og_g[2] = bl_pg_70;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_71 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 4);
-                        int bl_pg_71 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 4);
-                        int bl_pf_71 = 0;
-                        if (bl_pm_71 > og_m[3]) {
-                            bl_pf_71 = 1;
-                        }
-                        if (bl_pm_71 == og_m[3]) {
-                            if (bl_pg_71 < og_g[3]) {
-                                bl_pf_71 = 1;
-                            }
-                        }
-                        int bl_i_71 = lane + 96;
-                        int bl_want_71 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_71 >> 6) % 2) {
-                            bl_want_71 = 1;
-                        }
-                        if (bl_pf_71 == bl_want_71) {
-                            og_m[3] = bl_pm_71;
-                            og_g[3] = bl_pg_71;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_72 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 2);
-                        int bl_pg_72 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 2);
-                        int bl_pf_72 = 0;
-                        if (bl_pm_72 > og_m[0]) {
-                            bl_pf_72 = 1;
-                        }
-                        if (bl_pm_72 == og_m[0]) {
-                            if (bl_pg_72 < og_g[0]) {
-                                bl_pf_72 = 1;
-                            }
-                        }
-                        int bl_i_72 = lane;
-                        int bl_want_72 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_72 >> 6) % 2) {
-                            bl_want_72 = 1;
-                        }
-                        if (bl_pf_72 == bl_want_72) {
-                            og_m[0] = bl_pm_72;
-                            og_g[0] = bl_pg_72;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_73 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 2);
-                        int bl_pg_73 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 2);
-                        int bl_pf_73 = 0;
-                        if (bl_pm_73 > og_m[1]) {
-                            bl_pf_73 = 1;
-                        }
-                        if (bl_pm_73 == og_m[1]) {
-                            if (bl_pg_73 < og_g[1]) {
-                                bl_pf_73 = 1;
-                            }
-                        }
-                        int bl_i_73 = lane + 32;
-                        int bl_want_73 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_73 >> 6) % 2) {
-                            bl_want_73 = 1;
-                        }
-                        if (bl_pf_73 == bl_want_73) {
-                            og_m[1] = bl_pm_73;
-                            og_g[1] = bl_pg_73;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_74 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 2);
-                        int bl_pg_74 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 2);
-                        int bl_pf_74 = 0;
-                        if (bl_pm_74 > og_m[2]) {
-                            bl_pf_74 = 1;
-                        }
-                        if (bl_pm_74 == og_m[2]) {
-                            if (bl_pg_74 < og_g[2]) {
-                                bl_pf_74 = 1;
-                            }
-                        }
-                        int bl_i_74 = lane + 64;
-                        int bl_want_74 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_74 >> 6) % 2) {
-                            bl_want_74 = 1;
-                        }
-                        if (bl_pf_74 == bl_want_74) {
-                            og_m[2] = bl_pm_74;
-                            og_g[2] = bl_pg_74;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_75 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 2);
-                        int bl_pg_75 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 2);
-                        int bl_pf_75 = 0;
-                        if (bl_pm_75 > og_m[3]) {
-                            bl_pf_75 = 1;
-                        }
-                        if (bl_pm_75 == og_m[3]) {
-                            if (bl_pg_75 < og_g[3]) {
-                                bl_pf_75 = 1;
-                            }
-                        }
-                        int bl_i_75 = lane + 96;
-                        int bl_want_75 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_75 >> 6) % 2) {
-                            bl_want_75 = 1;
-                        }
-                        if (bl_pf_75 == bl_want_75) {
-                            og_m[3] = bl_pm_75;
-                            og_g[3] = bl_pg_75;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_76 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 1);
-                        int bl_pg_76 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 1);
-                        int bl_pf_76 = 0;
-                        if (bl_pm_76 > og_m[0]) {
-                            bl_pf_76 = 1;
-                        }
-                        if (bl_pm_76 == og_m[0]) {
-                            if (bl_pg_76 < og_g[0]) {
-                                bl_pf_76 = 1;
-                            }
-                        }
-                        int bl_i_76 = lane;
-                        int bl_want_76 = 0;
-                        if (lane % 2 == (bl_i_76 >> 6) % 2) {
-                            bl_want_76 = 1;
-                        }
-                        if (bl_pf_76 == bl_want_76) {
-                            og_m[0] = bl_pm_76;
-                            og_g[0] = bl_pg_76;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_77 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 1);
-                        int bl_pg_77 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 1);
-                        int bl_pf_77 = 0;
-                        if (bl_pm_77 > og_m[1]) {
-                            bl_pf_77 = 1;
-                        }
-                        if (bl_pm_77 == og_m[1]) {
-                            if (bl_pg_77 < og_g[1]) {
-                                bl_pf_77 = 1;
-                            }
-                        }
-                        int bl_i_77 = lane + 32;
-                        int bl_want_77 = 0;
-                        if (lane % 2 == (bl_i_77 >> 6) % 2) {
-                            bl_want_77 = 1;
-                        }
-                        if (bl_pf_77 == bl_want_77) {
-                            og_m[1] = bl_pm_77;
-                            og_g[1] = bl_pg_77;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_78 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 1);
-                        int bl_pg_78 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 1);
-                        int bl_pf_78 = 0;
-                        if (bl_pm_78 > og_m[2]) {
-                            bl_pf_78 = 1;
-                        }
-                        if (bl_pm_78 == og_m[2]) {
-                            if (bl_pg_78 < og_g[2]) {
-                                bl_pf_78 = 1;
-                            }
-                        }
-                        int bl_i_78 = lane + 64;
-                        int bl_want_78 = 0;
-                        if (lane % 2 == (bl_i_78 >> 6) % 2) {
-                            bl_want_78 = 1;
-                        }
-                        if (bl_pf_78 == bl_want_78) {
-                            og_m[2] = bl_pm_78;
-                            og_g[2] = bl_pg_78;
-                        }
-                    }
-                    if (og_n > 32) {
-                        int bl_pm_79 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 1);
-                        int bl_pg_79 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 1);
-                        int bl_pf_79 = 0;
-                        if (bl_pm_79 > og_m[3]) {
-                            bl_pf_79 = 1;
-                        }
-                        if (bl_pm_79 == og_m[3]) {
-                            if (bl_pg_79 < og_g[3]) {
-                                bl_pf_79 = 1;
-                            }
-                        }
-                        int bl_i_79 = lane + 96;
-                        int bl_want_79 = 0;
-                        if (lane % 2 == (bl_i_79 >> 6) % 2) {
-                            bl_want_79 = 1;
-                        }
-                        if (bl_pf_79 == bl_want_79) {
-                            og_m[3] = bl_pm_79;
-                            og_g[3] = bl_pg_79;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bs_first_2 = 0;
-                        if (og_m[2] > og_m[0]) {
-                            bs_first_2 = 1;
-                        }
-                        if (og_m[2] == og_m[0]) {
-                            if (og_g[2] < og_g[0]) {
-                                bs_first_2 = 1;
-                            }
-                        }
-                        int bs_m_2 = og_m[0];
-                        int bs_g_2 = og_g[0];
-                        og_m[0] = ((bs_first_2 == 1) ? og_m[2] : bs_m_2);
-                        og_g[0] = ((bs_first_2 == 1) ? og_g[2] : bs_g_2);
-                        og_m[2] = ((bs_first_2 == 1) ? bs_m_2 : og_m[2]);
-                        og_g[2] = ((bs_first_2 == 1) ? bs_g_2 : og_g[2]);
-                    }
-                    if (og_n > 64) {
-                        int bs_first_3 = 0;
-                        if (og_m[3] > og_m[1]) {
-                            bs_first_3 = 1;
-                        }
-                        if (og_m[3] == og_m[1]) {
-                            if (og_g[3] < og_g[1]) {
-                                bs_first_3 = 1;
-                            }
-                        }
-                        int bs_m_3 = og_m[1];
-                        int bs_g_3 = og_g[1];
-                        og_m[1] = ((bs_first_3 == 1) ? og_m[3] : bs_m_3);
-                        og_g[1] = ((bs_first_3 == 1) ? og_g[3] : bs_g_3);
-                        og_m[3] = ((bs_first_3 == 1) ? bs_m_3 : og_m[3]);
-                        og_g[3] = ((bs_first_3 == 1) ? bs_g_3 : og_g[3]);
-                    }
-                    if (og_n > 64) {
-                        int bs_first_4 = 0;
-                        if (og_m[1] > og_m[0]) {
-                            bs_first_4 = 1;
-                        }
-                        if (og_m[1] == og_m[0]) {
-                            if (og_g[1] < og_g[0]) {
-                                bs_first_4 = 1;
-                            }
-                        }
-                        int bs_m_4 = og_m[0];
-                        int bs_g_4 = og_g[0];
-                        og_m[0] = ((bs_first_4 == 1) ? og_m[1] : bs_m_4);
-                        og_g[0] = ((bs_first_4 == 1) ? og_g[1] : bs_g_4);
-                        og_m[1] = ((bs_first_4 == 1) ? bs_m_4 : og_m[1]);
-                        og_g[1] = ((bs_first_4 == 1) ? bs_g_4 : og_g[1]);
-                    }
-                    if (og_n > 64) {
-                        int bs_first_5 = 0;
-                        if (og_m[3] > og_m[2]) {
-                            bs_first_5 = 1;
-                        }
-                        if (og_m[3] == og_m[2]) {
-                            if (og_g[3] < og_g[2]) {
-                                bs_first_5 = 1;
-                            }
-                        }
-                        int bs_m_5 = og_m[2];
-                        int bs_g_5 = og_g[2];
-                        og_m[2] = ((bs_first_5 == 1) ? og_m[3] : bs_m_5);
-                        og_g[2] = ((bs_first_5 == 1) ? og_g[3] : bs_g_5);
-                        og_m[3] = ((bs_first_5 == 1) ? bs_m_5 : og_m[3]);
-                        og_g[3] = ((bs_first_5 == 1) ? bs_g_5 : og_g[3]);
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_80 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 16);
-                        int bl_pg_80 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 16);
-                        int bl_pf_80 = 0;
-                        if (bl_pm_80 > og_m[0]) {
-                            bl_pf_80 = 1;
-                        }
-                        if (bl_pm_80 == og_m[0]) {
-                            if (bl_pg_80 < og_g[0]) {
-                                bl_pf_80 = 1;
-                            }
-                        }
-                        int bl_i_80 = lane;
-                        int bl_want_80 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_80 >> 7) % 2) {
-                            bl_want_80 = 1;
-                        }
-                        if (bl_pf_80 == bl_want_80) {
-                            og_m[0] = bl_pm_80;
-                            og_g[0] = bl_pg_80;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_81 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 16);
-                        int bl_pg_81 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 16);
-                        int bl_pf_81 = 0;
-                        if (bl_pm_81 > og_m[1]) {
-                            bl_pf_81 = 1;
-                        }
-                        if (bl_pm_81 == og_m[1]) {
-                            if (bl_pg_81 < og_g[1]) {
-                                bl_pf_81 = 1;
-                            }
-                        }
-                        int bl_i_81 = lane + 32;
-                        int bl_want_81 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_81 >> 7) % 2) {
-                            bl_want_81 = 1;
-                        }
-                        if (bl_pf_81 == bl_want_81) {
-                            og_m[1] = bl_pm_81;
-                            og_g[1] = bl_pg_81;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_82 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 16);
-                        int bl_pg_82 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 16);
-                        int bl_pf_82 = 0;
-                        if (bl_pm_82 > og_m[2]) {
-                            bl_pf_82 = 1;
-                        }
-                        if (bl_pm_82 == og_m[2]) {
-                            if (bl_pg_82 < og_g[2]) {
-                                bl_pf_82 = 1;
-                            }
-                        }
-                        int bl_i_82 = lane + 64;
-                        int bl_want_82 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_82 >> 7) % 2) {
-                            bl_want_82 = 1;
-                        }
-                        if (bl_pf_82 == bl_want_82) {
-                            og_m[2] = bl_pm_82;
-                            og_g[2] = bl_pg_82;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_83 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 16);
-                        int bl_pg_83 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 16);
-                        int bl_pf_83 = 0;
-                        if (bl_pm_83 > og_m[3]) {
-                            bl_pf_83 = 1;
-                        }
-                        if (bl_pm_83 == og_m[3]) {
-                            if (bl_pg_83 < og_g[3]) {
-                                bl_pf_83 = 1;
-                            }
-                        }
-                        int bl_i_83 = lane + 96;
-                        int bl_want_83 = 0;
-                        if ((lane >> 4) % 2 == (bl_i_83 >> 7) % 2) {
-                            bl_want_83 = 1;
-                        }
-                        if (bl_pf_83 == bl_want_83) {
-                            og_m[3] = bl_pm_83;
-                            og_g[3] = bl_pg_83;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_84 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 8);
-                        int bl_pg_84 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 8);
-                        int bl_pf_84 = 0;
-                        if (bl_pm_84 > og_m[0]) {
-                            bl_pf_84 = 1;
-                        }
-                        if (bl_pm_84 == og_m[0]) {
-                            if (bl_pg_84 < og_g[0]) {
-                                bl_pf_84 = 1;
-                            }
-                        }
-                        int bl_i_84 = lane;
-                        int bl_want_84 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_84 >> 7) % 2) {
-                            bl_want_84 = 1;
-                        }
-                        if (bl_pf_84 == bl_want_84) {
-                            og_m[0] = bl_pm_84;
-                            og_g[0] = bl_pg_84;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_85 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 8);
-                        int bl_pg_85 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 8);
-                        int bl_pf_85 = 0;
-                        if (bl_pm_85 > og_m[1]) {
-                            bl_pf_85 = 1;
-                        }
-                        if (bl_pm_85 == og_m[1]) {
-                            if (bl_pg_85 < og_g[1]) {
-                                bl_pf_85 = 1;
-                            }
-                        }
-                        int bl_i_85 = lane + 32;
-                        int bl_want_85 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_85 >> 7) % 2) {
-                            bl_want_85 = 1;
-                        }
-                        if (bl_pf_85 == bl_want_85) {
-                            og_m[1] = bl_pm_85;
-                            og_g[1] = bl_pg_85;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_86 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 8);
-                        int bl_pg_86 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 8);
-                        int bl_pf_86 = 0;
-                        if (bl_pm_86 > og_m[2]) {
-                            bl_pf_86 = 1;
-                        }
-                        if (bl_pm_86 == og_m[2]) {
-                            if (bl_pg_86 < og_g[2]) {
-                                bl_pf_86 = 1;
-                            }
-                        }
-                        int bl_i_86 = lane + 64;
-                        int bl_want_86 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_86 >> 7) % 2) {
-                            bl_want_86 = 1;
-                        }
-                        if (bl_pf_86 == bl_want_86) {
-                            og_m[2] = bl_pm_86;
-                            og_g[2] = bl_pg_86;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_87 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 8);
-                        int bl_pg_87 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 8);
-                        int bl_pf_87 = 0;
-                        if (bl_pm_87 > og_m[3]) {
-                            bl_pf_87 = 1;
-                        }
-                        if (bl_pm_87 == og_m[3]) {
-                            if (bl_pg_87 < og_g[3]) {
-                                bl_pf_87 = 1;
-                            }
-                        }
-                        int bl_i_87 = lane + 96;
-                        int bl_want_87 = 0;
-                        if ((lane >> 3) % 2 == (bl_i_87 >> 7) % 2) {
-                            bl_want_87 = 1;
-                        }
-                        if (bl_pf_87 == bl_want_87) {
-                            og_m[3] = bl_pm_87;
-                            og_g[3] = bl_pg_87;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_88 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 4);
-                        int bl_pg_88 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 4);
-                        int bl_pf_88 = 0;
-                        if (bl_pm_88 > og_m[0]) {
-                            bl_pf_88 = 1;
-                        }
-                        if (bl_pm_88 == og_m[0]) {
-                            if (bl_pg_88 < og_g[0]) {
-                                bl_pf_88 = 1;
-                            }
-                        }
-                        int bl_i_88 = lane;
-                        int bl_want_88 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_88 >> 7) % 2) {
-                            bl_want_88 = 1;
-                        }
-                        if (bl_pf_88 == bl_want_88) {
-                            og_m[0] = bl_pm_88;
-                            og_g[0] = bl_pg_88;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_89 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 4);
-                        int bl_pg_89 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 4);
-                        int bl_pf_89 = 0;
-                        if (bl_pm_89 > og_m[1]) {
-                            bl_pf_89 = 1;
-                        }
-                        if (bl_pm_89 == og_m[1]) {
-                            if (bl_pg_89 < og_g[1]) {
-                                bl_pf_89 = 1;
-                            }
-                        }
-                        int bl_i_89 = lane + 32;
-                        int bl_want_89 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_89 >> 7) % 2) {
-                            bl_want_89 = 1;
-                        }
-                        if (bl_pf_89 == bl_want_89) {
-                            og_m[1] = bl_pm_89;
-                            og_g[1] = bl_pg_89;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_90 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 4);
-                        int bl_pg_90 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 4);
-                        int bl_pf_90 = 0;
-                        if (bl_pm_90 > og_m[2]) {
-                            bl_pf_90 = 1;
-                        }
-                        if (bl_pm_90 == og_m[2]) {
-                            if (bl_pg_90 < og_g[2]) {
-                                bl_pf_90 = 1;
-                            }
-                        }
-                        int bl_i_90 = lane + 64;
-                        int bl_want_90 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_90 >> 7) % 2) {
-                            bl_want_90 = 1;
-                        }
-                        if (bl_pf_90 == bl_want_90) {
-                            og_m[2] = bl_pm_90;
-                            og_g[2] = bl_pg_90;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_91 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 4);
-                        int bl_pg_91 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 4);
-                        int bl_pf_91 = 0;
-                        if (bl_pm_91 > og_m[3]) {
-                            bl_pf_91 = 1;
-                        }
-                        if (bl_pm_91 == og_m[3]) {
-                            if (bl_pg_91 < og_g[3]) {
-                                bl_pf_91 = 1;
-                            }
-                        }
-                        int bl_i_91 = lane + 96;
-                        int bl_want_91 = 0;
-                        if ((lane >> 2) % 2 == (bl_i_91 >> 7) % 2) {
-                            bl_want_91 = 1;
-                        }
-                        if (bl_pf_91 == bl_want_91) {
-                            og_m[3] = bl_pm_91;
-                            og_g[3] = bl_pg_91;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_92 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 2);
-                        int bl_pg_92 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 2);
-                        int bl_pf_92 = 0;
-                        if (bl_pm_92 > og_m[0]) {
-                            bl_pf_92 = 1;
-                        }
-                        if (bl_pm_92 == og_m[0]) {
-                            if (bl_pg_92 < og_g[0]) {
-                                bl_pf_92 = 1;
-                            }
-                        }
-                        int bl_i_92 = lane;
-                        int bl_want_92 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_92 >> 7) % 2) {
-                            bl_want_92 = 1;
-                        }
-                        if (bl_pf_92 == bl_want_92) {
-                            og_m[0] = bl_pm_92;
-                            og_g[0] = bl_pg_92;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_93 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 2);
-                        int bl_pg_93 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 2);
-                        int bl_pf_93 = 0;
-                        if (bl_pm_93 > og_m[1]) {
-                            bl_pf_93 = 1;
-                        }
-                        if (bl_pm_93 == og_m[1]) {
-                            if (bl_pg_93 < og_g[1]) {
-                                bl_pf_93 = 1;
-                            }
-                        }
-                        int bl_i_93 = lane + 32;
-                        int bl_want_93 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_93 >> 7) % 2) {
-                            bl_want_93 = 1;
-                        }
-                        if (bl_pf_93 == bl_want_93) {
-                            og_m[1] = bl_pm_93;
-                            og_g[1] = bl_pg_93;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_94 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 2);
-                        int bl_pg_94 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 2);
-                        int bl_pf_94 = 0;
-                        if (bl_pm_94 > og_m[2]) {
-                            bl_pf_94 = 1;
-                        }
-                        if (bl_pm_94 == og_m[2]) {
-                            if (bl_pg_94 < og_g[2]) {
-                                bl_pf_94 = 1;
-                            }
-                        }
-                        int bl_i_94 = lane + 64;
-                        int bl_want_94 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_94 >> 7) % 2) {
-                            bl_want_94 = 1;
-                        }
-                        if (bl_pf_94 == bl_want_94) {
-                            og_m[2] = bl_pm_94;
-                            og_g[2] = bl_pg_94;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_95 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 2);
-                        int bl_pg_95 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 2);
-                        int bl_pf_95 = 0;
-                        if (bl_pm_95 > og_m[3]) {
-                            bl_pf_95 = 1;
-                        }
-                        if (bl_pm_95 == og_m[3]) {
-                            if (bl_pg_95 < og_g[3]) {
-                                bl_pf_95 = 1;
-                            }
-                        }
-                        int bl_i_95 = lane + 96;
-                        int bl_want_95 = 0;
-                        if ((lane >> 1) % 2 == (bl_i_95 >> 7) % 2) {
-                            bl_want_95 = 1;
-                        }
-                        if (bl_pf_95 == bl_want_95) {
-                            og_m[3] = bl_pm_95;
-                            og_g[3] = bl_pg_95;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_96 = __shfl_xor_sync(0xFFFFFFFF, og_m[0], 1);
-                        int bl_pg_96 = __shfl_xor_sync(0xFFFFFFFF, og_g[0], 1);
-                        int bl_pf_96 = 0;
-                        if (bl_pm_96 > og_m[0]) {
-                            bl_pf_96 = 1;
-                        }
-                        if (bl_pm_96 == og_m[0]) {
-                            if (bl_pg_96 < og_g[0]) {
-                                bl_pf_96 = 1;
-                            }
-                        }
-                        int bl_i_96 = lane;
-                        int bl_want_96 = 0;
-                        if (lane % 2 == (bl_i_96 >> 7) % 2) {
-                            bl_want_96 = 1;
-                        }
-                        if (bl_pf_96 == bl_want_96) {
-                            og_m[0] = bl_pm_96;
-                            og_g[0] = bl_pg_96;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_97 = __shfl_xor_sync(0xFFFFFFFF, og_m[1], 1);
-                        int bl_pg_97 = __shfl_xor_sync(0xFFFFFFFF, og_g[1], 1);
-                        int bl_pf_97 = 0;
-                        if (bl_pm_97 > og_m[1]) {
-                            bl_pf_97 = 1;
-                        }
-                        if (bl_pm_97 == og_m[1]) {
-                            if (bl_pg_97 < og_g[1]) {
-                                bl_pf_97 = 1;
-                            }
-                        }
-                        int bl_i_97 = lane + 32;
-                        int bl_want_97 = 0;
-                        if (lane % 2 == (bl_i_97 >> 7) % 2) {
-                            bl_want_97 = 1;
-                        }
-                        if (bl_pf_97 == bl_want_97) {
-                            og_m[1] = bl_pm_97;
-                            og_g[1] = bl_pg_97;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_98 = __shfl_xor_sync(0xFFFFFFFF, og_m[2], 1);
-                        int bl_pg_98 = __shfl_xor_sync(0xFFFFFFFF, og_g[2], 1);
-                        int bl_pf_98 = 0;
-                        if (bl_pm_98 > og_m[2]) {
-                            bl_pf_98 = 1;
-                        }
-                        if (bl_pm_98 == og_m[2]) {
-                            if (bl_pg_98 < og_g[2]) {
-                                bl_pf_98 = 1;
-                            }
-                        }
-                        int bl_i_98 = lane + 64;
-                        int bl_want_98 = 0;
-                        if (lane % 2 == (bl_i_98 >> 7) % 2) {
-                            bl_want_98 = 1;
-                        }
-                        if (bl_pf_98 == bl_want_98) {
-                            og_m[2] = bl_pm_98;
-                            og_g[2] = bl_pg_98;
-                        }
-                    }
-                    if (og_n > 64) {
-                        int bl_pm_99 = __shfl_xor_sync(0xFFFFFFFF, og_m[3], 1);
-                        int bl_pg_99 = __shfl_xor_sync(0xFFFFFFFF, og_g[3], 1);
-                        int bl_pf_99 = 0;
-                        if (bl_pm_99 > og_m[3]) {
-                            bl_pf_99 = 1;
-                        }
-                        if (bl_pm_99 == og_m[3]) {
-                            if (bl_pg_99 < og_g[3]) {
-                                bl_pf_99 = 1;
-                            }
-                        }
-                        int bl_i_99 = lane + 96;
-                        int bl_want_99 = 0;
-                        if (lane % 2 == (bl_i_99 >> 7) % 2) {
-                            bl_want_99 = 1;
-                        }
-                        if (bl_pf_99 == bl_want_99) {
-                            og_m[3] = bl_pm_99;
-                            og_g[3] = bl_pg_99;
-                        }
-                    }
-                    #pragma unroll
-                    for (int ok4 = 0; ok4 < 4; ok4++) {
-                        int ok4_s = lane + 32 * ok4;
-                        if (ok4_s < og_n) {
-                            og_a[ok4_s] = og_g[ok4];
-                        }
-                    }
-                }
-                mbarrier_arrive(order_ready_addr);
-            }
-            mbarrier_wait(order_ready_addr, 0);
             unsigned int _phase_mainloop_done = 0;
             #pragma unroll 1
             for (unsigned int t_e = cluster_e; t_e < reg_end_e; t_e += num_clusters_e) {
@@ -3904,10 +1534,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                     }
                 }
                 unsigned int ts_e = w_e * num_clusters_e + p_e;
+                unsigned int e_ue = ts_e / tiles_per_group_e;
+                unsigned int rem_e = ts_e - e_ue * tiles_per_group_e;
+                unsigned int n_block_e = 0;
+                unsigned int k_block_e = 0;
+                unsigned int rr_n_block_e = (unsigned int)raster_rows;
+                unsigned int nc_n_block_e = rem_e / grid_k_e;
+                unsigned int kr_n_block_e = rem_e / grid_n_e;
+                n_block_e = nc_n_block_e * (1 - rr_n_block_e) + (rem_e - kr_n_block_e * grid_n_e) * rr_n_block_e;
+                k_block_e = (rem_e - nc_n_block_e * grid_k_e) * (1 - rr_n_block_e) + kr_n_block_e * rr_n_block_e;
+                int row_n = (int)n_block_e * BLOCK_N + cta_rank * BLOCK_M + epi_tid;
+                int col0 = (int)k_block_e * TILE_K;
                 mbarrier_wait(mainloop_done_addr, _phase_mainloop_done);
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 float _er_f[128];
                 int er_rowf = taddr + (unsigned int)(cta_rank * 128 + epi_warp * 32 << 16) + (unsigned int)(epi_half * 128);
+                int er_outf = (int)e_ue * stride_e + row_n * ldc + col0 + epi_half * 128;
                 asm volatile(
                     "tcgen05.ld.sync.aligned.32x32b.x32.b32"
                     " {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31}, [%32];"
@@ -3935,29 +1577,7 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                         "mbarrier.arrive.release.cta.shared::cluster.b64 _, [%0];"
                         :: "r"((epi_free0_addr) & 0xFEFFFFFF) : "memory");
                 }
-                unsigned int e_ue = ts_e / tiles_per_group_e;
-                unsigned int rem_e = ts_e - e_ue * tiles_per_group_e;
-                unsigned int n_block_e = 0;
-                unsigned int k_block_e = 0;
-                unsigned int rr_n_block_e = (unsigned int)raster_rows;
-                unsigned int nc_n_block_e = rem_e / grid_k_e;
-                unsigned int kr_n_block_e = rem_e / grid_n_e;
-                n_block_e = nc_n_block_e * (1 - rr_n_block_e) + (rem_e - kr_n_block_e * grid_n_e) * rr_n_block_e;
-                k_block_e = (rem_e - nc_n_block_e * grid_k_e) * (1 - rr_n_block_e) + kr_n_block_e * rr_n_block_e;
-                if (num_groups <= 128) {
-                    e_ue = (unsigned int)og_a[(int)e_ue];
-                }
-                int row_n = (int)n_block_e * BLOCK_N + cta_rank * BLOCK_M + epi_tid;
-                int col0 = (int)k_block_e * TILE_K;
-                int er_outf = (int)e_ue * stride_e + row_n * ldc + col0 + epi_half * 128;
-                int ac_lo = 0;
-                if (e_ue > 0) {
-                    ac_lo = offs[(int)e_ue - 1];
-                }
-                int ac_live = 0;
-                if (offs[(int)e_ue] > ac_lo) {
-                    ac_live = 1;
-                }
+                int ac_live = 1;
                 int er_at2 = er_outf + (lane & 7) * (4 - ldc);
                 if (ac_live == 1) {
                     int ar_bit_0 = lane >> 2 & 1;
@@ -6537,9 +4157,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                     unsigned int kr_n_block_et = rem_et / grid_n_e;
                     n_block_et = nc_n_block_et * (1 - rr_n_block_et) + (rem_et - kr_n_block_et * grid_n_e) * rr_n_block_et;
                     k_block_et = (rem_et - nc_n_block_et * grid_k_e) * (1 - rr_n_block_et) + kr_n_block_et * rr_n_block_et;
-                    if (num_groups <= 128) {
-                        e_uet = (unsigned int)og_a[(int)e_uet];
-                    }
                     int row_nt = (int)n_block_et * BLOCK_N + cta_rank * BLOCK_M + epi_tid;
                     int col0t = (int)k_block_et * TILE_K;
                     int e_kb_te = (int)e_uet;
@@ -6552,10 +4169,7 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                     if (e_kb_te == 0) {
                         start_te = 0;
                     }
-                    int ac_live_t = 0;
-                    if (end_te > start_te) {
-                        ac_live_t = 1;
-                    }
+                    int ac_live_t = 1;
                     int kb_te = (end_te - start_te + (BLOCK_K - 1)) / BLOCK_K;
                     if (kb_te == 0) {
                         kb_te = 1;
@@ -6570,7 +4184,7 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             whole_te = 1;
                         }
                     }
-                    int slot_te = (int)j_u_te;
+                    int slot_te = (int)j_u_te * tail_splits + s_i_te;
                     if (n_steps_te > 0) {
                         mbarrier_wait(mainloop_done_addr, _phase_mainloop_done);
                         asm volatile("tcgen05.fence::after_thread_sync;");
@@ -6642,60 +4256,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd = lane & 1;
-                            int tr_at = er_part_t + er_col_a + tr_odd * (4 - TILE_K);
-                            float tr_lo_0 = _er_tload[0];
-                            float tr_hi_0 = _er_tload[4];
-                            float tr_send_0 = ((tr_odd == 0) ? tr_hi_0 : tr_lo_0);
-                            float tr_got_0 = __shfl_xor_sync(0xFFFFFFFF, tr_send_0, 1);
-                            _er_tload[0] = ((tr_odd == 0) ? tr_lo_0 : tr_got_0);
-                            _er_tload[4] = ((tr_odd == 0) ? tr_got_0 : tr_hi_0);
-                            float tr_lo_1 = _er_tload[1];
-                            float tr_hi_1 = _er_tload[5];
-                            float tr_send_1 = ((tr_odd == 0) ? tr_hi_1 : tr_lo_1);
-                            float tr_got_1 = __shfl_xor_sync(0xFFFFFFFF, tr_send_1, 1);
-                            _er_tload[1] = ((tr_odd == 0) ? tr_lo_1 : tr_got_1);
-                            _er_tload[5] = ((tr_odd == 0) ? tr_got_1 : tr_hi_1);
-                            float tr_lo_2 = _er_tload[2];
-                            float tr_hi_2 = _er_tload[6];
-                            float tr_send_2 = ((tr_odd == 0) ? tr_hi_2 : tr_lo_2);
-                            float tr_got_2 = __shfl_xor_sync(0xFFFFFFFF, tr_send_2, 1);
-                            _er_tload[2] = ((tr_odd == 0) ? tr_lo_2 : tr_got_2);
-                            _er_tload[6] = ((tr_odd == 0) ? tr_got_2 : tr_hi_2);
-                            float tr_lo_3 = _er_tload[3];
-                            float tr_hi_3 = _er_tload[7];
-                            float tr_send_3 = ((tr_odd == 0) ? tr_hi_3 : tr_lo_3);
-                            float tr_got_3 = __shfl_xor_sync(0xFFFFFFFF, tr_send_3, 1);
-                            _er_tload[3] = ((tr_odd == 0) ? tr_lo_3 : tr_got_3);
-                            _er_tload[7] = ((tr_odd == 0) ? tr_got_3 : tr_hi_3);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_4 = _er_tload[8];
-                            float tr_hi_4 = _er_tload[12];
-                            float tr_send_4 = ((tr_odd == 0) ? tr_hi_4 : tr_lo_4);
-                            float tr_got_4 = __shfl_xor_sync(0xFFFFFFFF, tr_send_4, 1);
-                            _er_tload[8] = ((tr_odd == 0) ? tr_lo_4 : tr_got_4);
-                            _er_tload[12] = ((tr_odd == 0) ? tr_got_4 : tr_hi_4);
-                            float tr_lo_5 = _er_tload[9];
-                            float tr_hi_5 = _er_tload[13];
-                            float tr_send_5 = ((tr_odd == 0) ? tr_hi_5 : tr_lo_5);
-                            float tr_got_5 = __shfl_xor_sync(0xFFFFFFFF, tr_send_5, 1);
-                            _er_tload[9] = ((tr_odd == 0) ? tr_lo_5 : tr_got_5);
-                            _er_tload[13] = ((tr_odd == 0) ? tr_got_5 : tr_hi_5);
-                            float tr_lo_6 = _er_tload[10];
-                            float tr_hi_6 = _er_tload[14];
-                            float tr_send_6 = ((tr_odd == 0) ? tr_hi_6 : tr_lo_6);
-                            float tr_got_6 = __shfl_xor_sync(0xFFFFFFFF, tr_send_6, 1);
-                            _er_tload[10] = ((tr_odd == 0) ? tr_lo_6 : tr_got_6);
-                            _er_tload[14] = ((tr_odd == 0) ? tr_got_6 : tr_hi_6);
-                            float tr_lo_7 = _er_tload[11];
-                            float tr_hi_7 = _er_tload[15];
-                            float tr_send_7 = ((tr_odd == 0) ? tr_hi_7 : tr_lo_7);
-                            float tr_got_7 = __shfl_xor_sync(0xFFFFFFFF, tr_send_7, 1);
-                            _er_tload[11] = ((tr_odd == 0) ? tr_lo_7 : tr_got_7);
-                            _er_tload[15] = ((tr_odd == 0) ? tr_got_7 : tr_hi_7);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + er_col_a)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + er_col_a + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + er_col_a + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + er_col_a + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_a + 16));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -6757,60 +4333,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_1 = lane & 1;
-                            int tr_at_1 = er_part_t + (er_col_a + 16) + tr_odd_1 * (4 - TILE_K);
-                            float tr_lo_8 = _er_tload[0];
-                            float tr_hi_8 = _er_tload[4];
-                            float tr_send_8 = ((tr_odd_1 == 0) ? tr_hi_8 : tr_lo_8);
-                            float tr_got_8 = __shfl_xor_sync(0xFFFFFFFF, tr_send_8, 1);
-                            _er_tload[0] = ((tr_odd_1 == 0) ? tr_lo_8 : tr_got_8);
-                            _er_tload[4] = ((tr_odd_1 == 0) ? tr_got_8 : tr_hi_8);
-                            float tr_lo_9 = _er_tload[1];
-                            float tr_hi_9 = _er_tload[5];
-                            float tr_send_9 = ((tr_odd_1 == 0) ? tr_hi_9 : tr_lo_9);
-                            float tr_got_9 = __shfl_xor_sync(0xFFFFFFFF, tr_send_9, 1);
-                            _er_tload[1] = ((tr_odd_1 == 0) ? tr_lo_9 : tr_got_9);
-                            _er_tload[5] = ((tr_odd_1 == 0) ? tr_got_9 : tr_hi_9);
-                            float tr_lo_10 = _er_tload[2];
-                            float tr_hi_10 = _er_tload[6];
-                            float tr_send_10 = ((tr_odd_1 == 0) ? tr_hi_10 : tr_lo_10);
-                            float tr_got_10 = __shfl_xor_sync(0xFFFFFFFF, tr_send_10, 1);
-                            _er_tload[2] = ((tr_odd_1 == 0) ? tr_lo_10 : tr_got_10);
-                            _er_tload[6] = ((tr_odd_1 == 0) ? tr_got_10 : tr_hi_10);
-                            float tr_lo_11 = _er_tload[3];
-                            float tr_hi_11 = _er_tload[7];
-                            float tr_send_11 = ((tr_odd_1 == 0) ? tr_hi_11 : tr_lo_11);
-                            float tr_got_11 = __shfl_xor_sync(0xFFFFFFFF, tr_send_11, 1);
-                            _er_tload[3] = ((tr_odd_1 == 0) ? tr_lo_11 : tr_got_11);
-                            _er_tload[7] = ((tr_odd_1 == 0) ? tr_got_11 : tr_hi_11);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_1])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_1 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_12 = _er_tload[8];
-                            float tr_hi_12 = _er_tload[12];
-                            float tr_send_12 = ((tr_odd_1 == 0) ? tr_hi_12 : tr_lo_12);
-                            float tr_got_12 = __shfl_xor_sync(0xFFFFFFFF, tr_send_12, 1);
-                            _er_tload[8] = ((tr_odd_1 == 0) ? tr_lo_12 : tr_got_12);
-                            _er_tload[12] = ((tr_odd_1 == 0) ? tr_got_12 : tr_hi_12);
-                            float tr_lo_13 = _er_tload[9];
-                            float tr_hi_13 = _er_tload[13];
-                            float tr_send_13 = ((tr_odd_1 == 0) ? tr_hi_13 : tr_lo_13);
-                            float tr_got_13 = __shfl_xor_sync(0xFFFFFFFF, tr_send_13, 1);
-                            _er_tload[9] = ((tr_odd_1 == 0) ? tr_lo_13 : tr_got_13);
-                            _er_tload[13] = ((tr_odd_1 == 0) ? tr_got_13 : tr_hi_13);
-                            float tr_lo_14 = _er_tload[10];
-                            float tr_hi_14 = _er_tload[14];
-                            float tr_send_14 = ((tr_odd_1 == 0) ? tr_hi_14 : tr_lo_14);
-                            float tr_got_14 = __shfl_xor_sync(0xFFFFFFFF, tr_send_14, 1);
-                            _er_tload[10] = ((tr_odd_1 == 0) ? tr_lo_14 : tr_got_14);
-                            _er_tload[14] = ((tr_odd_1 == 0) ? tr_got_14 : tr_hi_14);
-                            float tr_lo_15 = _er_tload[11];
-                            float tr_hi_15 = _er_tload[15];
-                            float tr_send_15 = ((tr_odd_1 == 0) ? tr_hi_15 : tr_lo_15);
-                            float tr_got_15 = __shfl_xor_sync(0xFFFFFFFF, tr_send_15, 1);
-                            _er_tload[11] = ((tr_odd_1 == 0) ? tr_lo_15 : tr_got_15);
-                            _er_tload[15] = ((tr_odd_1 == 0) ? tr_got_15 : tr_hi_15);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_1 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_1 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 16))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 16) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 16) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 16) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_a + 32));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -6872,60 +4410,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_2 = lane & 1;
-                            int tr_at_2 = er_part_t + (er_col_a + 32) + tr_odd_2 * (4 - TILE_K);
-                            float tr_lo_16 = _er_tload[0];
-                            float tr_hi_16 = _er_tload[4];
-                            float tr_send_16 = ((tr_odd_2 == 0) ? tr_hi_16 : tr_lo_16);
-                            float tr_got_16 = __shfl_xor_sync(0xFFFFFFFF, tr_send_16, 1);
-                            _er_tload[0] = ((tr_odd_2 == 0) ? tr_lo_16 : tr_got_16);
-                            _er_tload[4] = ((tr_odd_2 == 0) ? tr_got_16 : tr_hi_16);
-                            float tr_lo_17 = _er_tload[1];
-                            float tr_hi_17 = _er_tload[5];
-                            float tr_send_17 = ((tr_odd_2 == 0) ? tr_hi_17 : tr_lo_17);
-                            float tr_got_17 = __shfl_xor_sync(0xFFFFFFFF, tr_send_17, 1);
-                            _er_tload[1] = ((tr_odd_2 == 0) ? tr_lo_17 : tr_got_17);
-                            _er_tload[5] = ((tr_odd_2 == 0) ? tr_got_17 : tr_hi_17);
-                            float tr_lo_18 = _er_tload[2];
-                            float tr_hi_18 = _er_tload[6];
-                            float tr_send_18 = ((tr_odd_2 == 0) ? tr_hi_18 : tr_lo_18);
-                            float tr_got_18 = __shfl_xor_sync(0xFFFFFFFF, tr_send_18, 1);
-                            _er_tload[2] = ((tr_odd_2 == 0) ? tr_lo_18 : tr_got_18);
-                            _er_tload[6] = ((tr_odd_2 == 0) ? tr_got_18 : tr_hi_18);
-                            float tr_lo_19 = _er_tload[3];
-                            float tr_hi_19 = _er_tload[7];
-                            float tr_send_19 = ((tr_odd_2 == 0) ? tr_hi_19 : tr_lo_19);
-                            float tr_got_19 = __shfl_xor_sync(0xFFFFFFFF, tr_send_19, 1);
-                            _er_tload[3] = ((tr_odd_2 == 0) ? tr_lo_19 : tr_got_19);
-                            _er_tload[7] = ((tr_odd_2 == 0) ? tr_got_19 : tr_hi_19);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_2])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_2 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_20 = _er_tload[8];
-                            float tr_hi_20 = _er_tload[12];
-                            float tr_send_20 = ((tr_odd_2 == 0) ? tr_hi_20 : tr_lo_20);
-                            float tr_got_20 = __shfl_xor_sync(0xFFFFFFFF, tr_send_20, 1);
-                            _er_tload[8] = ((tr_odd_2 == 0) ? tr_lo_20 : tr_got_20);
-                            _er_tload[12] = ((tr_odd_2 == 0) ? tr_got_20 : tr_hi_20);
-                            float tr_lo_21 = _er_tload[9];
-                            float tr_hi_21 = _er_tload[13];
-                            float tr_send_21 = ((tr_odd_2 == 0) ? tr_hi_21 : tr_lo_21);
-                            float tr_got_21 = __shfl_xor_sync(0xFFFFFFFF, tr_send_21, 1);
-                            _er_tload[9] = ((tr_odd_2 == 0) ? tr_lo_21 : tr_got_21);
-                            _er_tload[13] = ((tr_odd_2 == 0) ? tr_got_21 : tr_hi_21);
-                            float tr_lo_22 = _er_tload[10];
-                            float tr_hi_22 = _er_tload[14];
-                            float tr_send_22 = ((tr_odd_2 == 0) ? tr_hi_22 : tr_lo_22);
-                            float tr_got_22 = __shfl_xor_sync(0xFFFFFFFF, tr_send_22, 1);
-                            _er_tload[10] = ((tr_odd_2 == 0) ? tr_lo_22 : tr_got_22);
-                            _er_tload[14] = ((tr_odd_2 == 0) ? tr_got_22 : tr_hi_22);
-                            float tr_lo_23 = _er_tload[11];
-                            float tr_hi_23 = _er_tload[15];
-                            float tr_send_23 = ((tr_odd_2 == 0) ? tr_hi_23 : tr_lo_23);
-                            float tr_got_23 = __shfl_xor_sync(0xFFFFFFFF, tr_send_23, 1);
-                            _er_tload[11] = ((tr_odd_2 == 0) ? tr_lo_23 : tr_got_23);
-                            _er_tload[15] = ((tr_odd_2 == 0) ? tr_got_23 : tr_hi_23);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_2 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_2 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 32))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 32) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 32) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 32) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_a + 48));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -6987,60 +4487,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_3 = lane & 1;
-                            int tr_at_3 = er_part_t + (er_col_a + 48) + tr_odd_3 * (4 - TILE_K);
-                            float tr_lo_24 = _er_tload[0];
-                            float tr_hi_24 = _er_tload[4];
-                            float tr_send_24 = ((tr_odd_3 == 0) ? tr_hi_24 : tr_lo_24);
-                            float tr_got_24 = __shfl_xor_sync(0xFFFFFFFF, tr_send_24, 1);
-                            _er_tload[0] = ((tr_odd_3 == 0) ? tr_lo_24 : tr_got_24);
-                            _er_tload[4] = ((tr_odd_3 == 0) ? tr_got_24 : tr_hi_24);
-                            float tr_lo_25 = _er_tload[1];
-                            float tr_hi_25 = _er_tload[5];
-                            float tr_send_25 = ((tr_odd_3 == 0) ? tr_hi_25 : tr_lo_25);
-                            float tr_got_25 = __shfl_xor_sync(0xFFFFFFFF, tr_send_25, 1);
-                            _er_tload[1] = ((tr_odd_3 == 0) ? tr_lo_25 : tr_got_25);
-                            _er_tload[5] = ((tr_odd_3 == 0) ? tr_got_25 : tr_hi_25);
-                            float tr_lo_26 = _er_tload[2];
-                            float tr_hi_26 = _er_tload[6];
-                            float tr_send_26 = ((tr_odd_3 == 0) ? tr_hi_26 : tr_lo_26);
-                            float tr_got_26 = __shfl_xor_sync(0xFFFFFFFF, tr_send_26, 1);
-                            _er_tload[2] = ((tr_odd_3 == 0) ? tr_lo_26 : tr_got_26);
-                            _er_tload[6] = ((tr_odd_3 == 0) ? tr_got_26 : tr_hi_26);
-                            float tr_lo_27 = _er_tload[3];
-                            float tr_hi_27 = _er_tload[7];
-                            float tr_send_27 = ((tr_odd_3 == 0) ? tr_hi_27 : tr_lo_27);
-                            float tr_got_27 = __shfl_xor_sync(0xFFFFFFFF, tr_send_27, 1);
-                            _er_tload[3] = ((tr_odd_3 == 0) ? tr_lo_27 : tr_got_27);
-                            _er_tload[7] = ((tr_odd_3 == 0) ? tr_got_27 : tr_hi_27);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_3])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_3 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_28 = _er_tload[8];
-                            float tr_hi_28 = _er_tload[12];
-                            float tr_send_28 = ((tr_odd_3 == 0) ? tr_hi_28 : tr_lo_28);
-                            float tr_got_28 = __shfl_xor_sync(0xFFFFFFFF, tr_send_28, 1);
-                            _er_tload[8] = ((tr_odd_3 == 0) ? tr_lo_28 : tr_got_28);
-                            _er_tload[12] = ((tr_odd_3 == 0) ? tr_got_28 : tr_hi_28);
-                            float tr_lo_29 = _er_tload[9];
-                            float tr_hi_29 = _er_tload[13];
-                            float tr_send_29 = ((tr_odd_3 == 0) ? tr_hi_29 : tr_lo_29);
-                            float tr_got_29 = __shfl_xor_sync(0xFFFFFFFF, tr_send_29, 1);
-                            _er_tload[9] = ((tr_odd_3 == 0) ? tr_lo_29 : tr_got_29);
-                            _er_tload[13] = ((tr_odd_3 == 0) ? tr_got_29 : tr_hi_29);
-                            float tr_lo_30 = _er_tload[10];
-                            float tr_hi_30 = _er_tload[14];
-                            float tr_send_30 = ((tr_odd_3 == 0) ? tr_hi_30 : tr_lo_30);
-                            float tr_got_30 = __shfl_xor_sync(0xFFFFFFFF, tr_send_30, 1);
-                            _er_tload[10] = ((tr_odd_3 == 0) ? tr_lo_30 : tr_got_30);
-                            _er_tload[14] = ((tr_odd_3 == 0) ? tr_got_30 : tr_hi_30);
-                            float tr_lo_31 = _er_tload[11];
-                            float tr_hi_31 = _er_tload[15];
-                            float tr_send_31 = ((tr_odd_3 == 0) ? tr_hi_31 : tr_lo_31);
-                            float tr_got_31 = __shfl_xor_sync(0xFFFFFFFF, tr_send_31, 1);
-                            _er_tload[11] = ((tr_odd_3 == 0) ? tr_lo_31 : tr_got_31);
-                            _er_tload[15] = ((tr_odd_3 == 0) ? tr_got_31 : tr_hi_31);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_3 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_3 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 48))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 48) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 48) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 48) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_a + 64));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -7102,60 +4564,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_4 = lane & 1;
-                            int tr_at_4 = er_part_t + (er_col_a + 64) + tr_odd_4 * (4 - TILE_K);
-                            float tr_lo_32 = _er_tload[0];
-                            float tr_hi_32 = _er_tload[4];
-                            float tr_send_32 = ((tr_odd_4 == 0) ? tr_hi_32 : tr_lo_32);
-                            float tr_got_32 = __shfl_xor_sync(0xFFFFFFFF, tr_send_32, 1);
-                            _er_tload[0] = ((tr_odd_4 == 0) ? tr_lo_32 : tr_got_32);
-                            _er_tload[4] = ((tr_odd_4 == 0) ? tr_got_32 : tr_hi_32);
-                            float tr_lo_33 = _er_tload[1];
-                            float tr_hi_33 = _er_tload[5];
-                            float tr_send_33 = ((tr_odd_4 == 0) ? tr_hi_33 : tr_lo_33);
-                            float tr_got_33 = __shfl_xor_sync(0xFFFFFFFF, tr_send_33, 1);
-                            _er_tload[1] = ((tr_odd_4 == 0) ? tr_lo_33 : tr_got_33);
-                            _er_tload[5] = ((tr_odd_4 == 0) ? tr_got_33 : tr_hi_33);
-                            float tr_lo_34 = _er_tload[2];
-                            float tr_hi_34 = _er_tload[6];
-                            float tr_send_34 = ((tr_odd_4 == 0) ? tr_hi_34 : tr_lo_34);
-                            float tr_got_34 = __shfl_xor_sync(0xFFFFFFFF, tr_send_34, 1);
-                            _er_tload[2] = ((tr_odd_4 == 0) ? tr_lo_34 : tr_got_34);
-                            _er_tload[6] = ((tr_odd_4 == 0) ? tr_got_34 : tr_hi_34);
-                            float tr_lo_35 = _er_tload[3];
-                            float tr_hi_35 = _er_tload[7];
-                            float tr_send_35 = ((tr_odd_4 == 0) ? tr_hi_35 : tr_lo_35);
-                            float tr_got_35 = __shfl_xor_sync(0xFFFFFFFF, tr_send_35, 1);
-                            _er_tload[3] = ((tr_odd_4 == 0) ? tr_lo_35 : tr_got_35);
-                            _er_tload[7] = ((tr_odd_4 == 0) ? tr_got_35 : tr_hi_35);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_4])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_4 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_36 = _er_tload[8];
-                            float tr_hi_36 = _er_tload[12];
-                            float tr_send_36 = ((tr_odd_4 == 0) ? tr_hi_36 : tr_lo_36);
-                            float tr_got_36 = __shfl_xor_sync(0xFFFFFFFF, tr_send_36, 1);
-                            _er_tload[8] = ((tr_odd_4 == 0) ? tr_lo_36 : tr_got_36);
-                            _er_tload[12] = ((tr_odd_4 == 0) ? tr_got_36 : tr_hi_36);
-                            float tr_lo_37 = _er_tload[9];
-                            float tr_hi_37 = _er_tload[13];
-                            float tr_send_37 = ((tr_odd_4 == 0) ? tr_hi_37 : tr_lo_37);
-                            float tr_got_37 = __shfl_xor_sync(0xFFFFFFFF, tr_send_37, 1);
-                            _er_tload[9] = ((tr_odd_4 == 0) ? tr_lo_37 : tr_got_37);
-                            _er_tload[13] = ((tr_odd_4 == 0) ? tr_got_37 : tr_hi_37);
-                            float tr_lo_38 = _er_tload[10];
-                            float tr_hi_38 = _er_tload[14];
-                            float tr_send_38 = ((tr_odd_4 == 0) ? tr_hi_38 : tr_lo_38);
-                            float tr_got_38 = __shfl_xor_sync(0xFFFFFFFF, tr_send_38, 1);
-                            _er_tload[10] = ((tr_odd_4 == 0) ? tr_lo_38 : tr_got_38);
-                            _er_tload[14] = ((tr_odd_4 == 0) ? tr_got_38 : tr_hi_38);
-                            float tr_lo_39 = _er_tload[11];
-                            float tr_hi_39 = _er_tload[15];
-                            float tr_send_39 = ((tr_odd_4 == 0) ? tr_hi_39 : tr_lo_39);
-                            float tr_got_39 = __shfl_xor_sync(0xFFFFFFFF, tr_send_39, 1);
-                            _er_tload[11] = ((tr_odd_4 == 0) ? tr_lo_39 : tr_got_39);
-                            _er_tload[15] = ((tr_odd_4 == 0) ? tr_got_39 : tr_hi_39);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_4 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_4 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 64))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 64) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 64) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 64) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_a + 80));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -7217,60 +4641,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_5 = lane & 1;
-                            int tr_at_5 = er_part_t + (er_col_a + 80) + tr_odd_5 * (4 - TILE_K);
-                            float tr_lo_40 = _er_tload[0];
-                            float tr_hi_40 = _er_tload[4];
-                            float tr_send_40 = ((tr_odd_5 == 0) ? tr_hi_40 : tr_lo_40);
-                            float tr_got_40 = __shfl_xor_sync(0xFFFFFFFF, tr_send_40, 1);
-                            _er_tload[0] = ((tr_odd_5 == 0) ? tr_lo_40 : tr_got_40);
-                            _er_tload[4] = ((tr_odd_5 == 0) ? tr_got_40 : tr_hi_40);
-                            float tr_lo_41 = _er_tload[1];
-                            float tr_hi_41 = _er_tload[5];
-                            float tr_send_41 = ((tr_odd_5 == 0) ? tr_hi_41 : tr_lo_41);
-                            float tr_got_41 = __shfl_xor_sync(0xFFFFFFFF, tr_send_41, 1);
-                            _er_tload[1] = ((tr_odd_5 == 0) ? tr_lo_41 : tr_got_41);
-                            _er_tload[5] = ((tr_odd_5 == 0) ? tr_got_41 : tr_hi_41);
-                            float tr_lo_42 = _er_tload[2];
-                            float tr_hi_42 = _er_tload[6];
-                            float tr_send_42 = ((tr_odd_5 == 0) ? tr_hi_42 : tr_lo_42);
-                            float tr_got_42 = __shfl_xor_sync(0xFFFFFFFF, tr_send_42, 1);
-                            _er_tload[2] = ((tr_odd_5 == 0) ? tr_lo_42 : tr_got_42);
-                            _er_tload[6] = ((tr_odd_5 == 0) ? tr_got_42 : tr_hi_42);
-                            float tr_lo_43 = _er_tload[3];
-                            float tr_hi_43 = _er_tload[7];
-                            float tr_send_43 = ((tr_odd_5 == 0) ? tr_hi_43 : tr_lo_43);
-                            float tr_got_43 = __shfl_xor_sync(0xFFFFFFFF, tr_send_43, 1);
-                            _er_tload[3] = ((tr_odd_5 == 0) ? tr_lo_43 : tr_got_43);
-                            _er_tload[7] = ((tr_odd_5 == 0) ? tr_got_43 : tr_hi_43);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_5])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_5 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_44 = _er_tload[8];
-                            float tr_hi_44 = _er_tload[12];
-                            float tr_send_44 = ((tr_odd_5 == 0) ? tr_hi_44 : tr_lo_44);
-                            float tr_got_44 = __shfl_xor_sync(0xFFFFFFFF, tr_send_44, 1);
-                            _er_tload[8] = ((tr_odd_5 == 0) ? tr_lo_44 : tr_got_44);
-                            _er_tload[12] = ((tr_odd_5 == 0) ? tr_got_44 : tr_hi_44);
-                            float tr_lo_45 = _er_tload[9];
-                            float tr_hi_45 = _er_tload[13];
-                            float tr_send_45 = ((tr_odd_5 == 0) ? tr_hi_45 : tr_lo_45);
-                            float tr_got_45 = __shfl_xor_sync(0xFFFFFFFF, tr_send_45, 1);
-                            _er_tload[9] = ((tr_odd_5 == 0) ? tr_lo_45 : tr_got_45);
-                            _er_tload[13] = ((tr_odd_5 == 0) ? tr_got_45 : tr_hi_45);
-                            float tr_lo_46 = _er_tload[10];
-                            float tr_hi_46 = _er_tload[14];
-                            float tr_send_46 = ((tr_odd_5 == 0) ? tr_hi_46 : tr_lo_46);
-                            float tr_got_46 = __shfl_xor_sync(0xFFFFFFFF, tr_send_46, 1);
-                            _er_tload[10] = ((tr_odd_5 == 0) ? tr_lo_46 : tr_got_46);
-                            _er_tload[14] = ((tr_odd_5 == 0) ? tr_got_46 : tr_hi_46);
-                            float tr_lo_47 = _er_tload[11];
-                            float tr_hi_47 = _er_tload[15];
-                            float tr_send_47 = ((tr_odd_5 == 0) ? tr_hi_47 : tr_lo_47);
-                            float tr_got_47 = __shfl_xor_sync(0xFFFFFFFF, tr_send_47, 1);
-                            _er_tload[11] = ((tr_odd_5 == 0) ? tr_lo_47 : tr_got_47);
-                            _er_tload[15] = ((tr_odd_5 == 0) ? tr_got_47 : tr_hi_47);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_5 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_5 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 80))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 80) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 80) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 80) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_a + 96));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -7332,60 +4718,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_6 = lane & 1;
-                            int tr_at_6 = er_part_t + (er_col_a + 96) + tr_odd_6 * (4 - TILE_K);
-                            float tr_lo_48 = _er_tload[0];
-                            float tr_hi_48 = _er_tload[4];
-                            float tr_send_48 = ((tr_odd_6 == 0) ? tr_hi_48 : tr_lo_48);
-                            float tr_got_48 = __shfl_xor_sync(0xFFFFFFFF, tr_send_48, 1);
-                            _er_tload[0] = ((tr_odd_6 == 0) ? tr_lo_48 : tr_got_48);
-                            _er_tload[4] = ((tr_odd_6 == 0) ? tr_got_48 : tr_hi_48);
-                            float tr_lo_49 = _er_tload[1];
-                            float tr_hi_49 = _er_tload[5];
-                            float tr_send_49 = ((tr_odd_6 == 0) ? tr_hi_49 : tr_lo_49);
-                            float tr_got_49 = __shfl_xor_sync(0xFFFFFFFF, tr_send_49, 1);
-                            _er_tload[1] = ((tr_odd_6 == 0) ? tr_lo_49 : tr_got_49);
-                            _er_tload[5] = ((tr_odd_6 == 0) ? tr_got_49 : tr_hi_49);
-                            float tr_lo_50 = _er_tload[2];
-                            float tr_hi_50 = _er_tload[6];
-                            float tr_send_50 = ((tr_odd_6 == 0) ? tr_hi_50 : tr_lo_50);
-                            float tr_got_50 = __shfl_xor_sync(0xFFFFFFFF, tr_send_50, 1);
-                            _er_tload[2] = ((tr_odd_6 == 0) ? tr_lo_50 : tr_got_50);
-                            _er_tload[6] = ((tr_odd_6 == 0) ? tr_got_50 : tr_hi_50);
-                            float tr_lo_51 = _er_tload[3];
-                            float tr_hi_51 = _er_tload[7];
-                            float tr_send_51 = ((tr_odd_6 == 0) ? tr_hi_51 : tr_lo_51);
-                            float tr_got_51 = __shfl_xor_sync(0xFFFFFFFF, tr_send_51, 1);
-                            _er_tload[3] = ((tr_odd_6 == 0) ? tr_lo_51 : tr_got_51);
-                            _er_tload[7] = ((tr_odd_6 == 0) ? tr_got_51 : tr_hi_51);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_6])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_6 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_52 = _er_tload[8];
-                            float tr_hi_52 = _er_tload[12];
-                            float tr_send_52 = ((tr_odd_6 == 0) ? tr_hi_52 : tr_lo_52);
-                            float tr_got_52 = __shfl_xor_sync(0xFFFFFFFF, tr_send_52, 1);
-                            _er_tload[8] = ((tr_odd_6 == 0) ? tr_lo_52 : tr_got_52);
-                            _er_tload[12] = ((tr_odd_6 == 0) ? tr_got_52 : tr_hi_52);
-                            float tr_lo_53 = _er_tload[9];
-                            float tr_hi_53 = _er_tload[13];
-                            float tr_send_53 = ((tr_odd_6 == 0) ? tr_hi_53 : tr_lo_53);
-                            float tr_got_53 = __shfl_xor_sync(0xFFFFFFFF, tr_send_53, 1);
-                            _er_tload[9] = ((tr_odd_6 == 0) ? tr_lo_53 : tr_got_53);
-                            _er_tload[13] = ((tr_odd_6 == 0) ? tr_got_53 : tr_hi_53);
-                            float tr_lo_54 = _er_tload[10];
-                            float tr_hi_54 = _er_tload[14];
-                            float tr_send_54 = ((tr_odd_6 == 0) ? tr_hi_54 : tr_lo_54);
-                            float tr_got_54 = __shfl_xor_sync(0xFFFFFFFF, tr_send_54, 1);
-                            _er_tload[10] = ((tr_odd_6 == 0) ? tr_lo_54 : tr_got_54);
-                            _er_tload[14] = ((tr_odd_6 == 0) ? tr_got_54 : tr_hi_54);
-                            float tr_lo_55 = _er_tload[11];
-                            float tr_hi_55 = _er_tload[15];
-                            float tr_send_55 = ((tr_odd_6 == 0) ? tr_hi_55 : tr_lo_55);
-                            float tr_got_55 = __shfl_xor_sync(0xFFFFFFFF, tr_send_55, 1);
-                            _er_tload[11] = ((tr_odd_6 == 0) ? tr_lo_55 : tr_got_55);
-                            _er_tload[15] = ((tr_odd_6 == 0) ? tr_got_55 : tr_hi_55);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_6 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_6 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 96))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 96) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 96) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 96) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_a + 112));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -7447,60 +4795,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_7 = lane & 1;
-                            int tr_at_7 = er_part_t + (er_col_a + 112) + tr_odd_7 * (4 - TILE_K);
-                            float tr_lo_56 = _er_tload[0];
-                            float tr_hi_56 = _er_tload[4];
-                            float tr_send_56 = ((tr_odd_7 == 0) ? tr_hi_56 : tr_lo_56);
-                            float tr_got_56 = __shfl_xor_sync(0xFFFFFFFF, tr_send_56, 1);
-                            _er_tload[0] = ((tr_odd_7 == 0) ? tr_lo_56 : tr_got_56);
-                            _er_tload[4] = ((tr_odd_7 == 0) ? tr_got_56 : tr_hi_56);
-                            float tr_lo_57 = _er_tload[1];
-                            float tr_hi_57 = _er_tload[5];
-                            float tr_send_57 = ((tr_odd_7 == 0) ? tr_hi_57 : tr_lo_57);
-                            float tr_got_57 = __shfl_xor_sync(0xFFFFFFFF, tr_send_57, 1);
-                            _er_tload[1] = ((tr_odd_7 == 0) ? tr_lo_57 : tr_got_57);
-                            _er_tload[5] = ((tr_odd_7 == 0) ? tr_got_57 : tr_hi_57);
-                            float tr_lo_58 = _er_tload[2];
-                            float tr_hi_58 = _er_tload[6];
-                            float tr_send_58 = ((tr_odd_7 == 0) ? tr_hi_58 : tr_lo_58);
-                            float tr_got_58 = __shfl_xor_sync(0xFFFFFFFF, tr_send_58, 1);
-                            _er_tload[2] = ((tr_odd_7 == 0) ? tr_lo_58 : tr_got_58);
-                            _er_tload[6] = ((tr_odd_7 == 0) ? tr_got_58 : tr_hi_58);
-                            float tr_lo_59 = _er_tload[3];
-                            float tr_hi_59 = _er_tload[7];
-                            float tr_send_59 = ((tr_odd_7 == 0) ? tr_hi_59 : tr_lo_59);
-                            float tr_got_59 = __shfl_xor_sync(0xFFFFFFFF, tr_send_59, 1);
-                            _er_tload[3] = ((tr_odd_7 == 0) ? tr_lo_59 : tr_got_59);
-                            _er_tload[7] = ((tr_odd_7 == 0) ? tr_got_59 : tr_hi_59);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_7])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_7 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_60 = _er_tload[8];
-                            float tr_hi_60 = _er_tload[12];
-                            float tr_send_60 = ((tr_odd_7 == 0) ? tr_hi_60 : tr_lo_60);
-                            float tr_got_60 = __shfl_xor_sync(0xFFFFFFFF, tr_send_60, 1);
-                            _er_tload[8] = ((tr_odd_7 == 0) ? tr_lo_60 : tr_got_60);
-                            _er_tload[12] = ((tr_odd_7 == 0) ? tr_got_60 : tr_hi_60);
-                            float tr_lo_61 = _er_tload[9];
-                            float tr_hi_61 = _er_tload[13];
-                            float tr_send_61 = ((tr_odd_7 == 0) ? tr_hi_61 : tr_lo_61);
-                            float tr_got_61 = __shfl_xor_sync(0xFFFFFFFF, tr_send_61, 1);
-                            _er_tload[9] = ((tr_odd_7 == 0) ? tr_lo_61 : tr_got_61);
-                            _er_tload[13] = ((tr_odd_7 == 0) ? tr_got_61 : tr_hi_61);
-                            float tr_lo_62 = _er_tload[10];
-                            float tr_hi_62 = _er_tload[14];
-                            float tr_send_62 = ((tr_odd_7 == 0) ? tr_hi_62 : tr_lo_62);
-                            float tr_got_62 = __shfl_xor_sync(0xFFFFFFFF, tr_send_62, 1);
-                            _er_tload[10] = ((tr_odd_7 == 0) ? tr_lo_62 : tr_got_62);
-                            _er_tload[14] = ((tr_odd_7 == 0) ? tr_got_62 : tr_hi_62);
-                            float tr_lo_63 = _er_tload[11];
-                            float tr_hi_63 = _er_tload[15];
-                            float tr_send_63 = ((tr_odd_7 == 0) ? tr_hi_63 : tr_lo_63);
-                            float tr_got_63 = __shfl_xor_sync(0xFFFFFFFF, tr_send_63, 1);
-                            _er_tload[11] = ((tr_odd_7 == 0) ? tr_lo_63 : tr_got_63);
-                            _er_tload[15] = ((tr_odd_7 == 0) ? tr_got_63 : tr_hi_63);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_7 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_7 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 112))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 112) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 112) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_a + 112) + 12)) + 0) = _v4;
+                            }
                         }
                         if (elect_sync()) {
                             asm volatile("tcgen05.fence::before_thread_sync;");
@@ -7568,60 +4878,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_8 = lane & 1;
-                            int tr_at_8 = er_part_t + er_col_b + tr_odd_8 * (4 - TILE_K);
-                            float tr_lo_64 = _er_tload[0];
-                            float tr_hi_64 = _er_tload[4];
-                            float tr_send_64 = ((tr_odd_8 == 0) ? tr_hi_64 : tr_lo_64);
-                            float tr_got_64 = __shfl_xor_sync(0xFFFFFFFF, tr_send_64, 1);
-                            _er_tload[0] = ((tr_odd_8 == 0) ? tr_lo_64 : tr_got_64);
-                            _er_tload[4] = ((tr_odd_8 == 0) ? tr_got_64 : tr_hi_64);
-                            float tr_lo_65 = _er_tload[1];
-                            float tr_hi_65 = _er_tload[5];
-                            float tr_send_65 = ((tr_odd_8 == 0) ? tr_hi_65 : tr_lo_65);
-                            float tr_got_65 = __shfl_xor_sync(0xFFFFFFFF, tr_send_65, 1);
-                            _er_tload[1] = ((tr_odd_8 == 0) ? tr_lo_65 : tr_got_65);
-                            _er_tload[5] = ((tr_odd_8 == 0) ? tr_got_65 : tr_hi_65);
-                            float tr_lo_66 = _er_tload[2];
-                            float tr_hi_66 = _er_tload[6];
-                            float tr_send_66 = ((tr_odd_8 == 0) ? tr_hi_66 : tr_lo_66);
-                            float tr_got_66 = __shfl_xor_sync(0xFFFFFFFF, tr_send_66, 1);
-                            _er_tload[2] = ((tr_odd_8 == 0) ? tr_lo_66 : tr_got_66);
-                            _er_tload[6] = ((tr_odd_8 == 0) ? tr_got_66 : tr_hi_66);
-                            float tr_lo_67 = _er_tload[3];
-                            float tr_hi_67 = _er_tload[7];
-                            float tr_send_67 = ((tr_odd_8 == 0) ? tr_hi_67 : tr_lo_67);
-                            float tr_got_67 = __shfl_xor_sync(0xFFFFFFFF, tr_send_67, 1);
-                            _er_tload[3] = ((tr_odd_8 == 0) ? tr_lo_67 : tr_got_67);
-                            _er_tload[7] = ((tr_odd_8 == 0) ? tr_got_67 : tr_hi_67);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_8])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_8 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_68 = _er_tload[8];
-                            float tr_hi_68 = _er_tload[12];
-                            float tr_send_68 = ((tr_odd_8 == 0) ? tr_hi_68 : tr_lo_68);
-                            float tr_got_68 = __shfl_xor_sync(0xFFFFFFFF, tr_send_68, 1);
-                            _er_tload[8] = ((tr_odd_8 == 0) ? tr_lo_68 : tr_got_68);
-                            _er_tload[12] = ((tr_odd_8 == 0) ? tr_got_68 : tr_hi_68);
-                            float tr_lo_69 = _er_tload[9];
-                            float tr_hi_69 = _er_tload[13];
-                            float tr_send_69 = ((tr_odd_8 == 0) ? tr_hi_69 : tr_lo_69);
-                            float tr_got_69 = __shfl_xor_sync(0xFFFFFFFF, tr_send_69, 1);
-                            _er_tload[9] = ((tr_odd_8 == 0) ? tr_lo_69 : tr_got_69);
-                            _er_tload[13] = ((tr_odd_8 == 0) ? tr_got_69 : tr_hi_69);
-                            float tr_lo_70 = _er_tload[10];
-                            float tr_hi_70 = _er_tload[14];
-                            float tr_send_70 = ((tr_odd_8 == 0) ? tr_hi_70 : tr_lo_70);
-                            float tr_got_70 = __shfl_xor_sync(0xFFFFFFFF, tr_send_70, 1);
-                            _er_tload[10] = ((tr_odd_8 == 0) ? tr_lo_70 : tr_got_70);
-                            _er_tload[14] = ((tr_odd_8 == 0) ? tr_got_70 : tr_hi_70);
-                            float tr_lo_71 = _er_tload[11];
-                            float tr_hi_71 = _er_tload[15];
-                            float tr_send_71 = ((tr_odd_8 == 0) ? tr_hi_71 : tr_lo_71);
-                            float tr_got_71 = __shfl_xor_sync(0xFFFFFFFF, tr_send_71, 1);
-                            _er_tload[11] = ((tr_odd_8 == 0) ? tr_lo_71 : tr_got_71);
-                            _er_tload[15] = ((tr_odd_8 == 0) ? tr_got_71 : tr_hi_71);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_8 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_8 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + er_col_b)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + er_col_b + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + er_col_b + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + er_col_b + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_b + 16));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -7683,60 +4955,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_9 = lane & 1;
-                            int tr_at_9 = er_part_t + (er_col_b + 16) + tr_odd_9 * (4 - TILE_K);
-                            float tr_lo_72 = _er_tload[0];
-                            float tr_hi_72 = _er_tload[4];
-                            float tr_send_72 = ((tr_odd_9 == 0) ? tr_hi_72 : tr_lo_72);
-                            float tr_got_72 = __shfl_xor_sync(0xFFFFFFFF, tr_send_72, 1);
-                            _er_tload[0] = ((tr_odd_9 == 0) ? tr_lo_72 : tr_got_72);
-                            _er_tload[4] = ((tr_odd_9 == 0) ? tr_got_72 : tr_hi_72);
-                            float tr_lo_73 = _er_tload[1];
-                            float tr_hi_73 = _er_tload[5];
-                            float tr_send_73 = ((tr_odd_9 == 0) ? tr_hi_73 : tr_lo_73);
-                            float tr_got_73 = __shfl_xor_sync(0xFFFFFFFF, tr_send_73, 1);
-                            _er_tload[1] = ((tr_odd_9 == 0) ? tr_lo_73 : tr_got_73);
-                            _er_tload[5] = ((tr_odd_9 == 0) ? tr_got_73 : tr_hi_73);
-                            float tr_lo_74 = _er_tload[2];
-                            float tr_hi_74 = _er_tload[6];
-                            float tr_send_74 = ((tr_odd_9 == 0) ? tr_hi_74 : tr_lo_74);
-                            float tr_got_74 = __shfl_xor_sync(0xFFFFFFFF, tr_send_74, 1);
-                            _er_tload[2] = ((tr_odd_9 == 0) ? tr_lo_74 : tr_got_74);
-                            _er_tload[6] = ((tr_odd_9 == 0) ? tr_got_74 : tr_hi_74);
-                            float tr_lo_75 = _er_tload[3];
-                            float tr_hi_75 = _er_tload[7];
-                            float tr_send_75 = ((tr_odd_9 == 0) ? tr_hi_75 : tr_lo_75);
-                            float tr_got_75 = __shfl_xor_sync(0xFFFFFFFF, tr_send_75, 1);
-                            _er_tload[3] = ((tr_odd_9 == 0) ? tr_lo_75 : tr_got_75);
-                            _er_tload[7] = ((tr_odd_9 == 0) ? tr_got_75 : tr_hi_75);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_9])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_9 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_76 = _er_tload[8];
-                            float tr_hi_76 = _er_tload[12];
-                            float tr_send_76 = ((tr_odd_9 == 0) ? tr_hi_76 : tr_lo_76);
-                            float tr_got_76 = __shfl_xor_sync(0xFFFFFFFF, tr_send_76, 1);
-                            _er_tload[8] = ((tr_odd_9 == 0) ? tr_lo_76 : tr_got_76);
-                            _er_tload[12] = ((tr_odd_9 == 0) ? tr_got_76 : tr_hi_76);
-                            float tr_lo_77 = _er_tload[9];
-                            float tr_hi_77 = _er_tload[13];
-                            float tr_send_77 = ((tr_odd_9 == 0) ? tr_hi_77 : tr_lo_77);
-                            float tr_got_77 = __shfl_xor_sync(0xFFFFFFFF, tr_send_77, 1);
-                            _er_tload[9] = ((tr_odd_9 == 0) ? tr_lo_77 : tr_got_77);
-                            _er_tload[13] = ((tr_odd_9 == 0) ? tr_got_77 : tr_hi_77);
-                            float tr_lo_78 = _er_tload[10];
-                            float tr_hi_78 = _er_tload[14];
-                            float tr_send_78 = ((tr_odd_9 == 0) ? tr_hi_78 : tr_lo_78);
-                            float tr_got_78 = __shfl_xor_sync(0xFFFFFFFF, tr_send_78, 1);
-                            _er_tload[10] = ((tr_odd_9 == 0) ? tr_lo_78 : tr_got_78);
-                            _er_tload[14] = ((tr_odd_9 == 0) ? tr_got_78 : tr_hi_78);
-                            float tr_lo_79 = _er_tload[11];
-                            float tr_hi_79 = _er_tload[15];
-                            float tr_send_79 = ((tr_odd_9 == 0) ? tr_hi_79 : tr_lo_79);
-                            float tr_got_79 = __shfl_xor_sync(0xFFFFFFFF, tr_send_79, 1);
-                            _er_tload[11] = ((tr_odd_9 == 0) ? tr_lo_79 : tr_got_79);
-                            _er_tload[15] = ((tr_odd_9 == 0) ? tr_got_79 : tr_hi_79);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_9 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_9 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 16))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 16) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 16) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 16) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_b + 32));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -7798,60 +5032,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_10 = lane & 1;
-                            int tr_at_10 = er_part_t + (er_col_b + 32) + tr_odd_10 * (4 - TILE_K);
-                            float tr_lo_80 = _er_tload[0];
-                            float tr_hi_80 = _er_tload[4];
-                            float tr_send_80 = ((tr_odd_10 == 0) ? tr_hi_80 : tr_lo_80);
-                            float tr_got_80 = __shfl_xor_sync(0xFFFFFFFF, tr_send_80, 1);
-                            _er_tload[0] = ((tr_odd_10 == 0) ? tr_lo_80 : tr_got_80);
-                            _er_tload[4] = ((tr_odd_10 == 0) ? tr_got_80 : tr_hi_80);
-                            float tr_lo_81 = _er_tload[1];
-                            float tr_hi_81 = _er_tload[5];
-                            float tr_send_81 = ((tr_odd_10 == 0) ? tr_hi_81 : tr_lo_81);
-                            float tr_got_81 = __shfl_xor_sync(0xFFFFFFFF, tr_send_81, 1);
-                            _er_tload[1] = ((tr_odd_10 == 0) ? tr_lo_81 : tr_got_81);
-                            _er_tload[5] = ((tr_odd_10 == 0) ? tr_got_81 : tr_hi_81);
-                            float tr_lo_82 = _er_tload[2];
-                            float tr_hi_82 = _er_tload[6];
-                            float tr_send_82 = ((tr_odd_10 == 0) ? tr_hi_82 : tr_lo_82);
-                            float tr_got_82 = __shfl_xor_sync(0xFFFFFFFF, tr_send_82, 1);
-                            _er_tload[2] = ((tr_odd_10 == 0) ? tr_lo_82 : tr_got_82);
-                            _er_tload[6] = ((tr_odd_10 == 0) ? tr_got_82 : tr_hi_82);
-                            float tr_lo_83 = _er_tload[3];
-                            float tr_hi_83 = _er_tload[7];
-                            float tr_send_83 = ((tr_odd_10 == 0) ? tr_hi_83 : tr_lo_83);
-                            float tr_got_83 = __shfl_xor_sync(0xFFFFFFFF, tr_send_83, 1);
-                            _er_tload[3] = ((tr_odd_10 == 0) ? tr_lo_83 : tr_got_83);
-                            _er_tload[7] = ((tr_odd_10 == 0) ? tr_got_83 : tr_hi_83);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_10])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_10 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_84 = _er_tload[8];
-                            float tr_hi_84 = _er_tload[12];
-                            float tr_send_84 = ((tr_odd_10 == 0) ? tr_hi_84 : tr_lo_84);
-                            float tr_got_84 = __shfl_xor_sync(0xFFFFFFFF, tr_send_84, 1);
-                            _er_tload[8] = ((tr_odd_10 == 0) ? tr_lo_84 : tr_got_84);
-                            _er_tload[12] = ((tr_odd_10 == 0) ? tr_got_84 : tr_hi_84);
-                            float tr_lo_85 = _er_tload[9];
-                            float tr_hi_85 = _er_tload[13];
-                            float tr_send_85 = ((tr_odd_10 == 0) ? tr_hi_85 : tr_lo_85);
-                            float tr_got_85 = __shfl_xor_sync(0xFFFFFFFF, tr_send_85, 1);
-                            _er_tload[9] = ((tr_odd_10 == 0) ? tr_lo_85 : tr_got_85);
-                            _er_tload[13] = ((tr_odd_10 == 0) ? tr_got_85 : tr_hi_85);
-                            float tr_lo_86 = _er_tload[10];
-                            float tr_hi_86 = _er_tload[14];
-                            float tr_send_86 = ((tr_odd_10 == 0) ? tr_hi_86 : tr_lo_86);
-                            float tr_got_86 = __shfl_xor_sync(0xFFFFFFFF, tr_send_86, 1);
-                            _er_tload[10] = ((tr_odd_10 == 0) ? tr_lo_86 : tr_got_86);
-                            _er_tload[14] = ((tr_odd_10 == 0) ? tr_got_86 : tr_hi_86);
-                            float tr_lo_87 = _er_tload[11];
-                            float tr_hi_87 = _er_tload[15];
-                            float tr_send_87 = ((tr_odd_10 == 0) ? tr_hi_87 : tr_lo_87);
-                            float tr_got_87 = __shfl_xor_sync(0xFFFFFFFF, tr_send_87, 1);
-                            _er_tload[11] = ((tr_odd_10 == 0) ? tr_lo_87 : tr_got_87);
-                            _er_tload[15] = ((tr_odd_10 == 0) ? tr_got_87 : tr_hi_87);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_10 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_10 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 32))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 32) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 32) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 32) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_b + 48));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -7913,60 +5109,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_11 = lane & 1;
-                            int tr_at_11 = er_part_t + (er_col_b + 48) + tr_odd_11 * (4 - TILE_K);
-                            float tr_lo_88 = _er_tload[0];
-                            float tr_hi_88 = _er_tload[4];
-                            float tr_send_88 = ((tr_odd_11 == 0) ? tr_hi_88 : tr_lo_88);
-                            float tr_got_88 = __shfl_xor_sync(0xFFFFFFFF, tr_send_88, 1);
-                            _er_tload[0] = ((tr_odd_11 == 0) ? tr_lo_88 : tr_got_88);
-                            _er_tload[4] = ((tr_odd_11 == 0) ? tr_got_88 : tr_hi_88);
-                            float tr_lo_89 = _er_tload[1];
-                            float tr_hi_89 = _er_tload[5];
-                            float tr_send_89 = ((tr_odd_11 == 0) ? tr_hi_89 : tr_lo_89);
-                            float tr_got_89 = __shfl_xor_sync(0xFFFFFFFF, tr_send_89, 1);
-                            _er_tload[1] = ((tr_odd_11 == 0) ? tr_lo_89 : tr_got_89);
-                            _er_tload[5] = ((tr_odd_11 == 0) ? tr_got_89 : tr_hi_89);
-                            float tr_lo_90 = _er_tload[2];
-                            float tr_hi_90 = _er_tload[6];
-                            float tr_send_90 = ((tr_odd_11 == 0) ? tr_hi_90 : tr_lo_90);
-                            float tr_got_90 = __shfl_xor_sync(0xFFFFFFFF, tr_send_90, 1);
-                            _er_tload[2] = ((tr_odd_11 == 0) ? tr_lo_90 : tr_got_90);
-                            _er_tload[6] = ((tr_odd_11 == 0) ? tr_got_90 : tr_hi_90);
-                            float tr_lo_91 = _er_tload[3];
-                            float tr_hi_91 = _er_tload[7];
-                            float tr_send_91 = ((tr_odd_11 == 0) ? tr_hi_91 : tr_lo_91);
-                            float tr_got_91 = __shfl_xor_sync(0xFFFFFFFF, tr_send_91, 1);
-                            _er_tload[3] = ((tr_odd_11 == 0) ? tr_lo_91 : tr_got_91);
-                            _er_tload[7] = ((tr_odd_11 == 0) ? tr_got_91 : tr_hi_91);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_11])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_11 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_92 = _er_tload[8];
-                            float tr_hi_92 = _er_tload[12];
-                            float tr_send_92 = ((tr_odd_11 == 0) ? tr_hi_92 : tr_lo_92);
-                            float tr_got_92 = __shfl_xor_sync(0xFFFFFFFF, tr_send_92, 1);
-                            _er_tload[8] = ((tr_odd_11 == 0) ? tr_lo_92 : tr_got_92);
-                            _er_tload[12] = ((tr_odd_11 == 0) ? tr_got_92 : tr_hi_92);
-                            float tr_lo_93 = _er_tload[9];
-                            float tr_hi_93 = _er_tload[13];
-                            float tr_send_93 = ((tr_odd_11 == 0) ? tr_hi_93 : tr_lo_93);
-                            float tr_got_93 = __shfl_xor_sync(0xFFFFFFFF, tr_send_93, 1);
-                            _er_tload[9] = ((tr_odd_11 == 0) ? tr_lo_93 : tr_got_93);
-                            _er_tload[13] = ((tr_odd_11 == 0) ? tr_got_93 : tr_hi_93);
-                            float tr_lo_94 = _er_tload[10];
-                            float tr_hi_94 = _er_tload[14];
-                            float tr_send_94 = ((tr_odd_11 == 0) ? tr_hi_94 : tr_lo_94);
-                            float tr_got_94 = __shfl_xor_sync(0xFFFFFFFF, tr_send_94, 1);
-                            _er_tload[10] = ((tr_odd_11 == 0) ? tr_lo_94 : tr_got_94);
-                            _er_tload[14] = ((tr_odd_11 == 0) ? tr_got_94 : tr_hi_94);
-                            float tr_lo_95 = _er_tload[11];
-                            float tr_hi_95 = _er_tload[15];
-                            float tr_send_95 = ((tr_odd_11 == 0) ? tr_hi_95 : tr_lo_95);
-                            float tr_got_95 = __shfl_xor_sync(0xFFFFFFFF, tr_send_95, 1);
-                            _er_tload[11] = ((tr_odd_11 == 0) ? tr_lo_95 : tr_got_95);
-                            _er_tload[15] = ((tr_odd_11 == 0) ? tr_got_95 : tr_hi_95);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_11 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_11 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 48))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 48) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 48) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 48) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_b + 64));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -8028,60 +5186,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_12 = lane & 1;
-                            int tr_at_12 = er_part_t + (er_col_b + 64) + tr_odd_12 * (4 - TILE_K);
-                            float tr_lo_96 = _er_tload[0];
-                            float tr_hi_96 = _er_tload[4];
-                            float tr_send_96 = ((tr_odd_12 == 0) ? tr_hi_96 : tr_lo_96);
-                            float tr_got_96 = __shfl_xor_sync(0xFFFFFFFF, tr_send_96, 1);
-                            _er_tload[0] = ((tr_odd_12 == 0) ? tr_lo_96 : tr_got_96);
-                            _er_tload[4] = ((tr_odd_12 == 0) ? tr_got_96 : tr_hi_96);
-                            float tr_lo_97 = _er_tload[1];
-                            float tr_hi_97 = _er_tload[5];
-                            float tr_send_97 = ((tr_odd_12 == 0) ? tr_hi_97 : tr_lo_97);
-                            float tr_got_97 = __shfl_xor_sync(0xFFFFFFFF, tr_send_97, 1);
-                            _er_tload[1] = ((tr_odd_12 == 0) ? tr_lo_97 : tr_got_97);
-                            _er_tload[5] = ((tr_odd_12 == 0) ? tr_got_97 : tr_hi_97);
-                            float tr_lo_98 = _er_tload[2];
-                            float tr_hi_98 = _er_tload[6];
-                            float tr_send_98 = ((tr_odd_12 == 0) ? tr_hi_98 : tr_lo_98);
-                            float tr_got_98 = __shfl_xor_sync(0xFFFFFFFF, tr_send_98, 1);
-                            _er_tload[2] = ((tr_odd_12 == 0) ? tr_lo_98 : tr_got_98);
-                            _er_tload[6] = ((tr_odd_12 == 0) ? tr_got_98 : tr_hi_98);
-                            float tr_lo_99 = _er_tload[3];
-                            float tr_hi_99 = _er_tload[7];
-                            float tr_send_99 = ((tr_odd_12 == 0) ? tr_hi_99 : tr_lo_99);
-                            float tr_got_99 = __shfl_xor_sync(0xFFFFFFFF, tr_send_99, 1);
-                            _er_tload[3] = ((tr_odd_12 == 0) ? tr_lo_99 : tr_got_99);
-                            _er_tload[7] = ((tr_odd_12 == 0) ? tr_got_99 : tr_hi_99);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_12])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_12 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_100 = _er_tload[8];
-                            float tr_hi_100 = _er_tload[12];
-                            float tr_send_100 = ((tr_odd_12 == 0) ? tr_hi_100 : tr_lo_100);
-                            float tr_got_100 = __shfl_xor_sync(0xFFFFFFFF, tr_send_100, 1);
-                            _er_tload[8] = ((tr_odd_12 == 0) ? tr_lo_100 : tr_got_100);
-                            _er_tload[12] = ((tr_odd_12 == 0) ? tr_got_100 : tr_hi_100);
-                            float tr_lo_101 = _er_tload[9];
-                            float tr_hi_101 = _er_tload[13];
-                            float tr_send_101 = ((tr_odd_12 == 0) ? tr_hi_101 : tr_lo_101);
-                            float tr_got_101 = __shfl_xor_sync(0xFFFFFFFF, tr_send_101, 1);
-                            _er_tload[9] = ((tr_odd_12 == 0) ? tr_lo_101 : tr_got_101);
-                            _er_tload[13] = ((tr_odd_12 == 0) ? tr_got_101 : tr_hi_101);
-                            float tr_lo_102 = _er_tload[10];
-                            float tr_hi_102 = _er_tload[14];
-                            float tr_send_102 = ((tr_odd_12 == 0) ? tr_hi_102 : tr_lo_102);
-                            float tr_got_102 = __shfl_xor_sync(0xFFFFFFFF, tr_send_102, 1);
-                            _er_tload[10] = ((tr_odd_12 == 0) ? tr_lo_102 : tr_got_102);
-                            _er_tload[14] = ((tr_odd_12 == 0) ? tr_got_102 : tr_hi_102);
-                            float tr_lo_103 = _er_tload[11];
-                            float tr_hi_103 = _er_tload[15];
-                            float tr_send_103 = ((tr_odd_12 == 0) ? tr_hi_103 : tr_lo_103);
-                            float tr_got_103 = __shfl_xor_sync(0xFFFFFFFF, tr_send_103, 1);
-                            _er_tload[11] = ((tr_odd_12 == 0) ? tr_lo_103 : tr_got_103);
-                            _er_tload[15] = ((tr_odd_12 == 0) ? tr_got_103 : tr_hi_103);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_12 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_12 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 64))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 64) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 64) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 64) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_b + 80));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -8143,60 +5263,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_13 = lane & 1;
-                            int tr_at_13 = er_part_t + (er_col_b + 80) + tr_odd_13 * (4 - TILE_K);
-                            float tr_lo_104 = _er_tload[0];
-                            float tr_hi_104 = _er_tload[4];
-                            float tr_send_104 = ((tr_odd_13 == 0) ? tr_hi_104 : tr_lo_104);
-                            float tr_got_104 = __shfl_xor_sync(0xFFFFFFFF, tr_send_104, 1);
-                            _er_tload[0] = ((tr_odd_13 == 0) ? tr_lo_104 : tr_got_104);
-                            _er_tload[4] = ((tr_odd_13 == 0) ? tr_got_104 : tr_hi_104);
-                            float tr_lo_105 = _er_tload[1];
-                            float tr_hi_105 = _er_tload[5];
-                            float tr_send_105 = ((tr_odd_13 == 0) ? tr_hi_105 : tr_lo_105);
-                            float tr_got_105 = __shfl_xor_sync(0xFFFFFFFF, tr_send_105, 1);
-                            _er_tload[1] = ((tr_odd_13 == 0) ? tr_lo_105 : tr_got_105);
-                            _er_tload[5] = ((tr_odd_13 == 0) ? tr_got_105 : tr_hi_105);
-                            float tr_lo_106 = _er_tload[2];
-                            float tr_hi_106 = _er_tload[6];
-                            float tr_send_106 = ((tr_odd_13 == 0) ? tr_hi_106 : tr_lo_106);
-                            float tr_got_106 = __shfl_xor_sync(0xFFFFFFFF, tr_send_106, 1);
-                            _er_tload[2] = ((tr_odd_13 == 0) ? tr_lo_106 : tr_got_106);
-                            _er_tload[6] = ((tr_odd_13 == 0) ? tr_got_106 : tr_hi_106);
-                            float tr_lo_107 = _er_tload[3];
-                            float tr_hi_107 = _er_tload[7];
-                            float tr_send_107 = ((tr_odd_13 == 0) ? tr_hi_107 : tr_lo_107);
-                            float tr_got_107 = __shfl_xor_sync(0xFFFFFFFF, tr_send_107, 1);
-                            _er_tload[3] = ((tr_odd_13 == 0) ? tr_lo_107 : tr_got_107);
-                            _er_tload[7] = ((tr_odd_13 == 0) ? tr_got_107 : tr_hi_107);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_13])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_13 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_108 = _er_tload[8];
-                            float tr_hi_108 = _er_tload[12];
-                            float tr_send_108 = ((tr_odd_13 == 0) ? tr_hi_108 : tr_lo_108);
-                            float tr_got_108 = __shfl_xor_sync(0xFFFFFFFF, tr_send_108, 1);
-                            _er_tload[8] = ((tr_odd_13 == 0) ? tr_lo_108 : tr_got_108);
-                            _er_tload[12] = ((tr_odd_13 == 0) ? tr_got_108 : tr_hi_108);
-                            float tr_lo_109 = _er_tload[9];
-                            float tr_hi_109 = _er_tload[13];
-                            float tr_send_109 = ((tr_odd_13 == 0) ? tr_hi_109 : tr_lo_109);
-                            float tr_got_109 = __shfl_xor_sync(0xFFFFFFFF, tr_send_109, 1);
-                            _er_tload[9] = ((tr_odd_13 == 0) ? tr_lo_109 : tr_got_109);
-                            _er_tload[13] = ((tr_odd_13 == 0) ? tr_got_109 : tr_hi_109);
-                            float tr_lo_110 = _er_tload[10];
-                            float tr_hi_110 = _er_tload[14];
-                            float tr_send_110 = ((tr_odd_13 == 0) ? tr_hi_110 : tr_lo_110);
-                            float tr_got_110 = __shfl_xor_sync(0xFFFFFFFF, tr_send_110, 1);
-                            _er_tload[10] = ((tr_odd_13 == 0) ? tr_lo_110 : tr_got_110);
-                            _er_tload[14] = ((tr_odd_13 == 0) ? tr_got_110 : tr_hi_110);
-                            float tr_lo_111 = _er_tload[11];
-                            float tr_hi_111 = _er_tload[15];
-                            float tr_send_111 = ((tr_odd_13 == 0) ? tr_hi_111 : tr_lo_111);
-                            float tr_got_111 = __shfl_xor_sync(0xFFFFFFFF, tr_send_111, 1);
-                            _er_tload[11] = ((tr_odd_13 == 0) ? tr_lo_111 : tr_got_111);
-                            _er_tload[15] = ((tr_odd_13 == 0) ? tr_got_111 : tr_hi_111);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_13 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_13 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 80))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 80) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 80) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 80) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_b + 96));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -8258,60 +5340,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_14 = lane & 1;
-                            int tr_at_14 = er_part_t + (er_col_b + 96) + tr_odd_14 * (4 - TILE_K);
-                            float tr_lo_112 = _er_tload[0];
-                            float tr_hi_112 = _er_tload[4];
-                            float tr_send_112 = ((tr_odd_14 == 0) ? tr_hi_112 : tr_lo_112);
-                            float tr_got_112 = __shfl_xor_sync(0xFFFFFFFF, tr_send_112, 1);
-                            _er_tload[0] = ((tr_odd_14 == 0) ? tr_lo_112 : tr_got_112);
-                            _er_tload[4] = ((tr_odd_14 == 0) ? tr_got_112 : tr_hi_112);
-                            float tr_lo_113 = _er_tload[1];
-                            float tr_hi_113 = _er_tload[5];
-                            float tr_send_113 = ((tr_odd_14 == 0) ? tr_hi_113 : tr_lo_113);
-                            float tr_got_113 = __shfl_xor_sync(0xFFFFFFFF, tr_send_113, 1);
-                            _er_tload[1] = ((tr_odd_14 == 0) ? tr_lo_113 : tr_got_113);
-                            _er_tload[5] = ((tr_odd_14 == 0) ? tr_got_113 : tr_hi_113);
-                            float tr_lo_114 = _er_tload[2];
-                            float tr_hi_114 = _er_tload[6];
-                            float tr_send_114 = ((tr_odd_14 == 0) ? tr_hi_114 : tr_lo_114);
-                            float tr_got_114 = __shfl_xor_sync(0xFFFFFFFF, tr_send_114, 1);
-                            _er_tload[2] = ((tr_odd_14 == 0) ? tr_lo_114 : tr_got_114);
-                            _er_tload[6] = ((tr_odd_14 == 0) ? tr_got_114 : tr_hi_114);
-                            float tr_lo_115 = _er_tload[3];
-                            float tr_hi_115 = _er_tload[7];
-                            float tr_send_115 = ((tr_odd_14 == 0) ? tr_hi_115 : tr_lo_115);
-                            float tr_got_115 = __shfl_xor_sync(0xFFFFFFFF, tr_send_115, 1);
-                            _er_tload[3] = ((tr_odd_14 == 0) ? tr_lo_115 : tr_got_115);
-                            _er_tload[7] = ((tr_odd_14 == 0) ? tr_got_115 : tr_hi_115);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_14])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_14 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_116 = _er_tload[8];
-                            float tr_hi_116 = _er_tload[12];
-                            float tr_send_116 = ((tr_odd_14 == 0) ? tr_hi_116 : tr_lo_116);
-                            float tr_got_116 = __shfl_xor_sync(0xFFFFFFFF, tr_send_116, 1);
-                            _er_tload[8] = ((tr_odd_14 == 0) ? tr_lo_116 : tr_got_116);
-                            _er_tload[12] = ((tr_odd_14 == 0) ? tr_got_116 : tr_hi_116);
-                            float tr_lo_117 = _er_tload[9];
-                            float tr_hi_117 = _er_tload[13];
-                            float tr_send_117 = ((tr_odd_14 == 0) ? tr_hi_117 : tr_lo_117);
-                            float tr_got_117 = __shfl_xor_sync(0xFFFFFFFF, tr_send_117, 1);
-                            _er_tload[9] = ((tr_odd_14 == 0) ? tr_lo_117 : tr_got_117);
-                            _er_tload[13] = ((tr_odd_14 == 0) ? tr_got_117 : tr_hi_117);
-                            float tr_lo_118 = _er_tload[10];
-                            float tr_hi_118 = _er_tload[14];
-                            float tr_send_118 = ((tr_odd_14 == 0) ? tr_hi_118 : tr_lo_118);
-                            float tr_got_118 = __shfl_xor_sync(0xFFFFFFFF, tr_send_118, 1);
-                            _er_tload[10] = ((tr_odd_14 == 0) ? tr_lo_118 : tr_got_118);
-                            _er_tload[14] = ((tr_odd_14 == 0) ? tr_got_118 : tr_hi_118);
-                            float tr_lo_119 = _er_tload[11];
-                            float tr_hi_119 = _er_tload[15];
-                            float tr_send_119 = ((tr_odd_14 == 0) ? tr_hi_119 : tr_lo_119);
-                            float tr_got_119 = __shfl_xor_sync(0xFFFFFFFF, tr_send_119, 1);
-                            _er_tload[11] = ((tr_odd_14 == 0) ? tr_lo_119 : tr_got_119);
-                            _er_tload[15] = ((tr_odd_14 == 0) ? tr_got_119 : tr_hi_119);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_14 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_14 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 96))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 96) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 96) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 96) + 12)) + 0) = _v4;
+                            }
                         }
                         tmem_ld_x16(&_er_tload[0], er_rowt + (er_col_b + 112));
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -8373,60 +5417,22 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                             }
                         }
                         if (whole_te == 0) {
-                            int tr_odd_15 = lane & 1;
-                            int tr_at_15 = er_part_t + (er_col_b + 112) + tr_odd_15 * (4 - TILE_K);
-                            float tr_lo_120 = _er_tload[0];
-                            float tr_hi_120 = _er_tload[4];
-                            float tr_send_120 = ((tr_odd_15 == 0) ? tr_hi_120 : tr_lo_120);
-                            float tr_got_120 = __shfl_xor_sync(0xFFFFFFFF, tr_send_120, 1);
-                            _er_tload[0] = ((tr_odd_15 == 0) ? tr_lo_120 : tr_got_120);
-                            _er_tload[4] = ((tr_odd_15 == 0) ? tr_got_120 : tr_hi_120);
-                            float tr_lo_121 = _er_tload[1];
-                            float tr_hi_121 = _er_tload[5];
-                            float tr_send_121 = ((tr_odd_15 == 0) ? tr_hi_121 : tr_lo_121);
-                            float tr_got_121 = __shfl_xor_sync(0xFFFFFFFF, tr_send_121, 1);
-                            _er_tload[1] = ((tr_odd_15 == 0) ? tr_lo_121 : tr_got_121);
-                            _er_tload[5] = ((tr_odd_15 == 0) ? tr_got_121 : tr_hi_121);
-                            float tr_lo_122 = _er_tload[2];
-                            float tr_hi_122 = _er_tload[6];
-                            float tr_send_122 = ((tr_odd_15 == 0) ? tr_hi_122 : tr_lo_122);
-                            float tr_got_122 = __shfl_xor_sync(0xFFFFFFFF, tr_send_122, 1);
-                            _er_tload[2] = ((tr_odd_15 == 0) ? tr_lo_122 : tr_got_122);
-                            _er_tload[6] = ((tr_odd_15 == 0) ? tr_got_122 : tr_hi_122);
-                            float tr_lo_123 = _er_tload[3];
-                            float tr_hi_123 = _er_tload[7];
-                            float tr_send_123 = ((tr_odd_15 == 0) ? tr_hi_123 : tr_lo_123);
-                            float tr_got_123 = __shfl_xor_sync(0xFFFFFFFF, tr_send_123, 1);
-                            _er_tload[3] = ((tr_odd_15 == 0) ? tr_lo_123 : tr_got_123);
-                            _er_tload[7] = ((tr_odd_15 == 0) ? tr_got_123 : tr_hi_123);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_15])), "f"(_er_tload[0]), "f"(_er_tload[1]), "f"(_er_tload[2]), "f"(_er_tload[3]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_15 + TILE_K])), "f"(_er_tload[4]), "f"(_er_tload[5]), "f"(_er_tload[6]), "f"(_er_tload[7]), "l"(0x14F0000000000000ULL) : "memory");
-                            float tr_lo_124 = _er_tload[8];
-                            float tr_hi_124 = _er_tload[12];
-                            float tr_send_124 = ((tr_odd_15 == 0) ? tr_hi_124 : tr_lo_124);
-                            float tr_got_124 = __shfl_xor_sync(0xFFFFFFFF, tr_send_124, 1);
-                            _er_tload[8] = ((tr_odd_15 == 0) ? tr_lo_124 : tr_got_124);
-                            _er_tload[12] = ((tr_odd_15 == 0) ? tr_got_124 : tr_hi_124);
-                            float tr_lo_125 = _er_tload[9];
-                            float tr_hi_125 = _er_tload[13];
-                            float tr_send_125 = ((tr_odd_15 == 0) ? tr_hi_125 : tr_lo_125);
-                            float tr_got_125 = __shfl_xor_sync(0xFFFFFFFF, tr_send_125, 1);
-                            _er_tload[9] = ((tr_odd_15 == 0) ? tr_lo_125 : tr_got_125);
-                            _er_tload[13] = ((tr_odd_15 == 0) ? tr_got_125 : tr_hi_125);
-                            float tr_lo_126 = _er_tload[10];
-                            float tr_hi_126 = _er_tload[14];
-                            float tr_send_126 = ((tr_odd_15 == 0) ? tr_hi_126 : tr_lo_126);
-                            float tr_got_126 = __shfl_xor_sync(0xFFFFFFFF, tr_send_126, 1);
-                            _er_tload[10] = ((tr_odd_15 == 0) ? tr_lo_126 : tr_got_126);
-                            _er_tload[14] = ((tr_odd_15 == 0) ? tr_got_126 : tr_hi_126);
-                            float tr_lo_127 = _er_tload[11];
-                            float tr_hi_127 = _er_tload[15];
-                            float tr_send_127 = ((tr_odd_15 == 0) ? tr_hi_127 : tr_lo_127);
-                            float tr_got_127 = __shfl_xor_sync(0xFFFFFFFF, tr_send_127, 1);
-                            _er_tload[11] = ((tr_odd_15 == 0) ? tr_lo_127 : tr_got_127);
-                            _er_tload[15] = ((tr_odd_15 == 0) ? tr_got_127 : tr_hi_127);
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_15 + 8])), "f"(_er_tload[8]), "f"(_er_tload[9]), "f"(_er_tload[10]), "f"(_er_tload[11]), "l"(0x14F0000000000000ULL) : "memory");
-                            asm volatile("red.global.add.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(reinterpret_cast<uint64_t>(&tail_sums[tr_at_15 + 8 + TILE_K])), "f"(_er_tload[12]), "f"(_er_tload[13]), "f"(_er_tload[14]), "f"(_er_tload[15]), "l"(0x14F0000000000000ULL) : "memory");
+                            {
+                                float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 112))) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 112) + 4)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 112) + 8)) + 0) = _v4;
+                            }
+                            {
+                                float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
+                                *reinterpret_cast<float4*>((partials + (er_part_t + (er_col_b + 112) + 12)) + 0) = _v4;
+                            }
                         }
                         if (elect_sync()) {
                             asm volatile("tcgen05.fence::before_thread_sync;");
@@ -8435,946 +5441,6 @@ kernel_cake_moe_grouped_gemm_6e4ada2cdc0bc78f14ba_wgrad_out32(const __grid_const
                                 :: "r"((epilogue_done_addr) & 0xFEFFFFFF) : "memory");
                         }
                         _phase_mainloop_done ^= 1;
-                        if (whole_te == 0) {
-                            int tl_count = tail_splits;
-                            if (kb_te < tail_splits) {
-                                tl_count = kb_te;
-                            }
-                            __threadfence();
-                            __syncwarp();
-                            unsigned int tl_old = 0;
-                            if (lane == 0) {
-                                uint32_t _atomic_fetch_inc_0;
-                                asm volatile("atom.acq_rel.gpu.global.inc.u32 %0, [%1], %2;"
-                                    : "=r"(_atomic_fetch_inc_0) : "l"(&tail_tickets[((int)j_u_te * CTA_GROUP + cta_rank) * NUM_EPILOGUE_WARPS + (warp - 2)]), "r"(static_cast<uint32_t>((unsigned int)(tl_count - 1))) : "memory");
-                                tl_old = _atomic_fetch_inc_0;
-                            }
-                            unsigned int tl_seen = __shfl_sync(0xFFFFFFFF, tl_old, 0);
-                            if (tl_seen == (unsigned int)(tl_count - 1)) {
-                                __syncwarp();
-                                asm volatile("fence.acquire.gpu;" ::: "memory");
-                                int tl_part = slot_te * (CLUSTER_M * TILE_K) + (cta_rank * BLOCK_M + epi_warp * 32) * TILE_K;
-                                int tl_out = (int)e_uet * stride_e + (row_nt - lane) * ldc + col0t;
-                                int tf_col = 4 * lane;
-                                float _rz[4];
-                                _rz[0] = 0.0f;
-                                _rz[1] = 0.0f;
-                                _rz[2] = 0.0f;
-                                _rz[3] = 0.0f;
-                                float _rf[64];
-                                {
-                                    unsigned _v4_1_0;
-                                    unsigned _v4_1_1;
-                                    unsigned _v4_1_2;
-                                    unsigned _v4_1_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_1_0), "=r"(_v4_1_1), "=r"(_v4_1_2), "=r"(_v4_1_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + tf_col) + (0))) : "memory");
-                                    _rf[0 + 0] = __uint_as_float(_v4_1_0);
-                                    _rf[0 + 1] = __uint_as_float(_v4_1_1);
-                                    _rf[0 + 2] = __uint_as_float(_v4_1_2);
-                                    _rf[0 + 3] = __uint_as_float(_v4_1_3);
-                                }
-                                {
-                                    unsigned _v4_2_0;
-                                    unsigned _v4_2_1;
-                                    unsigned _v4_2_2;
-                                    unsigned _v4_2_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_2_0), "=r"(_v4_2_1), "=r"(_v4_2_2), "=r"(_v4_2_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[4 + 0] = __uint_as_float(_v4_2_0);
-                                    _rf[4 + 1] = __uint_as_float(_v4_2_1);
-                                    _rf[4 + 2] = __uint_as_float(_v4_2_2);
-                                    _rf[4 + 3] = __uint_as_float(_v4_2_3);
-                                }
-                                {
-                                    unsigned _v4_3_0;
-                                    unsigned _v4_3_1;
-                                    unsigned _v4_3_2;
-                                    unsigned _v4_3_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_3_0), "=r"(_v4_3_1), "=r"(_v4_3_2), "=r"(_v4_3_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 2 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[8 + 0] = __uint_as_float(_v4_3_0);
-                                    _rf[8 + 1] = __uint_as_float(_v4_3_1);
-                                    _rf[8 + 2] = __uint_as_float(_v4_3_2);
-                                    _rf[8 + 3] = __uint_as_float(_v4_3_3);
-                                }
-                                {
-                                    unsigned _v4_4_0;
-                                    unsigned _v4_4_1;
-                                    unsigned _v4_4_2;
-                                    unsigned _v4_4_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_4_0), "=r"(_v4_4_1), "=r"(_v4_4_2), "=r"(_v4_4_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 3 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[12 + 0] = __uint_as_float(_v4_4_0);
-                                    _rf[12 + 1] = __uint_as_float(_v4_4_1);
-                                    _rf[12 + 2] = __uint_as_float(_v4_4_2);
-                                    _rf[12 + 3] = __uint_as_float(_v4_4_3);
-                                }
-                                {
-                                    unsigned _v4_5_0;
-                                    unsigned _v4_5_1;
-                                    unsigned _v4_5_2;
-                                    unsigned _v4_5_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_5_0), "=r"(_v4_5_1), "=r"(_v4_5_2), "=r"(_v4_5_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 4 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[16 + 0] = __uint_as_float(_v4_5_0);
-                                    _rf[16 + 1] = __uint_as_float(_v4_5_1);
-                                    _rf[16 + 2] = __uint_as_float(_v4_5_2);
-                                    _rf[16 + 3] = __uint_as_float(_v4_5_3);
-                                }
-                                {
-                                    unsigned _v4_6_0;
-                                    unsigned _v4_6_1;
-                                    unsigned _v4_6_2;
-                                    unsigned _v4_6_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_6_0), "=r"(_v4_6_1), "=r"(_v4_6_2), "=r"(_v4_6_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 5 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[20 + 0] = __uint_as_float(_v4_6_0);
-                                    _rf[20 + 1] = __uint_as_float(_v4_6_1);
-                                    _rf[20 + 2] = __uint_as_float(_v4_6_2);
-                                    _rf[20 + 3] = __uint_as_float(_v4_6_3);
-                                }
-                                {
-                                    unsigned _v4_7_0;
-                                    unsigned _v4_7_1;
-                                    unsigned _v4_7_2;
-                                    unsigned _v4_7_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_7_0), "=r"(_v4_7_1), "=r"(_v4_7_2), "=r"(_v4_7_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 6 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[24 + 0] = __uint_as_float(_v4_7_0);
-                                    _rf[24 + 1] = __uint_as_float(_v4_7_1);
-                                    _rf[24 + 2] = __uint_as_float(_v4_7_2);
-                                    _rf[24 + 3] = __uint_as_float(_v4_7_3);
-                                }
-                                {
-                                    unsigned _v4_8_0;
-                                    unsigned _v4_8_1;
-                                    unsigned _v4_8_2;
-                                    unsigned _v4_8_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_8_0), "=r"(_v4_8_1), "=r"(_v4_8_2), "=r"(_v4_8_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 7 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[28 + 0] = __uint_as_float(_v4_8_0);
-                                    _rf[28 + 1] = __uint_as_float(_v4_8_1);
-                                    _rf[28 + 2] = __uint_as_float(_v4_8_2);
-                                    _rf[28 + 3] = __uint_as_float(_v4_8_3);
-                                }
-                                {
-                                    unsigned _v4_9_0;
-                                    unsigned _v4_9_1;
-                                    unsigned _v4_9_2;
-                                    unsigned _v4_9_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_9_0), "=r"(_v4_9_1), "=r"(_v4_9_2), "=r"(_v4_9_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 8 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[32 + 0] = __uint_as_float(_v4_9_0);
-                                    _rf[32 + 1] = __uint_as_float(_v4_9_1);
-                                    _rf[32 + 2] = __uint_as_float(_v4_9_2);
-                                    _rf[32 + 3] = __uint_as_float(_v4_9_3);
-                                }
-                                {
-                                    unsigned _v4_10_0;
-                                    unsigned _v4_10_1;
-                                    unsigned _v4_10_2;
-                                    unsigned _v4_10_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_10_0), "=r"(_v4_10_1), "=r"(_v4_10_2), "=r"(_v4_10_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 9 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[36 + 0] = __uint_as_float(_v4_10_0);
-                                    _rf[36 + 1] = __uint_as_float(_v4_10_1);
-                                    _rf[36 + 2] = __uint_as_float(_v4_10_2);
-                                    _rf[36 + 3] = __uint_as_float(_v4_10_3);
-                                }
-                                {
-                                    unsigned _v4_11_0;
-                                    unsigned _v4_11_1;
-                                    unsigned _v4_11_2;
-                                    unsigned _v4_11_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_11_0), "=r"(_v4_11_1), "=r"(_v4_11_2), "=r"(_v4_11_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 10 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[40 + 0] = __uint_as_float(_v4_11_0);
-                                    _rf[40 + 1] = __uint_as_float(_v4_11_1);
-                                    _rf[40 + 2] = __uint_as_float(_v4_11_2);
-                                    _rf[40 + 3] = __uint_as_float(_v4_11_3);
-                                }
-                                {
-                                    unsigned _v4_12_0;
-                                    unsigned _v4_12_1;
-                                    unsigned _v4_12_2;
-                                    unsigned _v4_12_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_12_0), "=r"(_v4_12_1), "=r"(_v4_12_2), "=r"(_v4_12_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 11 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[44 + 0] = __uint_as_float(_v4_12_0);
-                                    _rf[44 + 1] = __uint_as_float(_v4_12_1);
-                                    _rf[44 + 2] = __uint_as_float(_v4_12_2);
-                                    _rf[44 + 3] = __uint_as_float(_v4_12_3);
-                                }
-                                {
-                                    unsigned _v4_13_0;
-                                    unsigned _v4_13_1;
-                                    unsigned _v4_13_2;
-                                    unsigned _v4_13_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_13_0), "=r"(_v4_13_1), "=r"(_v4_13_2), "=r"(_v4_13_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 12 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[48 + 0] = __uint_as_float(_v4_13_0);
-                                    _rf[48 + 1] = __uint_as_float(_v4_13_1);
-                                    _rf[48 + 2] = __uint_as_float(_v4_13_2);
-                                    _rf[48 + 3] = __uint_as_float(_v4_13_3);
-                                }
-                                {
-                                    unsigned _v4_14_0;
-                                    unsigned _v4_14_1;
-                                    unsigned _v4_14_2;
-                                    unsigned _v4_14_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_14_0), "=r"(_v4_14_1), "=r"(_v4_14_2), "=r"(_v4_14_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 13 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[52 + 0] = __uint_as_float(_v4_14_0);
-                                    _rf[52 + 1] = __uint_as_float(_v4_14_1);
-                                    _rf[52 + 2] = __uint_as_float(_v4_14_2);
-                                    _rf[52 + 3] = __uint_as_float(_v4_14_3);
-                                }
-                                {
-                                    unsigned _v4_15_0;
-                                    unsigned _v4_15_1;
-                                    unsigned _v4_15_2;
-                                    unsigned _v4_15_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_15_0), "=r"(_v4_15_1), "=r"(_v4_15_2), "=r"(_v4_15_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 14 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[56 + 0] = __uint_as_float(_v4_15_0);
-                                    _rf[56 + 1] = __uint_as_float(_v4_15_1);
-                                    _rf[56 + 2] = __uint_as_float(_v4_15_2);
-                                    _rf[56 + 3] = __uint_as_float(_v4_15_3);
-                                }
-                                {
-                                    unsigned _v4_16_0;
-                                    unsigned _v4_16_1;
-                                    unsigned _v4_16_2;
-                                    unsigned _v4_16_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_16_0), "=r"(_v4_16_1), "=r"(_v4_16_2), "=r"(_v4_16_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 15 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[60 + 0] = __uint_as_float(_v4_16_0);
-                                    _rf[60 + 1] = __uint_as_float(_v4_16_1);
-                                    _rf[60 + 2] = __uint_as_float(_v4_16_2);
-                                    _rf[60 + 3] = __uint_as_float(_v4_16_3);
-                                }
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 2 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 3 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 4 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 5 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 6 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 7 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 8 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 9 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 10 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 11 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 12 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 13 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 14 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 15 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                if (ac_live_t == 1) {
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + tf_col])), "f"(_rf[0]), "f"(_rf[1]), "f"(_rf[2]), "f"(_rf[3]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + ldc + tf_col])), "f"(_rf[4]), "f"(_rf[5]), "f"(_rf[6]), "f"(_rf[7]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 2 * ldc + tf_col])), "f"(_rf[8]), "f"(_rf[9]), "f"(_rf[10]), "f"(_rf[11]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 3 * ldc + tf_col])), "f"(_rf[12]), "f"(_rf[13]), "f"(_rf[14]), "f"(_rf[15]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 4 * ldc + tf_col])), "f"(_rf[16]), "f"(_rf[17]), "f"(_rf[18]), "f"(_rf[19]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 5 * ldc + tf_col])), "f"(_rf[20]), "f"(_rf[21]), "f"(_rf[22]), "f"(_rf[23]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 6 * ldc + tf_col])), "f"(_rf[24]), "f"(_rf[25]), "f"(_rf[26]), "f"(_rf[27]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 7 * ldc + tf_col])), "f"(_rf[28]), "f"(_rf[29]), "f"(_rf[30]), "f"(_rf[31]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 8 * ldc + tf_col])), "f"(_rf[32]), "f"(_rf[33]), "f"(_rf[34]), "f"(_rf[35]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 9 * ldc + tf_col])), "f"(_rf[36]), "f"(_rf[37]), "f"(_rf[38]), "f"(_rf[39]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 10 * ldc + tf_col])), "f"(_rf[40]), "f"(_rf[41]), "f"(_rf[42]), "f"(_rf[43]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 11 * ldc + tf_col])), "f"(_rf[44]), "f"(_rf[45]), "f"(_rf[46]), "f"(_rf[47]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 12 * ldc + tf_col])), "f"(_rf[48]), "f"(_rf[49]), "f"(_rf[50]), "f"(_rf[51]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 13 * ldc + tf_col])), "f"(_rf[52]), "f"(_rf[53]), "f"(_rf[54]), "f"(_rf[55]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 14 * ldc + tf_col])), "f"(_rf[56]), "f"(_rf[57]), "f"(_rf[58]), "f"(_rf[59]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 15 * ldc + tf_col])), "f"(_rf[60]), "f"(_rf[61]), "f"(_rf[62]), "f"(_rf[63]) : "memory");
-                                }
-                                {
-                                    unsigned _v4_17_0;
-                                    unsigned _v4_17_1;
-                                    unsigned _v4_17_2;
-                                    unsigned _v4_17_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_17_0), "=r"(_v4_17_1), "=r"(_v4_17_2), "=r"(_v4_17_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 16 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[0 + 0] = __uint_as_float(_v4_17_0);
-                                    _rf[0 + 1] = __uint_as_float(_v4_17_1);
-                                    _rf[0 + 2] = __uint_as_float(_v4_17_2);
-                                    _rf[0 + 3] = __uint_as_float(_v4_17_3);
-                                }
-                                {
-                                    unsigned _v4_18_0;
-                                    unsigned _v4_18_1;
-                                    unsigned _v4_18_2;
-                                    unsigned _v4_18_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_18_0), "=r"(_v4_18_1), "=r"(_v4_18_2), "=r"(_v4_18_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 17 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[4 + 0] = __uint_as_float(_v4_18_0);
-                                    _rf[4 + 1] = __uint_as_float(_v4_18_1);
-                                    _rf[4 + 2] = __uint_as_float(_v4_18_2);
-                                    _rf[4 + 3] = __uint_as_float(_v4_18_3);
-                                }
-                                {
-                                    unsigned _v4_19_0;
-                                    unsigned _v4_19_1;
-                                    unsigned _v4_19_2;
-                                    unsigned _v4_19_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_19_0), "=r"(_v4_19_1), "=r"(_v4_19_2), "=r"(_v4_19_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 18 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[8 + 0] = __uint_as_float(_v4_19_0);
-                                    _rf[8 + 1] = __uint_as_float(_v4_19_1);
-                                    _rf[8 + 2] = __uint_as_float(_v4_19_2);
-                                    _rf[8 + 3] = __uint_as_float(_v4_19_3);
-                                }
-                                {
-                                    unsigned _v4_20_0;
-                                    unsigned _v4_20_1;
-                                    unsigned _v4_20_2;
-                                    unsigned _v4_20_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_20_0), "=r"(_v4_20_1), "=r"(_v4_20_2), "=r"(_v4_20_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 19 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[12 + 0] = __uint_as_float(_v4_20_0);
-                                    _rf[12 + 1] = __uint_as_float(_v4_20_1);
-                                    _rf[12 + 2] = __uint_as_float(_v4_20_2);
-                                    _rf[12 + 3] = __uint_as_float(_v4_20_3);
-                                }
-                                {
-                                    unsigned _v4_21_0;
-                                    unsigned _v4_21_1;
-                                    unsigned _v4_21_2;
-                                    unsigned _v4_21_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_21_0), "=r"(_v4_21_1), "=r"(_v4_21_2), "=r"(_v4_21_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 20 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[16 + 0] = __uint_as_float(_v4_21_0);
-                                    _rf[16 + 1] = __uint_as_float(_v4_21_1);
-                                    _rf[16 + 2] = __uint_as_float(_v4_21_2);
-                                    _rf[16 + 3] = __uint_as_float(_v4_21_3);
-                                }
-                                {
-                                    unsigned _v4_22_0;
-                                    unsigned _v4_22_1;
-                                    unsigned _v4_22_2;
-                                    unsigned _v4_22_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_22_0), "=r"(_v4_22_1), "=r"(_v4_22_2), "=r"(_v4_22_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 21 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[20 + 0] = __uint_as_float(_v4_22_0);
-                                    _rf[20 + 1] = __uint_as_float(_v4_22_1);
-                                    _rf[20 + 2] = __uint_as_float(_v4_22_2);
-                                    _rf[20 + 3] = __uint_as_float(_v4_22_3);
-                                }
-                                {
-                                    unsigned _v4_23_0;
-                                    unsigned _v4_23_1;
-                                    unsigned _v4_23_2;
-                                    unsigned _v4_23_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_23_0), "=r"(_v4_23_1), "=r"(_v4_23_2), "=r"(_v4_23_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 22 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[24 + 0] = __uint_as_float(_v4_23_0);
-                                    _rf[24 + 1] = __uint_as_float(_v4_23_1);
-                                    _rf[24 + 2] = __uint_as_float(_v4_23_2);
-                                    _rf[24 + 3] = __uint_as_float(_v4_23_3);
-                                }
-                                {
-                                    unsigned _v4_24_0;
-                                    unsigned _v4_24_1;
-                                    unsigned _v4_24_2;
-                                    unsigned _v4_24_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_24_0), "=r"(_v4_24_1), "=r"(_v4_24_2), "=r"(_v4_24_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 23 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[28 + 0] = __uint_as_float(_v4_24_0);
-                                    _rf[28 + 1] = __uint_as_float(_v4_24_1);
-                                    _rf[28 + 2] = __uint_as_float(_v4_24_2);
-                                    _rf[28 + 3] = __uint_as_float(_v4_24_3);
-                                }
-                                {
-                                    unsigned _v4_25_0;
-                                    unsigned _v4_25_1;
-                                    unsigned _v4_25_2;
-                                    unsigned _v4_25_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_25_0), "=r"(_v4_25_1), "=r"(_v4_25_2), "=r"(_v4_25_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 24 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[32 + 0] = __uint_as_float(_v4_25_0);
-                                    _rf[32 + 1] = __uint_as_float(_v4_25_1);
-                                    _rf[32 + 2] = __uint_as_float(_v4_25_2);
-                                    _rf[32 + 3] = __uint_as_float(_v4_25_3);
-                                }
-                                {
-                                    unsigned _v4_26_0;
-                                    unsigned _v4_26_1;
-                                    unsigned _v4_26_2;
-                                    unsigned _v4_26_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_26_0), "=r"(_v4_26_1), "=r"(_v4_26_2), "=r"(_v4_26_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 25 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[36 + 0] = __uint_as_float(_v4_26_0);
-                                    _rf[36 + 1] = __uint_as_float(_v4_26_1);
-                                    _rf[36 + 2] = __uint_as_float(_v4_26_2);
-                                    _rf[36 + 3] = __uint_as_float(_v4_26_3);
-                                }
-                                {
-                                    unsigned _v4_27_0;
-                                    unsigned _v4_27_1;
-                                    unsigned _v4_27_2;
-                                    unsigned _v4_27_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_27_0), "=r"(_v4_27_1), "=r"(_v4_27_2), "=r"(_v4_27_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 26 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[40 + 0] = __uint_as_float(_v4_27_0);
-                                    _rf[40 + 1] = __uint_as_float(_v4_27_1);
-                                    _rf[40 + 2] = __uint_as_float(_v4_27_2);
-                                    _rf[40 + 3] = __uint_as_float(_v4_27_3);
-                                }
-                                {
-                                    unsigned _v4_28_0;
-                                    unsigned _v4_28_1;
-                                    unsigned _v4_28_2;
-                                    unsigned _v4_28_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_28_0), "=r"(_v4_28_1), "=r"(_v4_28_2), "=r"(_v4_28_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 27 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[44 + 0] = __uint_as_float(_v4_28_0);
-                                    _rf[44 + 1] = __uint_as_float(_v4_28_1);
-                                    _rf[44 + 2] = __uint_as_float(_v4_28_2);
-                                    _rf[44 + 3] = __uint_as_float(_v4_28_3);
-                                }
-                                {
-                                    unsigned _v4_29_0;
-                                    unsigned _v4_29_1;
-                                    unsigned _v4_29_2;
-                                    unsigned _v4_29_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_29_0), "=r"(_v4_29_1), "=r"(_v4_29_2), "=r"(_v4_29_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 28 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[48 + 0] = __uint_as_float(_v4_29_0);
-                                    _rf[48 + 1] = __uint_as_float(_v4_29_1);
-                                    _rf[48 + 2] = __uint_as_float(_v4_29_2);
-                                    _rf[48 + 3] = __uint_as_float(_v4_29_3);
-                                }
-                                {
-                                    unsigned _v4_30_0;
-                                    unsigned _v4_30_1;
-                                    unsigned _v4_30_2;
-                                    unsigned _v4_30_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_30_0), "=r"(_v4_30_1), "=r"(_v4_30_2), "=r"(_v4_30_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 29 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[52 + 0] = __uint_as_float(_v4_30_0);
-                                    _rf[52 + 1] = __uint_as_float(_v4_30_1);
-                                    _rf[52 + 2] = __uint_as_float(_v4_30_2);
-                                    _rf[52 + 3] = __uint_as_float(_v4_30_3);
-                                }
-                                {
-                                    unsigned _v4_31_0;
-                                    unsigned _v4_31_1;
-                                    unsigned _v4_31_2;
-                                    unsigned _v4_31_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_31_0), "=r"(_v4_31_1), "=r"(_v4_31_2), "=r"(_v4_31_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 30 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[56 + 0] = __uint_as_float(_v4_31_0);
-                                    _rf[56 + 1] = __uint_as_float(_v4_31_1);
-                                    _rf[56 + 2] = __uint_as_float(_v4_31_2);
-                                    _rf[56 + 3] = __uint_as_float(_v4_31_3);
-                                }
-                                {
-                                    unsigned _v4_32_0;
-                                    unsigned _v4_32_1;
-                                    unsigned _v4_32_2;
-                                    unsigned _v4_32_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_32_0), "=r"(_v4_32_1), "=r"(_v4_32_2), "=r"(_v4_32_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 31 * TILE_K + tf_col) + (0))) : "memory");
-                                    _rf[60 + 0] = __uint_as_float(_v4_32_0);
-                                    _rf[60 + 1] = __uint_as_float(_v4_32_1);
-                                    _rf[60 + 2] = __uint_as_float(_v4_32_2);
-                                    _rf[60 + 3] = __uint_as_float(_v4_32_3);
-                                }
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 16 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 17 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 18 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 19 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 20 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 21 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 22 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 23 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 24 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 25 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 26 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 27 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 28 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 29 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 30 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 31 * TILE_K + tf_col)), "f"(_rz[(0) + 0]), "f"(_rz[(0) + 1]), "f"(_rz[(0) + 2]), "f"(_rz[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                if (ac_live_t == 1) {
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 16 * ldc + tf_col])), "f"(_rf[0]), "f"(_rf[1]), "f"(_rf[2]), "f"(_rf[3]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 17 * ldc + tf_col])), "f"(_rf[4]), "f"(_rf[5]), "f"(_rf[6]), "f"(_rf[7]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 18 * ldc + tf_col])), "f"(_rf[8]), "f"(_rf[9]), "f"(_rf[10]), "f"(_rf[11]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 19 * ldc + tf_col])), "f"(_rf[12]), "f"(_rf[13]), "f"(_rf[14]), "f"(_rf[15]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 20 * ldc + tf_col])), "f"(_rf[16]), "f"(_rf[17]), "f"(_rf[18]), "f"(_rf[19]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 21 * ldc + tf_col])), "f"(_rf[20]), "f"(_rf[21]), "f"(_rf[22]), "f"(_rf[23]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 22 * ldc + tf_col])), "f"(_rf[24]), "f"(_rf[25]), "f"(_rf[26]), "f"(_rf[27]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 23 * ldc + tf_col])), "f"(_rf[28]), "f"(_rf[29]), "f"(_rf[30]), "f"(_rf[31]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 24 * ldc + tf_col])), "f"(_rf[32]), "f"(_rf[33]), "f"(_rf[34]), "f"(_rf[35]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 25 * ldc + tf_col])), "f"(_rf[36]), "f"(_rf[37]), "f"(_rf[38]), "f"(_rf[39]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 26 * ldc + tf_col])), "f"(_rf[40]), "f"(_rf[41]), "f"(_rf[42]), "f"(_rf[43]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 27 * ldc + tf_col])), "f"(_rf[44]), "f"(_rf[45]), "f"(_rf[46]), "f"(_rf[47]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 28 * ldc + tf_col])), "f"(_rf[48]), "f"(_rf[49]), "f"(_rf[50]), "f"(_rf[51]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 29 * ldc + tf_col])), "f"(_rf[52]), "f"(_rf[53]), "f"(_rf[54]), "f"(_rf[55]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 30 * ldc + tf_col])), "f"(_rf[56]), "f"(_rf[57]), "f"(_rf[58]), "f"(_rf[59]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 31 * ldc + tf_col])), "f"(_rf[60]), "f"(_rf[61]), "f"(_rf[62]), "f"(_rf[63]) : "memory");
-                                }
-                                int tf_col_0 = 4 * lane;
-                                float _rz_0[4];
-                                _rz_0[0] = 0.0f;
-                                _rz_0[1] = 0.0f;
-                                _rz_0[2] = 0.0f;
-                                _rz_0[3] = 0.0f;
-                                float _rf_0[64];
-                                {
-                                    unsigned _v4_33_0;
-                                    unsigned _v4_33_1;
-                                    unsigned _v4_33_2;
-                                    unsigned _v4_33_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_33_0), "=r"(_v4_33_1), "=r"(_v4_33_2), "=r"(_v4_33_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + tf_col_0) + (0))) : "memory");
-                                    _rf_0[0 + 0] = __uint_as_float(_v4_33_0);
-                                    _rf_0[0 + 1] = __uint_as_float(_v4_33_1);
-                                    _rf_0[0 + 2] = __uint_as_float(_v4_33_2);
-                                    _rf_0[0 + 3] = __uint_as_float(_v4_33_3);
-                                }
-                                {
-                                    unsigned _v4_34_0;
-                                    unsigned _v4_34_1;
-                                    unsigned _v4_34_2;
-                                    unsigned _v4_34_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_34_0), "=r"(_v4_34_1), "=r"(_v4_34_2), "=r"(_v4_34_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[4 + 0] = __uint_as_float(_v4_34_0);
-                                    _rf_0[4 + 1] = __uint_as_float(_v4_34_1);
-                                    _rf_0[4 + 2] = __uint_as_float(_v4_34_2);
-                                    _rf_0[4 + 3] = __uint_as_float(_v4_34_3);
-                                }
-                                {
-                                    unsigned _v4_35_0;
-                                    unsigned _v4_35_1;
-                                    unsigned _v4_35_2;
-                                    unsigned _v4_35_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_35_0), "=r"(_v4_35_1), "=r"(_v4_35_2), "=r"(_v4_35_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 2 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[8 + 0] = __uint_as_float(_v4_35_0);
-                                    _rf_0[8 + 1] = __uint_as_float(_v4_35_1);
-                                    _rf_0[8 + 2] = __uint_as_float(_v4_35_2);
-                                    _rf_0[8 + 3] = __uint_as_float(_v4_35_3);
-                                }
-                                {
-                                    unsigned _v4_36_0;
-                                    unsigned _v4_36_1;
-                                    unsigned _v4_36_2;
-                                    unsigned _v4_36_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_36_0), "=r"(_v4_36_1), "=r"(_v4_36_2), "=r"(_v4_36_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 3 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[12 + 0] = __uint_as_float(_v4_36_0);
-                                    _rf_0[12 + 1] = __uint_as_float(_v4_36_1);
-                                    _rf_0[12 + 2] = __uint_as_float(_v4_36_2);
-                                    _rf_0[12 + 3] = __uint_as_float(_v4_36_3);
-                                }
-                                {
-                                    unsigned _v4_37_0;
-                                    unsigned _v4_37_1;
-                                    unsigned _v4_37_2;
-                                    unsigned _v4_37_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_37_0), "=r"(_v4_37_1), "=r"(_v4_37_2), "=r"(_v4_37_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 4 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[16 + 0] = __uint_as_float(_v4_37_0);
-                                    _rf_0[16 + 1] = __uint_as_float(_v4_37_1);
-                                    _rf_0[16 + 2] = __uint_as_float(_v4_37_2);
-                                    _rf_0[16 + 3] = __uint_as_float(_v4_37_3);
-                                }
-                                {
-                                    unsigned _v4_38_0;
-                                    unsigned _v4_38_1;
-                                    unsigned _v4_38_2;
-                                    unsigned _v4_38_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_38_0), "=r"(_v4_38_1), "=r"(_v4_38_2), "=r"(_v4_38_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 5 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[20 + 0] = __uint_as_float(_v4_38_0);
-                                    _rf_0[20 + 1] = __uint_as_float(_v4_38_1);
-                                    _rf_0[20 + 2] = __uint_as_float(_v4_38_2);
-                                    _rf_0[20 + 3] = __uint_as_float(_v4_38_3);
-                                }
-                                {
-                                    unsigned _v4_39_0;
-                                    unsigned _v4_39_1;
-                                    unsigned _v4_39_2;
-                                    unsigned _v4_39_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_39_0), "=r"(_v4_39_1), "=r"(_v4_39_2), "=r"(_v4_39_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 6 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[24 + 0] = __uint_as_float(_v4_39_0);
-                                    _rf_0[24 + 1] = __uint_as_float(_v4_39_1);
-                                    _rf_0[24 + 2] = __uint_as_float(_v4_39_2);
-                                    _rf_0[24 + 3] = __uint_as_float(_v4_39_3);
-                                }
-                                {
-                                    unsigned _v4_40_0;
-                                    unsigned _v4_40_1;
-                                    unsigned _v4_40_2;
-                                    unsigned _v4_40_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_40_0), "=r"(_v4_40_1), "=r"(_v4_40_2), "=r"(_v4_40_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 7 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[28 + 0] = __uint_as_float(_v4_40_0);
-                                    _rf_0[28 + 1] = __uint_as_float(_v4_40_1);
-                                    _rf_0[28 + 2] = __uint_as_float(_v4_40_2);
-                                    _rf_0[28 + 3] = __uint_as_float(_v4_40_3);
-                                }
-                                {
-                                    unsigned _v4_41_0;
-                                    unsigned _v4_41_1;
-                                    unsigned _v4_41_2;
-                                    unsigned _v4_41_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_41_0), "=r"(_v4_41_1), "=r"(_v4_41_2), "=r"(_v4_41_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 8 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[32 + 0] = __uint_as_float(_v4_41_0);
-                                    _rf_0[32 + 1] = __uint_as_float(_v4_41_1);
-                                    _rf_0[32 + 2] = __uint_as_float(_v4_41_2);
-                                    _rf_0[32 + 3] = __uint_as_float(_v4_41_3);
-                                }
-                                {
-                                    unsigned _v4_42_0;
-                                    unsigned _v4_42_1;
-                                    unsigned _v4_42_2;
-                                    unsigned _v4_42_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_42_0), "=r"(_v4_42_1), "=r"(_v4_42_2), "=r"(_v4_42_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 9 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[36 + 0] = __uint_as_float(_v4_42_0);
-                                    _rf_0[36 + 1] = __uint_as_float(_v4_42_1);
-                                    _rf_0[36 + 2] = __uint_as_float(_v4_42_2);
-                                    _rf_0[36 + 3] = __uint_as_float(_v4_42_3);
-                                }
-                                {
-                                    unsigned _v4_43_0;
-                                    unsigned _v4_43_1;
-                                    unsigned _v4_43_2;
-                                    unsigned _v4_43_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_43_0), "=r"(_v4_43_1), "=r"(_v4_43_2), "=r"(_v4_43_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 10 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[40 + 0] = __uint_as_float(_v4_43_0);
-                                    _rf_0[40 + 1] = __uint_as_float(_v4_43_1);
-                                    _rf_0[40 + 2] = __uint_as_float(_v4_43_2);
-                                    _rf_0[40 + 3] = __uint_as_float(_v4_43_3);
-                                }
-                                {
-                                    unsigned _v4_44_0;
-                                    unsigned _v4_44_1;
-                                    unsigned _v4_44_2;
-                                    unsigned _v4_44_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_44_0), "=r"(_v4_44_1), "=r"(_v4_44_2), "=r"(_v4_44_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 11 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[44 + 0] = __uint_as_float(_v4_44_0);
-                                    _rf_0[44 + 1] = __uint_as_float(_v4_44_1);
-                                    _rf_0[44 + 2] = __uint_as_float(_v4_44_2);
-                                    _rf_0[44 + 3] = __uint_as_float(_v4_44_3);
-                                }
-                                {
-                                    unsigned _v4_45_0;
-                                    unsigned _v4_45_1;
-                                    unsigned _v4_45_2;
-                                    unsigned _v4_45_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_45_0), "=r"(_v4_45_1), "=r"(_v4_45_2), "=r"(_v4_45_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 12 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[48 + 0] = __uint_as_float(_v4_45_0);
-                                    _rf_0[48 + 1] = __uint_as_float(_v4_45_1);
-                                    _rf_0[48 + 2] = __uint_as_float(_v4_45_2);
-                                    _rf_0[48 + 3] = __uint_as_float(_v4_45_3);
-                                }
-                                {
-                                    unsigned _v4_46_0;
-                                    unsigned _v4_46_1;
-                                    unsigned _v4_46_2;
-                                    unsigned _v4_46_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_46_0), "=r"(_v4_46_1), "=r"(_v4_46_2), "=r"(_v4_46_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 13 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[52 + 0] = __uint_as_float(_v4_46_0);
-                                    _rf_0[52 + 1] = __uint_as_float(_v4_46_1);
-                                    _rf_0[52 + 2] = __uint_as_float(_v4_46_2);
-                                    _rf_0[52 + 3] = __uint_as_float(_v4_46_3);
-                                }
-                                {
-                                    unsigned _v4_47_0;
-                                    unsigned _v4_47_1;
-                                    unsigned _v4_47_2;
-                                    unsigned _v4_47_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_47_0), "=r"(_v4_47_1), "=r"(_v4_47_2), "=r"(_v4_47_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 14 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[56 + 0] = __uint_as_float(_v4_47_0);
-                                    _rf_0[56 + 1] = __uint_as_float(_v4_47_1);
-                                    _rf_0[56 + 2] = __uint_as_float(_v4_47_2);
-                                    _rf_0[56 + 3] = __uint_as_float(_v4_47_3);
-                                }
-                                {
-                                    unsigned _v4_48_0;
-                                    unsigned _v4_48_1;
-                                    unsigned _v4_48_2;
-                                    unsigned _v4_48_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_48_0), "=r"(_v4_48_1), "=r"(_v4_48_2), "=r"(_v4_48_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 15 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[60 + 0] = __uint_as_float(_v4_48_0);
-                                    _rf_0[60 + 1] = __uint_as_float(_v4_48_1);
-                                    _rf_0[60 + 2] = __uint_as_float(_v4_48_2);
-                                    _rf_0[60 + 3] = __uint_as_float(_v4_48_3);
-                                }
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 2 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 3 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 4 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 5 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 6 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 7 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 8 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 9 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 10 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 11 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 12 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 13 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 14 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 15 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                if (ac_live_t == 1) {
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + tf_col_0])), "f"(_rf_0[0]), "f"(_rf_0[1]), "f"(_rf_0[2]), "f"(_rf_0[3]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + ldc + tf_col_0])), "f"(_rf_0[4]), "f"(_rf_0[5]), "f"(_rf_0[6]), "f"(_rf_0[7]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 2 * ldc + tf_col_0])), "f"(_rf_0[8]), "f"(_rf_0[9]), "f"(_rf_0[10]), "f"(_rf_0[11]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 3 * ldc + tf_col_0])), "f"(_rf_0[12]), "f"(_rf_0[13]), "f"(_rf_0[14]), "f"(_rf_0[15]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 4 * ldc + tf_col_0])), "f"(_rf_0[16]), "f"(_rf_0[17]), "f"(_rf_0[18]), "f"(_rf_0[19]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 5 * ldc + tf_col_0])), "f"(_rf_0[20]), "f"(_rf_0[21]), "f"(_rf_0[22]), "f"(_rf_0[23]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 6 * ldc + tf_col_0])), "f"(_rf_0[24]), "f"(_rf_0[25]), "f"(_rf_0[26]), "f"(_rf_0[27]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 7 * ldc + tf_col_0])), "f"(_rf_0[28]), "f"(_rf_0[29]), "f"(_rf_0[30]), "f"(_rf_0[31]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 8 * ldc + tf_col_0])), "f"(_rf_0[32]), "f"(_rf_0[33]), "f"(_rf_0[34]), "f"(_rf_0[35]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 9 * ldc + tf_col_0])), "f"(_rf_0[36]), "f"(_rf_0[37]), "f"(_rf_0[38]), "f"(_rf_0[39]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 10 * ldc + tf_col_0])), "f"(_rf_0[40]), "f"(_rf_0[41]), "f"(_rf_0[42]), "f"(_rf_0[43]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 11 * ldc + tf_col_0])), "f"(_rf_0[44]), "f"(_rf_0[45]), "f"(_rf_0[46]), "f"(_rf_0[47]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 12 * ldc + tf_col_0])), "f"(_rf_0[48]), "f"(_rf_0[49]), "f"(_rf_0[50]), "f"(_rf_0[51]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 13 * ldc + tf_col_0])), "f"(_rf_0[52]), "f"(_rf_0[53]), "f"(_rf_0[54]), "f"(_rf_0[55]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 14 * ldc + tf_col_0])), "f"(_rf_0[56]), "f"(_rf_0[57]), "f"(_rf_0[58]), "f"(_rf_0[59]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 15 * ldc + tf_col_0])), "f"(_rf_0[60]), "f"(_rf_0[61]), "f"(_rf_0[62]), "f"(_rf_0[63]) : "memory");
-                                }
-                                {
-                                    unsigned _v4_49_0;
-                                    unsigned _v4_49_1;
-                                    unsigned _v4_49_2;
-                                    unsigned _v4_49_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_49_0), "=r"(_v4_49_1), "=r"(_v4_49_2), "=r"(_v4_49_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 16 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[0 + 0] = __uint_as_float(_v4_49_0);
-                                    _rf_0[0 + 1] = __uint_as_float(_v4_49_1);
-                                    _rf_0[0 + 2] = __uint_as_float(_v4_49_2);
-                                    _rf_0[0 + 3] = __uint_as_float(_v4_49_3);
-                                }
-                                {
-                                    unsigned _v4_50_0;
-                                    unsigned _v4_50_1;
-                                    unsigned _v4_50_2;
-                                    unsigned _v4_50_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_50_0), "=r"(_v4_50_1), "=r"(_v4_50_2), "=r"(_v4_50_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 17 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[4 + 0] = __uint_as_float(_v4_50_0);
-                                    _rf_0[4 + 1] = __uint_as_float(_v4_50_1);
-                                    _rf_0[4 + 2] = __uint_as_float(_v4_50_2);
-                                    _rf_0[4 + 3] = __uint_as_float(_v4_50_3);
-                                }
-                                {
-                                    unsigned _v4_51_0;
-                                    unsigned _v4_51_1;
-                                    unsigned _v4_51_2;
-                                    unsigned _v4_51_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_51_0), "=r"(_v4_51_1), "=r"(_v4_51_2), "=r"(_v4_51_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 18 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[8 + 0] = __uint_as_float(_v4_51_0);
-                                    _rf_0[8 + 1] = __uint_as_float(_v4_51_1);
-                                    _rf_0[8 + 2] = __uint_as_float(_v4_51_2);
-                                    _rf_0[8 + 3] = __uint_as_float(_v4_51_3);
-                                }
-                                {
-                                    unsigned _v4_52_0;
-                                    unsigned _v4_52_1;
-                                    unsigned _v4_52_2;
-                                    unsigned _v4_52_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_52_0), "=r"(_v4_52_1), "=r"(_v4_52_2), "=r"(_v4_52_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 19 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[12 + 0] = __uint_as_float(_v4_52_0);
-                                    _rf_0[12 + 1] = __uint_as_float(_v4_52_1);
-                                    _rf_0[12 + 2] = __uint_as_float(_v4_52_2);
-                                    _rf_0[12 + 3] = __uint_as_float(_v4_52_3);
-                                }
-                                {
-                                    unsigned _v4_53_0;
-                                    unsigned _v4_53_1;
-                                    unsigned _v4_53_2;
-                                    unsigned _v4_53_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_53_0), "=r"(_v4_53_1), "=r"(_v4_53_2), "=r"(_v4_53_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 20 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[16 + 0] = __uint_as_float(_v4_53_0);
-                                    _rf_0[16 + 1] = __uint_as_float(_v4_53_1);
-                                    _rf_0[16 + 2] = __uint_as_float(_v4_53_2);
-                                    _rf_0[16 + 3] = __uint_as_float(_v4_53_3);
-                                }
-                                {
-                                    unsigned _v4_54_0;
-                                    unsigned _v4_54_1;
-                                    unsigned _v4_54_2;
-                                    unsigned _v4_54_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_54_0), "=r"(_v4_54_1), "=r"(_v4_54_2), "=r"(_v4_54_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 21 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[20 + 0] = __uint_as_float(_v4_54_0);
-                                    _rf_0[20 + 1] = __uint_as_float(_v4_54_1);
-                                    _rf_0[20 + 2] = __uint_as_float(_v4_54_2);
-                                    _rf_0[20 + 3] = __uint_as_float(_v4_54_3);
-                                }
-                                {
-                                    unsigned _v4_55_0;
-                                    unsigned _v4_55_1;
-                                    unsigned _v4_55_2;
-                                    unsigned _v4_55_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_55_0), "=r"(_v4_55_1), "=r"(_v4_55_2), "=r"(_v4_55_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 22 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[24 + 0] = __uint_as_float(_v4_55_0);
-                                    _rf_0[24 + 1] = __uint_as_float(_v4_55_1);
-                                    _rf_0[24 + 2] = __uint_as_float(_v4_55_2);
-                                    _rf_0[24 + 3] = __uint_as_float(_v4_55_3);
-                                }
-                                {
-                                    unsigned _v4_56_0;
-                                    unsigned _v4_56_1;
-                                    unsigned _v4_56_2;
-                                    unsigned _v4_56_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_56_0), "=r"(_v4_56_1), "=r"(_v4_56_2), "=r"(_v4_56_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 23 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[28 + 0] = __uint_as_float(_v4_56_0);
-                                    _rf_0[28 + 1] = __uint_as_float(_v4_56_1);
-                                    _rf_0[28 + 2] = __uint_as_float(_v4_56_2);
-                                    _rf_0[28 + 3] = __uint_as_float(_v4_56_3);
-                                }
-                                {
-                                    unsigned _v4_57_0;
-                                    unsigned _v4_57_1;
-                                    unsigned _v4_57_2;
-                                    unsigned _v4_57_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_57_0), "=r"(_v4_57_1), "=r"(_v4_57_2), "=r"(_v4_57_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 24 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[32 + 0] = __uint_as_float(_v4_57_0);
-                                    _rf_0[32 + 1] = __uint_as_float(_v4_57_1);
-                                    _rf_0[32 + 2] = __uint_as_float(_v4_57_2);
-                                    _rf_0[32 + 3] = __uint_as_float(_v4_57_3);
-                                }
-                                {
-                                    unsigned _v4_58_0;
-                                    unsigned _v4_58_1;
-                                    unsigned _v4_58_2;
-                                    unsigned _v4_58_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_58_0), "=r"(_v4_58_1), "=r"(_v4_58_2), "=r"(_v4_58_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 25 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[36 + 0] = __uint_as_float(_v4_58_0);
-                                    _rf_0[36 + 1] = __uint_as_float(_v4_58_1);
-                                    _rf_0[36 + 2] = __uint_as_float(_v4_58_2);
-                                    _rf_0[36 + 3] = __uint_as_float(_v4_58_3);
-                                }
-                                {
-                                    unsigned _v4_59_0;
-                                    unsigned _v4_59_1;
-                                    unsigned _v4_59_2;
-                                    unsigned _v4_59_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_59_0), "=r"(_v4_59_1), "=r"(_v4_59_2), "=r"(_v4_59_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 26 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[40 + 0] = __uint_as_float(_v4_59_0);
-                                    _rf_0[40 + 1] = __uint_as_float(_v4_59_1);
-                                    _rf_0[40 + 2] = __uint_as_float(_v4_59_2);
-                                    _rf_0[40 + 3] = __uint_as_float(_v4_59_3);
-                                }
-                                {
-                                    unsigned _v4_60_0;
-                                    unsigned _v4_60_1;
-                                    unsigned _v4_60_2;
-                                    unsigned _v4_60_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_60_0), "=r"(_v4_60_1), "=r"(_v4_60_2), "=r"(_v4_60_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 27 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[44 + 0] = __uint_as_float(_v4_60_0);
-                                    _rf_0[44 + 1] = __uint_as_float(_v4_60_1);
-                                    _rf_0[44 + 2] = __uint_as_float(_v4_60_2);
-                                    _rf_0[44 + 3] = __uint_as_float(_v4_60_3);
-                                }
-                                {
-                                    unsigned _v4_61_0;
-                                    unsigned _v4_61_1;
-                                    unsigned _v4_61_2;
-                                    unsigned _v4_61_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_61_0), "=r"(_v4_61_1), "=r"(_v4_61_2), "=r"(_v4_61_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 28 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[48 + 0] = __uint_as_float(_v4_61_0);
-                                    _rf_0[48 + 1] = __uint_as_float(_v4_61_1);
-                                    _rf_0[48 + 2] = __uint_as_float(_v4_61_2);
-                                    _rf_0[48 + 3] = __uint_as_float(_v4_61_3);
-                                }
-                                {
-                                    unsigned _v4_62_0;
-                                    unsigned _v4_62_1;
-                                    unsigned _v4_62_2;
-                                    unsigned _v4_62_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_62_0), "=r"(_v4_62_1), "=r"(_v4_62_2), "=r"(_v4_62_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 29 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[52 + 0] = __uint_as_float(_v4_62_0);
-                                    _rf_0[52 + 1] = __uint_as_float(_v4_62_1);
-                                    _rf_0[52 + 2] = __uint_as_float(_v4_62_2);
-                                    _rf_0[52 + 3] = __uint_as_float(_v4_62_3);
-                                }
-                                {
-                                    unsigned _v4_63_0;
-                                    unsigned _v4_63_1;
-                                    unsigned _v4_63_2;
-                                    unsigned _v4_63_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_63_0), "=r"(_v4_63_1), "=r"(_v4_63_2), "=r"(_v4_63_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 30 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[56 + 0] = __uint_as_float(_v4_63_0);
-                                    _rf_0[56 + 1] = __uint_as_float(_v4_63_1);
-                                    _rf_0[56 + 2] = __uint_as_float(_v4_63_2);
-                                    _rf_0[56 + 3] = __uint_as_float(_v4_63_3);
-                                }
-                                {
-                                    unsigned _v4_64_0;
-                                    unsigned _v4_64_1;
-                                    unsigned _v4_64_2;
-                                    unsigned _v4_64_3;
-                                    asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                        : "=r"(_v4_64_0), "=r"(_v4_64_1), "=r"(_v4_64_2), "=r"(_v4_64_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + 256 + 31 * TILE_K + tf_col_0) + (0))) : "memory");
-                                    _rf_0[60 + 0] = __uint_as_float(_v4_64_0);
-                                    _rf_0[60 + 1] = __uint_as_float(_v4_64_1);
-                                    _rf_0[60 + 2] = __uint_as_float(_v4_64_2);
-                                    _rf_0[60 + 3] = __uint_as_float(_v4_64_3);
-                                }
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 16 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 17 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 18 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 19 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 20 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 21 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 22 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 23 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 24 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 25 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 26 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 27 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 28 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 29 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 30 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                asm volatile("st.global.L2::cache_hint.v4.f32 [%0], {%1, %2, %3, %4}, %5;" :: "l"(tail_sums + (tl_part + epi_half * 128 + 256 + 31 * TILE_K + tf_col_0)), "f"(_rz_0[(0) + 0]), "f"(_rz_0[(0) + 1]), "f"(_rz_0[(0) + 2]), "f"(_rz_0[(0) + 3]), "l"(0x12F0000000000000ULL) : "memory");
-                                if (ac_live_t == 1) {
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 16 * ldc + tf_col_0])), "f"(_rf_0[0]), "f"(_rf_0[1]), "f"(_rf_0[2]), "f"(_rf_0[3]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 17 * ldc + tf_col_0])), "f"(_rf_0[4]), "f"(_rf_0[5]), "f"(_rf_0[6]), "f"(_rf_0[7]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 18 * ldc + tf_col_0])), "f"(_rf_0[8]), "f"(_rf_0[9]), "f"(_rf_0[10]), "f"(_rf_0[11]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 19 * ldc + tf_col_0])), "f"(_rf_0[12]), "f"(_rf_0[13]), "f"(_rf_0[14]), "f"(_rf_0[15]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 20 * ldc + tf_col_0])), "f"(_rf_0[16]), "f"(_rf_0[17]), "f"(_rf_0[18]), "f"(_rf_0[19]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 21 * ldc + tf_col_0])), "f"(_rf_0[20]), "f"(_rf_0[21]), "f"(_rf_0[22]), "f"(_rf_0[23]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 22 * ldc + tf_col_0])), "f"(_rf_0[24]), "f"(_rf_0[25]), "f"(_rf_0[26]), "f"(_rf_0[27]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 23 * ldc + tf_col_0])), "f"(_rf_0[28]), "f"(_rf_0[29]), "f"(_rf_0[30]), "f"(_rf_0[31]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 24 * ldc + tf_col_0])), "f"(_rf_0[32]), "f"(_rf_0[33]), "f"(_rf_0[34]), "f"(_rf_0[35]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 25 * ldc + tf_col_0])), "f"(_rf_0[36]), "f"(_rf_0[37]), "f"(_rf_0[38]), "f"(_rf_0[39]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 26 * ldc + tf_col_0])), "f"(_rf_0[40]), "f"(_rf_0[41]), "f"(_rf_0[42]), "f"(_rf_0[43]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 27 * ldc + tf_col_0])), "f"(_rf_0[44]), "f"(_rf_0[45]), "f"(_rf_0[46]), "f"(_rf_0[47]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 28 * ldc + tf_col_0])), "f"(_rf_0[48]), "f"(_rf_0[49]), "f"(_rf_0[50]), "f"(_rf_0[51]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 29 * ldc + tf_col_0])), "f"(_rf_0[52]), "f"(_rf_0[53]), "f"(_rf_0[54]), "f"(_rf_0[55]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 30 * ldc + tf_col_0])), "f"(_rf_0[56]), "f"(_rf_0[57]), "f"(_rf_0[58]), "f"(_rf_0[59]) : "memory");
-                                    asm volatile("red.global.add.noftz.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&C[tl_out + epi_half * 128 + 256 + 31 * ldc + tf_col_0])), "f"(_rf_0[60]), "f"(_rf_0[61]), "f"(_rf_0[62]), "f"(_rf_0[63]) : "memory");
-                                }
-                            }
-                        }
                     }
                 }
             }

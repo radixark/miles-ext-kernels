@@ -159,7 +159,7 @@ __device__ __forceinline__ void tma_3d_gmem2smem_cta2(
 extern "C" {
 
 __global__ __launch_bounds__(320) __cluster_dims__(2,1,1) void
-kernel_cake_moe_grouped_gemm_68f4f0125c2ec1f39ca1(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ C, int* __restrict__ offs, int num_groups, int sum_m, int N, int K, int ldc, unsigned int* __restrict__ sched, int c0, int c1)
+kernel_cake_moe_grouped_det_gemm_932cb8a0d39a950ac28f(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ C, int* __restrict__ offs, int num_groups, int sum_m, int N, int K, int ldc, unsigned int* __restrict__ sched, int c0, int c1)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -292,10 +292,10 @@ kernel_cake_moe_grouped_gemm_68f4f0125c2ec1f39ca1(const __grid_constant__ CUtens
             unsigned int near = 0;
             if (cta_rank == 0) {
                 unsigned long long base = (unsigned long long)sched;
-                unsigned int chunk_a = (unsigned int)((base + 8319 & 18446744073709543424) - base) >> 2;
+                unsigned int chunk_a = (unsigned int)((base + 8319ull & 18446744073709543424ull) - base) >> 2;
                 unsigned int word_a = chunk_a + (unsigned int)cluster_id % 32 * 32;
-                unsigned long long lat_a = 4294967295;
-                unsigned long long lat_b = 4294967295;
+                unsigned long long lat_a = 4294967295ll;
+                unsigned long long lat_b = 4294967295ll;
                 #pragma unroll
                 for (int _rnd = 0; _rnd < 2; _rnd++) {
                     unsigned long long t0_0;
@@ -465,7 +465,7 @@ kernel_cake_moe_grouped_gemm_68f4f0125c2ec1f39ca1(const __grid_constant__ CUtens
                     if (retired == (unsigned int)num_clusters - 1) {
                         __threadfence();
                         sched[0] = 0;
-                        sched[1] = 2147483648;
+                        sched[1] = 2147483648ll;
                         sched[2] = 0;
                     }
                 }

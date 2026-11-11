@@ -26,10 +26,10 @@
 #define CAKE_STRINGIZE(x) CAKE_STRINGIZE_(x)
 
 #ifndef CAKE_KERNEL_SYMBOL
-#define CAKE_KERNEL_SYMBOL kernel_cake_moe_grouped_gemm_037c741e69a0ccc696e0_wgrad_out32
+#define CAKE_KERNEL_SYMBOL kernel_cake_moe_grouped_gemm_4b5788aa552dab1c904b_wgrad_out32
 #endif
 #ifndef CAKE_PROGRAM_SHIM
-#define CAKE_PROGRAM_SHIM cake_binding_kernel_cake_moe_grouped_gemm_037c741e69a0ccc696e0_wgrad_out32
+#define CAKE_PROGRAM_SHIM cake_binding_kernel_cake_moe_grouped_gemm_4b5788aa552dab1c904b_wgrad_out32
 #endif
 #ifndef CAKE_BINDING_THREADS
 #define CAKE_BINDING_THREADS 320
