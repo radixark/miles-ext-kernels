@@ -3,7 +3,8 @@
 
 One GPU (a one-rank context): against the FP64 token recurrence, output and every input gradient within the accuracy
 budgets of the package suite, on miles' strided q / k views and BF16 beta, with the tapes kept (``save_mode="full"``)
-or replayed (``--cake-gdn-recompute-state``: ``"light"``), and at P = 2 segments per fragment with
+or replayed (``--cake-gdn-recompute-state``: the package's light set, ``"light"`` for ``det`` and
+``"light_akk"`` for ``fast`` under the in-kernel L2 norm), and at P = 2 segments per fragment with
 ``save_transfer=False`` (the case flashinfer-ai/flashinfer#8585 fixed); ``det`` bit for bit run to run, also under
 PyTorch's deterministic algorithms, with the same bits kept or replayed, and BF16 beta with the bits of its exact FP32
 cast (``fast`` within the budgets: it makes no promise about its bits); within the budgets of the single-rank
@@ -265,7 +266,8 @@ def test_kcp_matches_the_fp64_recurrence(variant, pair, save_state):
 
     got = _run(inputs, _one_rank(REF_LAYOUT))
     last = _kcp_module(variant).LAST_CALL["fwd"]
-    assert (last["backend"], last["save_mode"]) == ("kernels", "full" if save_state else "light")
+    light = {"det": "light", "fast": "light_akk"}[variant]  # the package's light set under the in-kernel L2 norm
+    assert (last["backend"], last["save_mode"]) == ("kernels", "full" if save_state else light)
     _assert_within(got, ref, f"{variant} KCP vs the FP64 recurrence")
 
 

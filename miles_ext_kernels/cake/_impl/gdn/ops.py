@@ -51,7 +51,8 @@ ignored, as FLA does).
 
 ``--cake-gdn-recompute-state`` keeps the WY / state tensors (``w``, ``u``, ``h``, ``v_new``) off the autograd tape and
 recomputes them in the backward, on every package: the single-rank packages take it as ``save_state``, the KCP packages
-as ``save_mode`` (``"full"`` keeps the tapes, ``"light"`` replays them).
+as ``save_mode`` (``"full"`` keeps the tapes; otherwise the package's light set replays them: ``"light"``, and in the
+fast package ``"light_akk"`` with the in-kernel q/k L2 norm, which also keeps the BF16 ``Akk`` tape).
 
 Host wiring of ``cake_gdn_fla_cp_det``: the chunk table is a pure function of the micro-batch's segment lengths, so it is
 built once per distinct layout from the host copy of ``cu_seqlens`` (``cu_seqlens_cpu``; no device-to-host
@@ -2217,13 +2218,18 @@ def _kcp_rejection(variant: str, use_qk_l2norm: bool, kcp_context: KcpContext) -
     return None
 
 
+# The save mode of a KCP call under --cake-gdn-recompute-state: the package's light set. ``None`` lets the fast package
+# pick it (``"light_akk"`` with the in-kernel L2 norm, ``"light"`` without it); the det package has ``"light"`` only.
+_KCP_LIGHT = {"det": "light", "fast": None}
+
+
 def _kcp_apply(variant: str, q, k, v, g, beta, scale: float, use_qk_l2norm: bool, kcp_context: KcpContext):
     """``variant``'s KCP package on this rank's tokens; returns the output (``[B, T, HV, V]`` like ``v``).
 
     ``g`` and ``beta`` go in as contiguous FP32 (``beta`` is cast exactly from BF16 when needed: one ``[T, HV]`` FP32
     copy forward, and autograd rounds the FP32 ``dbeta`` back to ``beta``'s dtype).  ``--cake-gdn-recompute-state``
-    picks the package's ``save_mode`` (``"full"`` keeps the tapes, ``"light"`` replays them in the backward);
-    :data:`KCP_OPTIONS` is passed as ``options``.
+    picks the package's ``save_mode``: ``"full"`` keeps the tapes, else :data:`_KCP_LIGHT` the package's own light set
+    replays them in the backward; :data:`KCP_OPTIONS` is passed as ``options``.
     """
     package = _package(f"{variant}_kcp")
     ctx = kcp_context.context(variant)
@@ -2232,7 +2238,7 @@ def _kcp_apply(variant: str, q, k, v, g, beta, scale: float, use_qk_l2norm: bool
     beta = (beta if beta.dtype == torch.float32 else beta.float()).contiguous()
     kwargs = {
         "scale": scale,
-        "save_mode": "full" if _save_state() else "light",
+        "save_mode": "full" if _save_state() else _KCP_LIGHT[variant],
         "use_qk_l2norm_in_kernel": bool(use_qk_l2norm),
         "options": None if KCP_OPTIONS is None else dict(KCP_OPTIONS),
     }
@@ -2526,12 +2532,14 @@ def prebuild(*, device: Any = None, max_workers: int | None = None) -> list[Path
 def release() -> None:
     """Drop what the gdn kernels keep between calls besides the workspace pool (which ``release`` empties itself): the
     chunk tables and plans of ``cake_gdn_fla_cp_det`` and its loaded launchers, the cached ``KcpContext`` objects, and
-    the self-zeroing buffers of the single-rank packages.  The packages' own chunk tables and plans (a few int32
-    tensors per layout) stay."""
+    the self-zeroing buffers of the single-rank packages, with the recorded backward plans of the fast package, which
+    hold them.  The packages' own chunk tables and forward plans (a few int32 tensors per layout) stay."""
     host_cache_clear()
     native.release()
     from . import kcp
 
     kcp.release()
     for name in ("det", "fast"):
-        getattr(_package(name).cake_chain._POOLED, "zeroed", {}).clear()
+        chain = _package(name).cake_chain
+        getattr(chain._POOLED, "zeroed", {}).clear()
+        getattr(chain, "_BWD_PLANS", {}).clear()
