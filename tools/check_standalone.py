@@ -34,16 +34,18 @@ leaves the package for an undeclared sibling, every environment read (``os.envir
 sibling that is not a vendored package of the same op, and a registry that names a library ``build.json`` does not
 list. The registries it reads are ``sources.json`` (role -> ``{library, arches, arguments}``) and a miles pull
 request's ``registry.json`` (stage -> record, the libraries ``tools/vendor_cake.py`` renders into ``build.json``). A
-``cake_jit.py`` registry computes its names, so the build checks it instead. ``build.json`` ``package`` may name any
-import path: the copy imports under its own name.
+``cake_jit.py`` registry computes its names at import time; no step checks them against ``build.json`` (the build
+loads the ``build.json`` entries only). ``build.json`` ``package`` may name any import path: the copy imports under
+its own name.
 
 ``imports`` copies each package into ``<work>/imports/<name>/`` the way FlashInfer's vendored-package gate lays it
 out: alone as the top-level package ``vendored_<name>``, or, with siblings, as ``vendored_<name>.<name>`` beside
 ``vendored_<name>.<sibling>`` in a namespace directory. A child ``python -I`` started in the work directory blocks
-``flashinfer`` and ``miles_ext_kernels`` (a meta-path finder and ``None`` in ``sys.modules``: an editable install's
-finder still runs under ``-I``). It drops every ``sys.path`` entry at or above the repository or the copy, keeps the
-directories torch and tvm_ffi load from, and imports the package and every module of it one by one. A module that
-fails, a blocked module that loaded anyway, or any module loaded from the repository is a finding.
+``flashinfer``, every ``flashinfer_*`` package and ``miles_ext_kernels`` (a meta-path finder and ``None`` in
+``sys.modules``: an editable install's finder still runs under ``-I``). It drops every ``sys.path`` entry at or above
+the repository or the copy, keeps the directories torch and tvm_ffi load from, and imports the package and every
+module of it one by one. A module that fails, a blocked module that loaded anyway, or any module loaded from the
+repository is a finding.
 
 ``build`` runs on a compute node with nvcc. For each toolkit (``--nvcc``, and ``--nvcc-for ARCH=PATH`` for an
 architecture that needs another one) it copies each package into ``<work>/build/cuda-<version>/<name>/`` as above,
@@ -53,17 +55,20 @@ of their own, and their copies (with ``aot/``) are placed beside it. Then a bloc
 every compiled library through ``cake_build.load_library``. The library must be the one in the copy's ``aot/``, its
 ``build_cuda_version()`` must be the toolkit's ``CUDART_VERSION``, and ``record_cuda_version(arch)`` must be the
 toolkit. The load needs a GPU node (``libcuda.so.1``); ``--compile-only`` stops after the compile. The tool refuses
-to run (exit 2) rather than skip: a toolkit older than :data:`MIN_CUDA` for an architecture, or an entry whose
-``min_cuda`` the toolkit does not reach.
+to run (exit 2) rather than skip, before it starts a child: a toolkit older than :data:`MIN_CUDA` for an architecture,
+an entry whose ``min_cuda`` the toolkit does not reach, or a malformed ``build.json``. The default nvcc is needed only
+for an architecture without ``--nvcc-for``.
 
 ``--work-dir`` must lie outside the repository, which must never hold an ``aot/`` directory
 (``tools/vendor_cake.py --check``). The tool deletes and rewrites its own ``imports/`` and ``build/`` subdirectories
 there. Without ``--work-dir``, ``imports`` uses a temporary directory and deletes it.
 
-:data:`ALLOWLIST` is a burn-down list of the static findings the vendored tree has today, each with its reason. It
-only shrinks: the change that fixes a module deletes its entry, and an entry that matches no finding is itself a
-finding. An allowlisted optional import (``import triton``) is also blocked in the children of that package, so the
-package must import without it.
+Two lists allow static findings, and an entry that matches no finding is itself a finding. The ``allow`` record of
+a package in ``VENDORED.json`` (which ``tools/vendor_cake.py`` also enforces) allows the environment reads of its
+``env_read`` modules and the flashinfer imports inside its ``flashinfer_import`` functions (``module:function``).
+:data:`ALLOWLIST` holds the other findings the vendored tree has today, each with its reason. Both only shrink: the
+change that fixes a module deletes its entry. An allowlisted optional import (``import triton``) is also blocked in
+the children of that package, so the package must import without it.
 """
 
 from __future__ import annotations
@@ -93,7 +98,7 @@ ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 MIN_CUDA = {"sm_100a": (13, 4), "sm_103a": (13, 4), "sm_107a": (13, 4)}
 # What a vendored module may import besides its own package, its declared siblings and the standard library.
 ALLOWED_IMPORTS = ("torch", "tvm_ffi", "cuda.bindings")
-# The packages no child may import: a copy works without either installed.
+# The packages no child may import: a copy works without either installed. A child also blocks every flashinfer_*.
 BLOCKED = ("flashinfer", "miles_ext_kernels")
 LOADER = "cake_build.py"
 JIT_HOOK = "_jit_toolchain"
@@ -102,33 +107,9 @@ CHILD_TIMEOUT = 600  # seconds, per child
 NVCC_STDERR_LINES = 40  # kept per failed compile
 TAIL_LINES = 12  # kept per failed import or child
 
-# The static findings of the vendored tree today: (package, module, subject, reason). Delete an entry with the code it
-# names; never add one for new code.
+# The static findings of the vendored tree today that VENDORED.json ``allow`` does not cover: (package, module,
+# subject, reason). Delete an entry with the code it names; never add one for new code.
 ALLOWLIST = (
-    (
-        "cake_causal_conv1d_det_train",
-        "kcp.py",
-        "environment",
-        "TEST_KNOBS_ENV unlocks the private test hook _set_test_knobs",
-    ),
-    (
-        "cake_causal_conv1d_nondet_train",
-        "kcp.py",
-        "environment",
-        "TEST_KNOBS_ENV unlocks the private test hook _set_test_knobs",
-    ),
-    (
-        "cake_kda_nondet_train",
-        "cake_backend.py",
-        "environment",
-        "HANDOFF_ENV overrides the checkpoint_handoff argument of cake_kda_nondet",
-    ),
-    (
-        "cake_kda_nondet_train",
-        "cake_backend.py",
-        "import flashinfer",
-        "_jit_nvcc_version reads the toolkit of FlashInfer's JIT; the kda op rebinds it at import",
-    ),
     (
         "cake_mok_bf16",
         "mxfp8.py",
@@ -166,11 +147,11 @@ class Package(NamedTuple):
 
     name: str
     op: str
-    kind: str  # the VENDORED.json source kind: flashinfer, miles-pr
     directory: Path
     siblings: tuple[str, ...]  # build.json common.requires.packages
-    registry: str | None  # the file naming the libraries the package loads
+    registry: str | None  # the data file naming the libraries the package loads
     arch_from: Mapping[str, str]  # miles-pr: target architecture -> the architecture whose records it compiles
+    allow: Mapping[str, Sequence[str]]  # VENDORED.json allow: env_read modules, flashinfer_import module:function
 
 
 class Environment(NamedTuple):
@@ -313,12 +294,11 @@ def discover(repo_root: Path = REPO_ROOT) -> list[Package]:
                 registry = "sources.json"
             elif kind == "miles-pr":
                 registry = record["build"]["registry"]
-            elif (directory / "cake_jit.py").is_file():
-                registry = "cake_jit.py"
             else:
                 registry = None
             arch_from = dict(record.get("build", {}).get("arch_from", {}))
-            packages.append(Package(name, op, kind, directory, _declared_siblings(build), registry, arch_from))
+            allow = dict(record.get("allow") or {})
+            packages.append(Package(name, op, directory, _declared_siblings(build), registry, arch_from, allow))
     return sorted(packages, key=lambda package: package.name)
 
 
@@ -333,8 +313,8 @@ def select(packages: Sequence[Package], names: Iterable[str] | None) -> list[Pac
 
 
 def registry_libraries(package: Package) -> set[str] | None:
-    """The libraries the registry of ``package`` names, when it lists them as data; None for a ``cake_jit.py``."""
-    if package.registry is None or package.registry == "cake_jit.py":
+    """The libraries the registry of ``package`` names; None when it has no data registry."""
+    if package.registry is None:
         return None
     registry = json.loads((package.directory / package.registry).read_text(encoding="utf-8"))
     if package.registry == "sources.json":
@@ -389,6 +369,27 @@ def _guarded_jit_imports(tree: ast.Module) -> set[int]:
     return guarded
 
 
+def _functions(tree: ast.Module) -> dict[str, ast.AST]:
+    """The functions a module defines, by qualified name: its own (``f``) and its classes' methods (``C.f``), also
+    under a module-level ``if`` / ``try`` / ``with`` (the names ``VENDORED.json`` ``flashinfer_import`` uses)."""
+    found: dict[str, ast.AST] = {}
+
+    def visit(body: list[ast.stmt], prefix: str) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                found[prefix + node.name] = node
+            elif isinstance(node, ast.ClassDef):
+                visit(node.body, f"{prefix}{node.name}.")
+            elif isinstance(node, (ast.If, ast.Try, ast.With)):
+                for block in (node.body, getattr(node, "orelse", []), getattr(node, "finalbody", [])):
+                    visit(block, prefix)
+                for handler in getattr(node, "handlers", []):
+                    visit(handler.body, prefix)
+
+    visit(tree.body, "")
+    return found
+
+
 def _allowed_absolute(module: str, names: Sequence[str]) -> bool:
     top = module.partition(".")[0]
     if top in sys.stdlib_module_names:
@@ -406,6 +407,8 @@ def module_findings(package: str, relative: str, source: bytes, siblings: Sequen
         return [Finding(package, relative, "syntax", f"does not parse: {exc}")]
     depth = len(PurePosixPath(relative).parts) - 1  # of the module's own package below the package directory
     guarded = _guarded_jit_imports(tree) if relative == LOADER else set()
+    # a flashinfer import inside a function names it, so that VENDORED.json allow can name the function
+    function_of = {id(inner): name for name, function in _functions(tree).items() for inner in ast.walk(function)}
     os_names = {"os"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -415,17 +418,23 @@ def module_findings(package: str, relative: str, source: bytes, siblings: Sequen
     def add(node: ast.AST, subject: str, message: str) -> None:
         found.append(Finding(package, relative, subject, f"{node.lineno}: {message}"))
 
+    def add_import(node: ast.AST, module: str) -> None:
+        top = module.partition(".")[0]
+        if top != "flashinfer":
+            add(node, f"import {top}", f"imports {module}")
+        elif id(node) not in guarded:
+            function = function_of.get(id(node))
+            add(node, f"import flashinfer in {function}" if function else "import flashinfer", f"imports {module}")
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                top = alias.name.partition(".")[0]
-                if not _allowed_absolute(alias.name, ()) and not (id(node) in guarded and top == "flashinfer"):
-                    add(node, f"import {top}", f"imports {alias.name}")
+                if not _allowed_absolute(alias.name, ()):
+                    add_import(node, alias.name)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             names = [alias.name for alias in node.names]
-            top = node.module.partition(".")[0]
-            if not _allowed_absolute(node.module, names) and not (id(node) in guarded and top == "flashinfer"):
-                add(node, f"import {top}", f"imports {node.module}")
+            if not _allowed_absolute(node.module, names):
+                add_import(node, node.module)
             if node.module == "os":
                 for name in names:
                     if name in _ENV_NAMES:
@@ -507,11 +516,25 @@ def apply_allowlist(
     present = {(finding.package, finding.module, finding.subject) for finding in found}
     kept = [finding for finding in found if (finding.package, finding.module, finding.subject) not in listed]
     stale = [
-        Finding(package, module, subject, f"ALLOWLIST lists {subject!r}, which no longer occurs: delete the entry")
-        for package, module, subject, _ in allowlist
+        Finding(package, module, subject, f"{subject!r} is allowed ({reason}) but no longer occurs: delete the entry")
+        for package, module, subject, reason in allowlist
         if package in checked and (package, module, subject) not in present
     ]
     return kept + stale
+
+
+def vendored_allowlist(packages: Iterable[Package]) -> list[tuple[str, str, str, str]]:
+    """The allowlist entries of the ``VENDORED.json`` ``allow`` records of ``packages``: an ``env_read`` module allows
+    its environment reads, a ``flashinfer_import`` ``module:function`` the flashinfer imports inside that function."""
+    entries = []
+    for package in packages:
+        for module in package.allow.get("env_read", ()):
+            entries.append((package.name, module, "environment", "VENDORED.json allow env_read"))
+        for item in package.allow.get("flashinfer_import", ()):
+            module, _, function = str(item).partition(":")
+            subject = f"import flashinfer in {function}"
+            entries.append((package.name, module, subject, "VENDORED.json allow flashinfer_import"))
+    return entries
 
 
 def check_static(
@@ -519,9 +542,10 @@ def check_static(
     everything: Sequence[Package],
     allowlist: Iterable[tuple[str, str, str, str]] = ALLOWLIST,
 ) -> list[Finding]:
-    """The static findings of ``packages`` (``everything`` holds their possible siblings), allowlist applied. An
-    allowlist entry of a package that is not vendored is stale whenever the whole tree is checked."""
-    allowlist = list(allowlist)
+    """The static findings of ``packages`` (``everything`` holds their possible siblings), ``allowlist`` and the
+    ``VENDORED.json`` ``allow`` records applied. An allowlist entry of a package that is not vendored is stale whenever
+    the whole tree is checked."""
+    allowlist = [*allowlist, *vendored_allowlist(everything)]
     by_name = {package.name: package for package in everything}
     found = [finding for package in packages for finding in package_findings(package, by_name)]
     checked = {package.name for package in packages}
@@ -533,20 +557,20 @@ def check_static(
 def blocked_for(package: str, allowlist: Iterable[tuple[str, str, str, str]] = ALLOWLIST) -> list[str]:
     """What a child of ``package`` blocks: flashinfer, miles_ext_kernels and the optional imports the allowlist
     lists."""
-    optional = {
-        subject.partition(" ")[2]
-        for name, _, subject, _ in allowlist
-        if name == package and subject.startswith("import ") and subject != "import flashinfer"
-    }
+    optional = set()
+    for name, _, subject, _ in allowlist:
+        verb, _, module = subject.partition(" ")
+        if name == package and verb == "import" and module.isidentifier() and module not in BLOCKED:
+            optional.add(module)
     return [*BLOCKED, *sorted(optional)]
 
 
 # ---------------------------------------------------------------------------------------------------------------
 # the children
 
-# Written to ``<work>/check_standalone_child.py`` and run as ``<python> [-I -B] <child> <mode> <json>``: ``probe``
-# (without ``-I``) reports where torch and tvm_ffi load from; ``imports`` and ``load`` (with ``-I``) isolate the copy
-# and import it, and ``load`` also loads its compiled libraries.
+# Written to ``<work>/check_standalone_child.py`` and run as ``<python> [-I -B] <child> <mode> <config.json>``:
+# ``probe`` (without ``-I``) reports where torch and tvm_ffi load from; ``imports`` and ``load`` (with ``-I``) isolate
+# the copy and import it, and ``load`` also loads its compiled libraries.
 CHILD = '''\
 # Written by tools/check_standalone.py: one child of the standalone gate.
 import importlib
@@ -557,7 +581,9 @@ import os
 import sys
 import traceback
 
-MODE, CONFIG = sys.argv[1], json.loads(sys.argv[2])
+MODE = sys.argv[1]
+with open(sys.argv[2], encoding="utf-8") as config:
+    CONFIG = json.load(config)
 RESULT = "@RESULT@"
 
 
@@ -583,9 +609,14 @@ REPO = os.path.realpath(CONFIG.get("repo", os.sep))
 ROOT = os.path.realpath(CONFIG.get("root", os.sep))
 
 
+def blocked(name):
+    top = name.partition(".")[0]
+    return top in BLOCKED or top.startswith("flashinfer_")
+
+
 class Block(importlib.abc.MetaPathFinder):
     def find_spec(self, name, path=None, target=None):
-        if name.partition(".")[0] in BLOCKED:
+        if blocked(name):
             raise ModuleNotFoundError(f"{name} is blocked by the standalone gate", name=name)
         return None
 
@@ -635,7 +666,7 @@ def leaked():
     environment = tuple(os.path.realpath(path) + os.sep for path in CONFIG["paths"])
     names = []
     for name, module in list(sys.modules.items()):
-        if name.partition(".")[0] in BLOCKED:
+        if blocked(name):
             if module is not None:
                 names.append(name)
             continue
@@ -706,16 +737,21 @@ def _tail(text: str | bytes | None, lines: int = TAIL_LINES) -> str:
 def run_child(
     python: str, child: Path, mode: str, config: Mapping[str, Any], cwd: Path, *, cpu_only: bool
 ) -> tuple[dict[str, Any] | None, str]:
-    """The result record of one child, or None and what went wrong."""
+    """The result record of one child, or None and what went wrong. The config goes to ``<work>/config/`` (a
+    command-line argument is limited to 128 KiB)."""
     isolation = [] if mode == "probe" else ["-I", "-B"]
     environment = dict(os.environ, CUDA_VISIBLE_DEVICES="") if cpu_only else dict(os.environ)
+    path = child.parent / "config" / f"{mode}-{config.get('package', mode)}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
     try:
         proc = subprocess.run(
-            [python, *isolation, str(child), mode, json.dumps(config)],
+            [python, *isolation, str(child), mode, str(path)],
             cwd=cwd,
             env=environment,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=CHILD_TIMEOUT,
         )
@@ -831,10 +867,12 @@ def check_imports(
 
 
 def find_nvcc(explicit: str | None) -> str:
-    """``explicit``, else ``$CUDA_HOME/bin/nvcc``, else ``nvcc`` on ``PATH``; a path is made absolute."""
+    """``explicit``, else ``$CUDA_HOME/bin/nvcc`` when it exists, else ``nvcc`` on ``PATH``; a path is made
+    absolute."""
     if not explicit:
         cuda_home = os.environ.get("CUDA_HOME")
-        explicit = str(Path(cuda_home) / "bin" / "nvcc") if cuda_home else shutil.which("nvcc")
+        candidate = Path(cuda_home) / "bin" / "nvcc" if cuda_home else None
+        explicit = str(candidate) if candidate is not None and candidate.is_file() else shutil.which("nvcc")
         if explicit is None:
             raise GateError("no nvcc: pass --nvcc, set CUDA_HOME or put nvcc on PATH")
     return os.path.abspath(explicit) if os.sep in explicit else explicit
@@ -843,7 +881,9 @@ def find_nvcc(explicit: str | None) -> str:
 def toolkit(nvcc: str) -> Toolkit:
     """The toolkit of ``nvcc --version``."""
     try:
-        proc = subprocess.run([nvcc, "--version"], capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            [nvcc, "--version"], capture_output=True, encoding="utf-8", errors="replace", check=False
+        )
     except OSError as exc:
         raise GateError(f"cannot run {nvcc} --version: {exc}") from exc
     release = _NVCC_RELEASE.search(proc.stdout)
@@ -864,7 +904,7 @@ def run_compile(command: list[str], copy: Path) -> dict[str, Any]:
     ``error`` when nvcc cannot start)."""
     start = time.monotonic()
     try:
-        proc = subprocess.run(command, cwd=copy, capture_output=True, text=True, check=False)
+        proc = subprocess.run(command, cwd=copy, capture_output=True, encoding="utf-8", errors="replace", check=False)
     except OSError as exc:
         return {"rc": None, "seconds": round(time.monotonic() - start, 1), "error": f"cannot run {command[0]}: {exc}"}
     record: dict[str, Any] = {"rc": proc.returncode, "seconds": round(time.monotonic() - start, 1)}
@@ -911,8 +951,8 @@ def _closure(packages: Sequence[Package], by_name: Mapping[str, Package]) -> lis
 def plan_build(
     packages: Sequence[Package], arches: Sequence[str], toolkits: Mapping[str, Toolkit]
 ) -> dict[str, tuple[dict[str, Any], list[dict[str, Any]]]]:
-    """``name -> (build.json, the entries of arches)`` of every package; a toolkit older than :data:`MIN_CUDA` or an
-    entry's ``min_cuda`` raises :class:`GateError` before anything compiles."""
+    """``name -> (build.json, the entries of arches)`` of every package; a toolkit older than :data:`MIN_CUDA`, an
+    entry's ``min_cuda`` or a malformed ``build.json`` raises :class:`GateError` before anything compiles."""
     for arch in arches:
         kit = toolkits[arch]
         if kit.cuda < MIN_CUDA[arch]:
@@ -925,13 +965,16 @@ def plan_build(
         build, error = _read_json(package.directory / "build.json")
         if error is not None:
             raise GateError(f"{package.directory / 'build.json'}: {error}")
-        entries = [entry for entry in build["libraries"] if entry["arch"] in arches]
-        above.extend(
-            f"{package.name}/{entry['name']} (min_cuda {entry['min_cuda']}, {toolkits[entry['arch']].nvcc} is "
-            f"{toolkits[entry['arch']].full})"
-            for entry in entries
-            if _version(entry["min_cuda"]) > toolkits[entry["arch"]].cuda
-        )
+        try:
+            entries = [entry for entry in build["libraries"] if entry["arch"] in arches]
+            above.extend(
+                f"{package.name}/{entry['name']} (min_cuda {entry['min_cuda']}, {toolkits[entry['arch']].nvcc} is "
+                f"{toolkits[entry['arch']].full})"
+                for entry in entries
+                if _version(entry["min_cuda"]) > toolkits[entry["arch"]].cuda
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GateError(f"{package.directory / 'build.json'}: malformed library entry ({exc!r})") from exc
         plan[package.name] = (build, entries)
     if above:
         more = f" and {len(above) - 10} more" if len(above) > 10 else ""
@@ -1131,9 +1174,13 @@ def main(argv: list[str] | None = None) -> int:
                 nvcc_for = _nvcc_for(args.nvcc_for)
                 if unused := sorted(set(nvcc_for) - set(arches)):
                     raise GateError(f"--nvcc-for names {', '.join(unused)}, which this run does not build")
-                default = find_nvcc(args.nvcc)
-                kits = {path: toolkit(path) for path in {default, *map(find_nvcc, nvcc_for.values())}}
-                toolkits = {arch: kits[find_nvcc(nvcc_for[arch]) if arch in nvcc_for else default] for arch in arches}
+                nvcc_for = {arch: find_nvcc(path) for arch, path in nvcc_for.items()}
+                # the default nvcc only when an architecture has no --nvcc-for
+                default = find_nvcc(args.nvcc) if set(arches) - set(nvcc_for) else None
+                kits = {path: toolkit(path) for path in {*nvcc_for.values(), default} if path is not None}
+                toolkits = {arch: kits[nvcc_for.get(arch, default)] for arch in arches}
+                by_name = {package.name: package for package in everything}
+                plan_build(_closure(packages, by_name), arches, toolkits)  # refuse before the probe starts a child
                 environment = probe(args.python, work)
                 reports, findings = check_build(
                     packages,

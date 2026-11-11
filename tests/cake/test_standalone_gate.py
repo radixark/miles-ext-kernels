@@ -7,7 +7,9 @@ compiled for the device's architecture into a copy and loaded from it.
 
 import importlib.util
 import json
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -61,6 +63,56 @@ def test_the_build_floor_is_the_runtime_floor():
     assert set(check_standalone.ARCHES) == set(loader.ARCH_BY_CAPABILITY.values())
 
 
+# imports every module named on its command line, with every flashinfer* package blocked
+IN_PLACE = """\
+import importlib
+import importlib.abc
+import sys
+
+
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.partition(".")[0].startswith("flashinfer"):
+            raise ModuleNotFoundError(f"{name} is blocked", name=name)
+        return None
+
+
+sys.meta_path.insert(0, Block())
+failed = []
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+    except Exception as exc:
+        failed.append(f"{name}: {type(exc).__name__}: {exc}")
+print("\\n".join(failed))
+sys.exit(1 if failed else 0)
+"""
+
+
+def test_every_module_imports_in_place_without_flashinfer():
+    """The tree as installed: every module under ``miles_ext_kernels.cake._vendor`` imports with flashinfer blocked."""
+    pytest.importorskip("torch")
+    pytest.importorskip("tvm_ffi")
+    modules = [
+        ".".join(["miles_ext_kernels.cake._vendor", package.name, *([stem] if stem else [])])
+        for package in PACKAGES
+        for stem in ["", *check_standalone.module_stems(package.directory)]
+    ]
+    environment = dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1")
+
+    result = subprocess.run(
+        [sys.executable, "-c", IN_PLACE, *modules],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=check_standalone.CHILD_TIMEOUT,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("name", NAMES)
 def test_every_module_imports_from_a_standalone_copy(name, environment, tmp_path):
     packages = check_standalone.select(PACKAGES, [name])
@@ -104,10 +156,10 @@ def _manifest(name: str, arches=("sm_100a", "sm_103a"), min_cuda: str = "13.4", 
     }
 
 
-def _tree(root: Path, packages: dict[str, dict[str, str]]) -> Path:
+def _tree(root: Path, packages: dict[str, dict[str, str]], records: dict[str, dict[str, Any]] | None = None) -> Path:
     """A repository at ``root`` vendoring ``packages`` (name -> package-relative path -> text) under one op. Each
     package also gets FlashInfer's loader, an empty ``__init__.py``, ``csrc/prog.cu`` and :func:`_manifest`, unless
-    it gives its own."""
+    it gives its own. ``records`` replaces the ``VENDORED.json`` record of a package."""
     vendor = root / check_standalone.VENDOR
     block = {}
     for name, files in packages.items():
@@ -117,7 +169,7 @@ def _tree(root: Path, packages: dict[str, dict[str, str]]) -> Path:
             (directory / relative).parent.mkdir(parents=True, exist_ok=True)
             (directory / relative).write_text(text)
         shutil.copyfile(CAKE_BUILD, directory / "cake_build.py")
-        block[name] = {"source": {"kind": "flashinfer"}}
+        block[name] = (records or {}).get(name, {"source": {"kind": "flashinfer"}})
     (vendor / "VENDORED.json").write_text(json.dumps({"ops": {"synth": block}, "schema": "synthetic"}))
     return root
 
@@ -168,12 +220,106 @@ def test_the_static_pass_reports_what_leaves_the_contract(tmp_path):
         ("cake_synth_a", "mod.py", "import ..cake_synth_b"),
         ("cake_synth_a", "mod.py", "import above the parent"),
         ("cake_synth_a", "mod.py", "environment"),
-        ("cake_synth_a", "mod.py", "import flashinfer"),
+        ("cake_synth_a", "mod.py", "import flashinfer in jit"),
         ("cake_synth_lost", "build.json", "sibling cake_synth_gone"),
         ("cake_synth_mok", "sources.json", "registry"),
     }
     (registry,) = [finding for finding in findings if finding.subject == "registry"]
     assert registry.message.endswith(": prog_sm_107a")
+
+
+def test_the_static_pass_reads_a_miles_pr_registry_per_architecture(tmp_path):
+    """``per_arch`` renames a record for one architecture; ``arch_from`` compiles another architecture's records."""
+    registry = {
+        "fwd": {"name": "prog", "arches": ["sm_100a", "sm_103a"]},
+        "bwd": {"name": "plain", "arches": ["sm_100a", "sm_103a"], "per_arch": {"sm_103a": {"name": "tuned"}}},
+    }
+    record = {
+        "source": {"kind": "miles-pr"},
+        "build": {"registry": "registry.json", "arch_from": {"sm_107a": "sm_103a"}},
+    }
+    files = {"registry.json": json.dumps(registry)}
+    repo = _tree(tmp_path / "repo", {"cake_synth_pr": files}, {"cake_synth_pr": record})
+    (package,) = check_standalone.discover(repo)
+
+    findings = check_standalone.check_static([package], [package], allowlist=())
+
+    assert check_standalone.registry_libraries(package) == {
+        "prog_sm_100a",
+        "prog_sm_103a",
+        "prog_sm_107a",
+        "plain_sm_100a",
+        "tuned_sm_103a",
+        "tuned_sm_107a",
+    }
+    (finding,) = findings
+    assert finding.subject == "registry"
+    assert finding.message.endswith(": plain_sm_100a, prog_sm_107a, tuned_sm_103a, tuned_sm_107a")
+
+
+JIT_HOOK = """\
+def _jit_toolchain():
+    try:
+        from flashinfer.jit import core
+    except ImportError:
+        return None
+    return core
+"""
+
+
+@pytest.mark.parametrize(
+    ("relative", "source", "subjects"),
+    [
+        ("cake_build.py", JIT_HOOK, []),
+        ("cake_build.py", JIT_HOOK.replace("ImportError", "ValueError"), ["import flashinfer in _jit_toolchain"]),
+        ("cake_build.py", "def _jit_toolchain():\n    import flashinfer\n", ["import flashinfer in _jit_toolchain"]),
+        ("cake_build.py", JIT_HOOK.replace("_jit_toolchain", "_other"), ["import flashinfer in _other"]),
+        ("helper.py", JIT_HOOK, ["import flashinfer in _jit_toolchain"]),
+    ],
+)
+def test_the_one_flashinfer_import_is_the_guarded_jit_hook_of_the_loader(relative, source, subjects):
+    findings = check_standalone.module_findings("cake_synth_a", relative, source.encode(), ())
+
+    assert [finding.subject for finding in findings] == subjects
+
+
+ALLOWED = """\
+import os
+
+KNOB = os.environ.get("KNOB")
+
+
+def hook():
+    from flashinfer.jit import core
+
+    return core
+
+
+class Toolchain:
+    def other(self):
+        import flashinfer
+
+        return flashinfer
+"""
+
+
+def test_vendored_allow_scopes_a_flashinfer_import_to_its_function(tmp_path):
+    """``VENDORED.json`` ``allow`` allows the environment reads of a module and the flashinfer imports of a function;
+    an ``allow`` entry that matches nothing is stale."""
+    allow = {"env_read": ["mod.py", "quiet.py"], "flashinfer_import": ["mod.py:gone", "mod.py:hook"]}
+    record = {"source": {"kind": "flashinfer"}, "allow": allow}
+    repo = _tree(tmp_path / "repo", {"cake_synth_a": {"mod.py": ALLOWED, "quiet.py": ""}}, {"cake_synth_a": record})
+    packages = check_standalone.discover(repo)
+
+    findings = check_standalone.check_static(packages, packages, allowlist=())
+
+    assert {(finding.module, finding.subject) for finding in findings} == {
+        ("mod.py", "import flashinfer in Toolchain.other"),
+        ("mod.py", "import flashinfer in gone"),
+        ("quiet.py", "environment"),
+    }, _lines(findings)
+    stale = [finding for finding in findings if "no longer occurs" in finding.message]
+    assert len(stale) == 2 and all("VENDORED.json allow" in finding.message for finding in stale)
 
 
 def test_the_allowlist_hides_its_findings_and_reports_its_stale_entries(tmp_path):
@@ -217,6 +363,7 @@ def test_the_import_check_blocks_what_a_copy_must_not_need(tmp_path, environment
             },
             "cake_synth_flashinfer": {"mod.py": "import flashinfer\n"},
             "cake_synth_miles": {"mod.py": "from miles_ext_kernels import cake\n"},
+            "cake_synth_cubin": {"mod.py": "import flashinfer_cubin\n"},
             "cake_synth_undeclared": {"mod.py": "from ..cake_synth_a import mod\n"},
             "cake_synth_optional": {"mod.py": "import sys\n\nassert sys.modules['triton'] is None\n"},
             "cake_synth_leak": {"mod.py": LEAK.replace("@HELPER@", str(tmp_path / "repo" / "helper.py"))},
@@ -232,12 +379,14 @@ def test_the_import_check_blocks_what_a_copy_must_not_need(tmp_path, environment
     assert {(finding.package, finding.subject) for finding in findings} == {
         ("cake_synth_flashinfer", "import"),
         ("cake_synth_miles", "import"),
+        ("cake_synth_cubin", "import"),
         ("cake_synth_undeclared", "import"),
         ("cake_synth_leak", "leak"),
     }, _lines(findings)
     by_package = {finding.package: finding.message for finding in findings}
     for package, blocked in (("cake_synth_flashinfer", "flashinfer"), ("cake_synth_miles", "miles_ext_kernels")):
         assert "ModuleNotFoundError" in by_package[package] and blocked in by_package[package]
+    assert "flashinfer_cubin is blocked by the standalone gate" in by_package["cake_synth_cubin"]
     assert "beyond top-level package" in by_package["cake_synth_undeclared"]
     assert by_package["cake_synth_leak"] == "loaded from_repo"
     assert {report["package"]: report["failed"] for report in reports}["cake_synth_kcp"] == 0
@@ -348,9 +497,11 @@ def test_a_failed_compile_is_a_finding(tmp_path, environment):
         ("13.3.73", "13.0", [], "builds with CUDA 13.4 or newer"),
         ("13.4.92", "13.4", ["--arch", "sm_100a", "--nvcc-for", "sm_107a=nvcc"], "which this run does not build"),
         ("13.4.92", "13.4", ["inside"], "inside the repository"),
+        ("13.4.92", "13", [], "malformed library entry"),
     ],
 )
-def test_build_refuses_rather_than_skips(tmp_path, environment, capsys, toolkit, min_cuda, args, error):
+def test_build_refuses_rather_than_skips(tmp_path, capsys, toolkit, min_cuda, args, error):
+    """Every refusal comes before the probe child: these need neither torch nor tvm_ffi."""
     repo = _tree(tmp_path / "repo", {"cake_synth_a": {"build.json": json.dumps(_manifest("a", min_cuda=min_cuda))}})
     nvcc = fake_nvcc.write(tmp_path / "cuda" / "bin" / "nvcc", toolkit)
     work = repo / "work" if args == ["inside"] else tmp_path / "work"
@@ -360,6 +511,30 @@ def test_build_refuses_rather_than_skips(tmp_path, environment, capsys, toolkit,
     assert code == 2 and report["exit"] == 2
     assert error in report["error"] and error in capsys.readouterr().err
     assert fake_nvcc.calls(nvcc) == []
+
+
+def test_build_needs_the_default_nvcc_only_for_an_architecture_without_nvcc_for(tmp_path, environment, monkeypatch):
+    manifest = _manifest("cake_synth_a", ("sm_107a",))
+    repo = _tree(tmp_path / "repo", {"cake_synth_a": {"build.json": json.dumps(manifest)}})
+    newer = fake_nvcc.write(tmp_path / "cuda-13.5" / "bin" / "nvcc", "13.5.20")
+    monkeypatch.setenv("CUDA_HOME", str(tmp_path / "no-cuda"))
+    monkeypatch.setenv("PATH", str(tmp_path / "no-bin"))
+
+    code, report = _build(repo, tmp_path / "work", "--arch", "sm_107a", "--nvcc-for", f"sm_107a={newer}")
+
+    assert code == 0, report
+    assert [record["toolkit"] for record in report["reports"]] == ["13.5.20"]
+
+
+def test_find_nvcc_passes_over_a_cuda_home_without_nvcc(tmp_path, monkeypatch):
+    nvcc = fake_nvcc.write(tmp_path / "bin" / "nvcc", "13.4.92")
+    monkeypatch.setenv("CUDA_HOME", str(tmp_path / "no-cuda"))
+    monkeypatch.setenv("PATH", str(nvcc.parent))
+
+    assert check_standalone.find_nvcc(None) == os.path.abspath(nvcc)
+    monkeypatch.setenv("PATH", str(tmp_path / "no-bin"))
+    with pytest.raises(check_standalone.GateError, match="no nvcc"):
+        check_standalone.find_nvcc(None)
 
 
 def _nvcc() -> str | None:
