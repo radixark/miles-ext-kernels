@@ -3,10 +3,10 @@
 Every output byte (the E4M3 codes of the rowwise and colwise values and the E8M0 scale bytes in the swizzled 128 x 4
 layout) is compared exactly, with no tolerance, against the plain-torch reference of ``_reference.py``: every program
 of every route (forward / backward x rowwise / colwise / both) of the device's architecture, run directly, on unit
-normals, block-scaled normals, special values and every BF16 bit pattern as a gate; and the entry points at sizes at
-which the selection rule picks each program. An exact comparison is the accuracy gate of this op: any error, a 2 %
-one included, changes bytes. Independently of that emulation, the dequantized outputs lie within the MXFP8 rounding
-bound of the FP64 SwiGLU and of its gradients.
+normals, block-scaled normals, special values, blocks on the E4M3 and E8M0 boundaries (along rows and along columns)
+and every BF16 bit pattern as a gate; and the entry points at sizes at which the selection rule picks each program. An
+exact comparison is the accuracy gate of this op: any error, a 2 % one included, changes bytes. Independently of that
+emulation, the dequantized outputs lie within the MXFP8 rounding bound of the FP64 SwiGLU and of its gradients.
 
 ``det`` (the op's one variant) repeats bit for bit: three calls in one process and one in a fresh process. Calls on a
 side stream match the default stream, the host never synchronizes, CUDA graph replays match eager calls, a new shape
@@ -44,8 +44,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DEVICE = torch.device("cuda", torch.cuda.current_device())
 ARCH = loader.device_arch(DEVICE)
 PACKAGE = ops.backend
-# (M, K, values) of the run-to-run test: three programs of each route on every architecture
-REPEAT_CASES = ((256, 256, "special"), (2048, 1024, "scaled"), (8192, 8192, "normal"))
+# (M, K, values) of the run-to-run test: three programs of each route on every architecture, and the boundary blocks
+REPEAT_CASES = ((256, 256, "special"), (256, 256, "boundary"), (2048, 1024, "scaled"), (8192, 8192, "normal"))
 # |dequantized - FP64| <= |FP64| * (E4M3 half ulp + BF16 rounding and FP32 slack) + the block's E4M3 subnormal half ulp
 E4M3_REL = 2.0**-4
 BF16_FP32_REL = 2.0**-7
@@ -183,25 +183,27 @@ from miles_ext_kernels.cake.gated_act_mxfp8 import silu_and_mul_mxfp8_quantize, 
 device = torch.device("cuda", int(sys.argv[2]))
 torch.cuda.set_device(device)
 out = {}
-for key, (gated_input, grad_output, backward, rowwise, colwise) in torch.load(sys.argv[1]).items():
+for gated_input, grad_output, routes in torch.load(sys.argv[1]):
     gated_input, grad_output = gated_input.to(device), grad_output.to(device)
-    if backward:
-        outputs = silu_and_mul_mxfp8_quantize_backward(gated_input, grad_output, rowwise=rowwise, colwise=colwise)
-    else:
-        outputs = silu_and_mul_mxfp8_quantize(gated_input, rowwise=rowwise, colwise=colwise)
-    hasher = hashlib.sha256()
-    for tensor in outputs:
-        hasher.update(tensor.contiguous().view(torch.uint8).cpu().numpy().tobytes())
-    out[key] = hasher.hexdigest()
+    for key, (backward, rowwise, colwise) in routes.items():
+        if backward:
+            outputs = silu_and_mul_mxfp8_quantize_backward(gated_input, grad_output, rowwise=rowwise, colwise=colwise)
+        else:
+            outputs = silu_and_mul_mxfp8_quantize(gated_input, rowwise=rowwise, colwise=colwise)
+        hasher = hashlib.sha256()
+        for tensor in outputs:
+            hasher.update(tensor.contiguous().view(torch.uint8).cpu().numpy().tobytes())
+        out[key] = hasher.hexdigest()
 print(json.dumps(out))
 """
 
 
 def test_det_repeats_bit_for_bit_in_process_and_in_a_fresh_process(tmp_path):
-    cases = {}
+    cases = []  # (gated_input, grad_output, {key: route}): each input is saved once and shared by the six routes
     digests = {}
     for M, K, values in REPEAT_CASES:
         gated_input, grad_output = reference.make_inputs(M, K, values=values, seed=M * K, device=DEVICE)
+        routes = {}
         for kind, (backward, rowwise, colwise) in KINDS.items():
             key = f"{kind} M={M} K={K} {values}"
             first = call(gated_input, grad_output, backward=backward, rowwise=rowwise, colwise=colwise)
@@ -209,7 +211,8 @@ def test_det_repeats_bit_for_bit_in_process_and_in_a_fresh_process(tmp_path):
                 again = call(gated_input, grad_output, backward=backward, rowwise=rowwise, colwise=colwise)
                 assert_same_bits(first, again, f"{key}, between calls")
             digests[key] = digest(first)
-            cases[key] = (gated_input.cpu(), grad_output.cpu(), backward, rowwise, colwise)
+            routes[key] = (backward, rowwise, colwise)
+        cases.append((gated_input.cpu(), grad_output.cpu(), routes))
     path = tmp_path / "cases.pt"
     torch.save(cases, path)
     pythonpath = os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")]))
