@@ -277,9 +277,10 @@ def _clear(module: Any, pool: str, lock: str) -> None:
 
 def release() -> None:
     """Drop the state the packages keep between calls: the workspace records of the calls made without a workspace,
-    single-rank and context-parallel (their device memory is freed when each call returns, but the memory pools the
-    ``fast`` context-parallel package keeps its checkpoint sets in), and, of a context-parallel package in use, its
-    captured CUDA graphs with their memory pools."""
+    single-rank and context-parallel, and, of a context-parallel package in use, its captured CUDA graphs with their
+    memory pools.  Those workspace records hold almost no device memory between calls: a call's device memory is freed
+    when it returns.  The exception is the memory pools in which the ``fast`` context-parallel package keeps its
+    checkpoint sets; ``release`` drops them too."""
     for backend in (det_backend, fast_backend):
         _clear(backend, "_entry_pool", "_entry_lock")
     for package in ("cake_kda_det_train_kcp", "cake_kda_nondet_train_kcp"):
