@@ -65,6 +65,18 @@ def test_prebuild_names_every_library_the_package_builds_for_the_architecture(ar
     assert len(names) == {"sm_100a": 65, "sm_103a": 73, "sm_107a": 63}[arch]
 
 
+def test_the_module_docstring_states_the_vendored_program_counts_and_the_choice_inputs():
+    build = json.loads((VENDOR / "build.json").read_text())
+    doc = " ".join(indexer_topk.__doc__.split())
+
+    for arch in ARCHES:
+        count = sum(entry["arch"] == arch for entry in build["libraries"])
+        assert f"{count} (SM{arch[3:]})" in doc
+    # max_seqlen_k selects the finalize variant and, on packed calls, the segment-order copy (vendored cake_backend)
+    choice = doc[doc.index("programs per call from") : doc.index("no choice changes a result")]
+    assert "``max_seqlen_k``" in choice
+
+
 @pytest.mark.parametrize(
     ("q_shape", "top_k", "match"),
     [
