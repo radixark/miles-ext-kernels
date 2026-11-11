@@ -33,7 +33,7 @@ of both variants for one hidden size, so that no call compiles; constructing the
 architecture needs a CUDA 13.4 or newer toolkit to build its kernels.
 
 On SM107a, hidden size 4096 also launches programs with more shared memory per block than the standard opt-in
-(232448 B): ``det``'s backward above 4096 tokens and ``fast``'s from 4097 to 24064 tokens. They run in CUDA 13.4's
+(232448 B): ``det``'s backward above 4096 tokens and ``fast``'s from 4097 to 65536 tokens. They run in CUDA 13.4's
 oversized shared-memory mode, which needs a CUDA runtime of 13.4 or newer in the process (an older one, such as the
 CUDA 13.0 runtime wheel of a ``cu130`` torch, rejects the mode at the launch) and a driver whose oversized ceiling
 holds them. Where the process cannot launch them, the module's construction on that device, :func:`check_supported`,

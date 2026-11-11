@@ -83,7 +83,7 @@ def _ops():
 
 
 # The programs that launch in CUDA 13.4's oversized shared-memory mode: on SM107a, det's backward reduce above 4096
-# tokens and its copy in fast's backward from 4097 to 24064 tokens, both at hidden size 4096.
+# tokens and its copy in fast's backward from 4097 to 65536 tokens, both at hidden size 4096.
 OVERSIZED = {
     ("sm_107a", 4096): (
         ("cake_rmsnorm_det_train_10e24516314c244771f4_sm_107a", 271360),
