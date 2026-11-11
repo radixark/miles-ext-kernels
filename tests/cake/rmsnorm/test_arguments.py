@@ -78,7 +78,7 @@ def test_an_explicit_variant_is_kept(variant):
 def test_explicit_fast_under_deterministic_mode_is_rejected():
     args = _parse([VARIANT, "fast"], linear_attention_input_norm="cake", deterministic_mode=True)
 
-    with pytest.raises(ValueError, match="--cake-rmsnorm-variant fast is not bit-reproducible"):
+    with pytest.raises(ValueError, match="--cake-rmsnorm-variant fast is not the det variant"):
         miles_ext_kernels.validate_args(args)
 
 
@@ -113,7 +113,7 @@ def test_configure_under_deterministic_mode_runs_det_and_rejects_fast():
     cake.configure(deterministic_mode=True)
     assert cake.variant("rmsnorm") == "det"
 
-    with pytest.raises(ValueError, match="not bit-reproducible"):
+    with pytest.raises(ValueError, match="not the det variant"):
         cake.configure(cake_rmsnorm_variant="fast", deterministic_mode=True)
 
 

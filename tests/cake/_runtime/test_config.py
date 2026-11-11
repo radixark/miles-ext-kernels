@@ -133,7 +133,7 @@ def test_a_single_cli_choice_reaches_every_process(monkeypatch, deterministic, v
 
 
 def test_deterministic_mode_rejects_an_explicit_fast(synth):
-    with pytest.raises(ValueError, match="--cake-synth-variant fast is not bit-reproducible under --deterministic"):
+    with pytest.raises(ValueError, match="--cake-synth-variant fast is not the det variant that --deterministic"):
         _validated(["--synth-backend", "cake", VARIANT, "fast", "--deterministic-mode"])
 
 
@@ -228,8 +228,8 @@ def test_none_is_unset(synth):
     [
         ({"cake_synth_variant": "fastest"}, r"--cake-synth-variant must be one of \('det', 'fast'\)"),
         ({"cake_synth_typo": 1}, "unknown cake option 'cake_synth_typo'"),
-        ({"cake_synth_variant": "fast", "deterministic_mode": True}, "not bit-reproducible"),
-        ({"cake_synth_variant": "fast", "backend": SimpleNamespace(deterministic_mode=True)}, "not bit-reproducible"),
+        ({"cake_synth_variant": "fast", "deterministic_mode": True}, "not the det variant"),
+        ({"cake_synth_variant": "fast", "backend": SimpleNamespace(deterministic_mode=True)}, "not the det variant"),
     ],
 )
 def test_configure_rejects(synth, values, error):

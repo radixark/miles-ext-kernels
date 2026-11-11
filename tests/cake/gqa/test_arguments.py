@@ -154,7 +154,7 @@ def test_configure_holds_the_deterministic_rules_and_the_option():
     cake.configure(deterministic_mode=True)
     with pytest.raises(ValueError, match=NO_DET):
         cake.variant("gqa")
-    with pytest.raises(ValueError, match="fast is not bit-reproducible under --deterministic-mode"):
+    with pytest.raises(ValueError, match="fast is not the det variant that --deterministic-mode runs"):
         cake.configure(cake_gqa_variant="fast", deterministic_mode=True)
     with pytest.raises(ValueError, match="must be one of"):
         cake.configure(cake_gqa_variant="det")

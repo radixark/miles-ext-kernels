@@ -89,7 +89,7 @@ def test_configure_reaches_fast_for_direct_callers_but_not_in_deterministic_mode
     assert cake.variant("dense_gemm") == "det"  # never configured
     cake.configure(cake_dense_gemm_variant="fast")
     assert cake.variant("dense_gemm") == "fast"
-    with pytest.raises(ValueError, match="not bit-reproducible under --deterministic-mode"):
+    with pytest.raises(ValueError, match="not the det variant that --deterministic-mode runs"):
         cake.configure(cake_dense_gemm_variant="fast", deterministic_mode=True)
     with pytest.raises(ValueError, match="must be one of"):
         cake.configure(cake_dense_gemm_variant="nd")

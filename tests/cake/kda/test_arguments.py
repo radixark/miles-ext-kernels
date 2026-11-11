@@ -111,7 +111,7 @@ def test_direct_callers_configure_either_variant():
 
 
 def test_deterministic_mode_rejects_an_explicit_fast():
-    with pytest.raises(ValueError, match="--cake-kda-variant fast is not bit-reproducible"):
+    with pytest.raises(ValueError, match="--cake-kda-variant fast is not the det variant"):
         cake.configure(cake_kda_variant="fast", deterministic_mode=True)
     with pytest.raises(ValueError, match="must be one of"):
         cake.configure(cake_kda_variant="nd")

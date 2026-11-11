@@ -71,7 +71,9 @@ def test_an_explicit_variant_is_kept_outside_deterministic_mode(variant):
 
 def test_explicit_fast_is_rejected_under_deterministic_mode_and_det_is_kept():
     # deterministic mode runs det: an explicit fast is refused there
-    with pytest.raises(ValueError, match="--cake-mhc-variant fast is not bit-reproducible under --deterministic-mode"):
+    with pytest.raises(
+        ValueError, match="--cake-mhc-variant fast is not the det variant that --deterministic-mode runs"
+    ):
         miles_ext_kernels.validate_args(_parse([FLAG, "fast"], mhc_backend="cake", deterministic_mode=True))
 
     args = _parse([FLAG, "det"], mhc_backend="cake", deterministic_mode=True)
@@ -129,9 +131,9 @@ def test_configure_in_deterministic_mode_without_a_variant_runs_det(args):
 
 
 def test_configure_in_deterministic_mode_rejects_an_explicit_fast():
-    with pytest.raises(ValueError, match="--cake-mhc-variant fast is not bit-reproducible"):
+    with pytest.raises(ValueError, match="--cake-mhc-variant fast is not the det variant"):
         cake.configure(argparse.Namespace(deterministic_mode=True, cake_mhc_variant="fast"))
-    with pytest.raises(ValueError, match="--cake-mhc-variant fast is not bit-reproducible"):
+    with pytest.raises(ValueError, match="--cake-mhc-variant fast is not the det variant"):
         cake.configure({"deterministic_mode": True}, cake_mhc_variant="fast")
 
 
