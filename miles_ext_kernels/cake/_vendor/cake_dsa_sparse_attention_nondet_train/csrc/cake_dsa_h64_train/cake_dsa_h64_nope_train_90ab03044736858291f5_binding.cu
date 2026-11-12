@@ -118,7 +118,7 @@ CUtensorMap EncodeTma_q_latent(const TensorView& t) {
       << KERNEL_NAME << ": descriptor 'q_latent' requires (CMod(d1, 64) == 0)";
   cuuint64_t global_dim[4] = {Extent(64LL, "q_latent"), Extent(d2, "q_latent"), Extent(CDiv(d1, 64LL), "q_latent"), Extent(d3, "q_latent")};
   cuuint64_t global_strides[3] = {Stride(s2, "q_latent"), Stride(128LL, "q_latent"), Stride(s3, "q_latent")};
-  cuuint32_t box_dim[4] = {64u, 64u, 1u, 1u};
+  cuuint32_t box_dim[4] = {64u, 16u, 1u, 1u};
   cuuint32_t elem_strides[4] = {1u, 1u, 1u, 1u};
   const bool allow_oob_box[4] = {false, false, false, false};
   for (int axis = 0; axis < 4; ++axis) {
@@ -153,7 +153,7 @@ CUtensorMap EncodeTma_dout(const TensorView& t) {
       << KERNEL_NAME << ": descriptor 'dout' requires (CMod(d1, 64) == 0)";
   cuuint64_t global_dim[4] = {Extent(64LL, "dout"), Extent(d2, "dout"), Extent(CDiv(d1, 64LL), "dout"), Extent(d3, "dout")};
   cuuint64_t global_strides[3] = {Stride(s2, "dout"), Stride(128LL, "dout"), Stride(s3, "dout")};
-  cuuint32_t box_dim[4] = {64u, 64u, 1u, 1u};
+  cuuint32_t box_dim[4] = {64u, 16u, 1u, 1u};
   cuuint32_t elem_strides[4] = {1u, 1u, 1u, 1u};
   const bool allow_oob_box[4] = {false, false, false, false};
   for (int axis = 0; axis < 4; ++axis) {
@@ -188,7 +188,7 @@ CUtensorMap EncodeTma_dq_latent(const TensorView& t) {
       << KERNEL_NAME << ": descriptor 'dq_latent' requires (CMod(d1, 64) == 0)";
   cuuint64_t global_dim[4] = {Extent(64LL, "dq_latent"), Extent(d2, "dq_latent"), Extent(CDiv(d1, 64LL), "dq_latent"), Extent(d3, "dq_latent")};
   cuuint64_t global_strides[3] = {Stride(s2, "dq_latent"), Stride(128LL, "dq_latent"), Stride(s3, "dq_latent")};
-  cuuint32_t box_dim[4] = {64u, 64u, 1u, 1u};
+  cuuint32_t box_dim[4] = {64u, 16u, 1u, 1u};
   cuuint32_t elem_strides[4] = {1u, 1u, 1u, 1u};
   const bool allow_oob_box[4] = {false, false, false, false};
   for (int axis = 0; axis < 4; ++axis) {
