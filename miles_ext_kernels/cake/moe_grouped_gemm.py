@@ -9,8 +9,8 @@ Ragged BF16 MoE grouped GEMM for SM100a / SM103a / SM107a: the expert projection
 
 Two variants. ``det`` reduces every output in a fixed order: the output and both gradients repeat bit for bit.
 ``fast`` gives ``det``'s forward and input-gradient bits (on SM100a its input gradient can take an L2 evict-first twin
-of ``det``'s program) and a weight gradient that, where it picks the 512-wide k tile, adds the split tail of its last
-wave with unordered FP32 reductions.
+of ``det``'s program) and a weight gradient that, where it picks the 512-wide k tile, reduces the split tail of its
+last wave in a fixed order within one launch (bit for bit run to run, not ``det``'s bits).
 
 miles selects the op with ``--moe-grouped-gemm-backend cake`` under ``--train-backend torchtitan``, and the variant
 with ``--cake-moe-grouped-gemm-variant``. The kernels address their outputs with 32-bit element offsets:

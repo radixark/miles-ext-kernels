@@ -12,19 +12,24 @@ shared by every token and head::
     rstd = 1 / sqrt(mean(x^2) + eps)                     # FP32
     y    = bf16(((x * rstd) * weight) * silu(z))         # FP32, one rounding
 
-``det`` runs FlashInfer's deterministic package (``_vendor/cake_rmsnorm_silu_gate_det_train``): the weight
-gradient is summed in FP32 per CTA chunk and in FP64 across the chunks in an order fixed by the row count, so it is
-bitwise reproducible. ``fast`` runs the non-deterministic package (``_vendor/cake_rmsnorm_silu_gate_nondet_train``):
-the same forward arithmetic (``y`` is ``det``'s bits) and a one-kernel backward whose ``dx`` and ``dz`` are ``det``'s
-bits. Above 256 rows its threads fold the weight-gradient terms of at most 16 rows at a time in FP32 into FP64 column
-sums, and its CTAs add those sums to FP64 accumulators with atomics; on sm_100a from 800 and on sm_103a from 700 rows
-per SM up to 12000, the backward keeps the folded runs and a CTA's column sums as FP32 two-sum pairs (a sum and its
-rounding error) instead, converted to FP64 once per column for the atomic add (flashinfer-ai/flashinfer#8840 and
-#8785). The order of those additions depends on scheduling, so the weight gradient may differ between runs, within
-``det``'s bound ``|dw| * 2^-7 + sum|terms| * 2^-20`` while the gate, the terms and the sums are FP32 normal numbers or
-zero. Up to 256 rows one cluster of 16 CTAs adds its CTAs' FP32 partials in a fixed order in FP64, the same bits on
-every call. ``fast`` serves every call ``det`` serves; while ``torch.use_deterministic_algorithms(True)`` is in
-effect, which its backward refuses, a call runs ``det`` and logs it once.
+``det`` runs FlashInfer's deterministic package (``_vendor/cake_rmsnorm_silu_gate_det_train``): one forward and one
+backward kernel. The backward adds each chunk's weight-gradient terms, FP32 runs folded into two-sum pairs, exactly
+into fixed-point digits with integer atomics and rounds the sum once, so the weight gradient is the same bits for the
+same rows on a device of the same SM count; from 2560 rows per SM on sm_100a and sm_103a and 1536 on sm_107a, packed
+rows run a look-ahead program of the same bits. ``fast`` runs the non-deterministic package
+(``_vendor/cake_rmsnorm_silu_gate_nondet_train``), which picks a program by the rows per SM and the layout
+(``cake_jit.module_for_rows``): its ``y``, ``dx`` and ``dz`` repeat bit for bit for the same inputs and layout on
+the same device and stay within one BF16 ulp of FP64. Its programs may associate a row's sum of squares differently,
+so ``y``'s bits can differ between row-count bands and between layouts, and ``fast``'s bits need not be ``det``'s
+(the package documents ``det``'s bits only for the pipelined forwards' ``y`` where ``det``'s gate does not flush, and
+for the fused and the repeatable backwards' ``dx`` and ``dz``). Its weight gradient is a fixed-order on-chip sum up to
+256 rows (512 on sm_100a and sm_107a) and ``det``'s exact sum in the repeatable bands (past the fused band, and on
+sm_107a also from 513 rows up to 64 rows per SM); in the fused band, up to 1000 rows per SM on sm_100a
+and sm_103a and from 64 to 256 on sm_107a, its CTAs add FP32 two-sum runs to FP64 accumulators with atomics
+(flashinfer-ai/flashinfer#9182). The order of those additions depends on scheduling, so there the weight gradient may
+differ between runs, within ``det``'s bound ``|dw| * 2^-7 + sum|terms| * 2^-20``. ``fast`` serves every call ``det``
+serves; while ``torch.use_deterministic_algorithms(True)`` is in effect, which its fused backward refuses, a call runs
+``det`` and logs it once.
 
 A call reads the configured variant (``miles_ext_kernels.cake.configure``) when its forward runs; its backward runs
 the same package. :func:`prebuild` builds the libraries of both packages for a device, so no call compiles.
@@ -106,9 +111,9 @@ def prebuild(*, device=None, max_workers: int | None = None) -> list[Path]:
     """Build (or find in the cache) every library of both variants' packages for the architecture of ``device``
     (default: the current CUDA device); returns their cache paths. Idempotent.
 
-    Every route of both packages on that architecture is built: the forwards and backwards of every row-count tier
-    (short, regular, mid, long, extra-long) and both weight-gradient dtypes, so no call of any shape compiles
-    afterwards.
+    Every route of both packages on that architecture is built: the forwards and backwards of every row-count band
+    and layout (the tiny, short, pipelined, mid, long and extra-long forwards; the small-row, fused, repeatable and
+    long backwards) and both weight-gradient dtypes, so no call of any shape compiles afterwards.
     ``NotImplementedError`` for an unsupported device, ``RuntimeError`` for a toolkit too old for it.
     """
     arch = loader.device_arch(device)
@@ -123,7 +128,8 @@ def prebuild(*, device=None, max_workers: int | None = None) -> list[Path]:
 def release() -> None:
     """Nothing to drop: the packages keep no plans or graphs.
 
-    The non-deterministic package keeps one zero-filled 4104-byte workspace per stream and backward module, and a
+    Each package keeps the zero-filled workspaces of the streams its backward ran on (``det``: 18952 bytes per stream;
+    ``fast``: one per stream and backward module, 29192 bytes on sm_100a and sm_103a and 36360 on sm_107a) and a
     reserve of zero-filled workspaces that CUDA graphs captured with it hold for good; they stay in place.
     """
 
@@ -133,9 +139,10 @@ def rmsnorm_silu_gate(x: torch.Tensor, z: torch.Tensor, weight: torch.Tensor, ep
 
     ``x`` and ``z``: BF16 of one ``[..., 128]`` shape. A gate that is a column slice of a wider projection is read in
     place when its last stride is 1, its storage offset and token and head strides are multiples of 16 elements and
-    its storage is 32-byte aligned, else copied once (per call; the result is the same bits either way). ``weight``:
-    BF16 ``[128]``, shared by every token and head of the call. Returns BF16 ``y`` of ``x``'s shape; the weight
-    gradient comes in BF16. The autograd node saves only ``x``, ``z`` and ``weight``.
+    its storage is 32-byte aligned, else copied once (per call). ``det`` gives the same bits either way; for ``fast``
+    a copied gate can select another forward program, so ``y`` may differ in its last bits (within one BF16 ulp of
+    FP64). ``weight``: BF16 ``[128]``, shared by every token and head of the call. Returns BF16 ``y`` of ``x``'s
+    shape; the weight gradient comes in BF16. The autograd node saves only ``x``, ``z`` and ``weight``.
 
     The weight gradient sums over the rows of this call only. Under tensor parallelism each rank normalizes its own
     heads with the same replicated ``weight``, so the caller all-reduces the weight gradient over the tensor-parallel

@@ -12,22 +12,29 @@ int32 device ``cu_seqlens_q`` / ``cu_seqlens_k`` (``cu[0] = 0``, non-decreasing,
 ``j <= i + k_len - q_len`` (FlashAttention's bottom-right alignment); a row that sees no key gets a zero output and a
 zero gradient.
 
-``max_seqlen_k``. The backward main kernel runs one CTA pair per 128 keys of ``max_seqlen_k``, per key/value head and
-segment, and a pair past its segment's last key block retires at once. A value below the longest segment's key count
-leaves key blocks out: their dK / dV are never written and their dQ terms are missing, without an error. A larger value
-is correct but launches pairs that only retire, which slows the backward down the more segments a call packs (``T_k``
-is always correct, and the slowest). The kernels never read the boundaries on the host, so only the caller keeps this
-contract; the option ``cake_gqa_check_seqlens`` (``--cake-gqa-check-seqlens``) checks it at every call, at the price
-of one device synchronization.
+``max_seqlen_k``. The backward main kernel runs one CTA pair per 128 keys of ``max_seqlen_k`` (the key blocks rounded
+up to an even count, in workspace chunks), per key/value head and segment, and a pair past its segment's last key
+block retires at once. A value below the longest segment's key count leaves key blocks out: their dK / dV are never
+written and their dQ terms are missing, without an error. A larger value is correct but launches pairs that only
+retire, which slows the backward down the more segments a call packs (``T_k`` is always correct, and the slowest). The
+kernels never read the boundaries on the host, so only the caller keeps this contract; the option
+``cake_gqa_check_seqlens`` (``--cake-gqa-check-seqlens``) checks it at every call, at the price of one device
+synchronization.
 
-Numerics. FP32 accumulation throughout, P and dS rounded to BF16 only as MMA operands. The output, the LSE and the BF16
-dK / dV repeat bit for bit run to run, whatever valid ``max_seqlen_k`` is given; dQ is summed in FP32 with atomic adds,
-one partial per 128-key block in a scheduling order, and rounded to BF16 once, so it is not reproducible bit for bit.
+Numerics. FP32 accumulation throughout, P and dS rounded to BF16 only as MMA operands. The main kernel stores dS^T to a
+workspace and sums dK / dV of its key block in tensor memory; dQ is a GEMM over that workspace, written as BF16. No sum
+uses atomics, so every output (the output, the LSE, dQ and the BF16 dK / dV) repeats bit for bit run to run for one
+shape and one ``max_seqlen_k``, and the backward raises no PyTorch determinism alert. ``max_seqlen_k`` sets the
+workspace chunks and with them the rounding of dQ; the output, the LSE and dK / dV do not depend on it.
 
 Memory. Each backward takes its scratch (FP32 ``[H_q / 2, rows_pad, 256]`` and two ``[H_q / 2, rows_pad]``,
 ``rows_pad = round_up(2 T_q + 128 B, 128)``) from the runtime's workspace pool on the current stream, and each forward
-zeroes a fresh ``uint32`` tile counter; autograd saves ``(q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k)`` and scalars
-only. Every launch is a plain launch on the current stream, and nothing synchronizes the device.
+zeroes a fresh ``uint32`` tile counter. Each backward also takes its dS^T workspace (a 32 KiB tile per 128 keys, 64
+query rows and two query heads; within the vendored default budget of 16 GiB, run in chunks past it, unless one
+key/value head and two key blocks exceed it) and its tile tables from PyTorch's caching allocator on the current
+stream, and frees them when it returns. Autograd saves ``(q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k)`` and scalars
+only. Every launch is a plain launch: the tile tables are built on a high-priority side stream joined back by CUDA
+events, the rest on the current stream, and nothing synchronizes the device.
 """
 
 from __future__ import annotations
@@ -56,8 +63,10 @@ __all__ = [
 OP = "gqa"
 PACKAGE = "cake_gqa_nondet_train"
 HEAD_DIM = cake_backend.HEAD_DIM
-# The stages one forward and backward of varlen_gqa_attention launch (BF16 dK / dV), in launch order.
-STAGES = ("fwd", "bwd_pre", "bwd_bf16", "bwd_post")
+# The stages one forward and backward of varlen_gqa_attention launch (BF16 dK / dV), in the vendored order of
+# cake_jit.STAGES; past cake_jit.PLAN_MAX_PAIRS Q-tile pairs the vendored backward builds the tile tables of bwd_plan
+# with PyTorch ops.
+STAGES = ("fwd", "bwd_pre", "bwd_plan", "bwd_main_bf16", "bwd_dq")
 
 
 def libraries(arch: str) -> list[str]:
@@ -68,13 +77,14 @@ def libraries(arch: str) -> list[str]:
 def prebuild(*, device: Any = None, max_workers: int | None = None) -> list[Path]:
     """Build the libraries of :data:`STAGES` for the architecture of ``device`` (default: the current one).
 
-    No model parameter: every head layout, length and option runs these four libraries.
+    No model parameter: every head layout, length and option runs these five libraries.
     """
     return loader.prebuild_libraries(PACKAGE, libraries(loader.device_arch(device)), max_workers=max_workers)
 
 
 def release() -> None:
-    """Nothing to drop here: the backward scratch lives in the runtime's workspace pool, the tile counter per call."""
+    """Nothing to drop here: the backward scratch lives in the runtime's workspace pool, the tile counter and the dS^T
+    workspace per call."""
 
 
 class PoolWorkspace:
@@ -82,8 +92,11 @@ class PoolWorkspace:
 
     :meth:`tile_counter` is the forward's zeroed ``uint32`` ticket counter, new at every call (the kernel leaves it
     zero). :meth:`scratch` is the backward's ``(dq_accum, lse_log2, dpsum)``: views of one buffer of the workspace
-    pool, key ``("gqa", "bwd_scratch")``, on the current stream.
+    pool, key ``("gqa", "bwd_scratch")``, on the current stream. :attr:`budget_bytes` bounds the dS^T workspace of one
+    backward: the vendored default, so the chunks, and with them the dQ bits, are those the vendored package selects.
     """
+
+    budget_bytes = cake_jit.DEFAULT_WORKSPACE_BUDGET
 
     def __init__(self, device: torch.device) -> None:
         self.device = device
@@ -182,10 +195,10 @@ def varlen_gqa_attention(
 
     Raises ``ValueError`` for operands the kernels do not take (dtype, head dim, an odd query group, strides, the
     boundary vectors) and in a process configured for deterministic mode (there is no ``det`` variant),
-    ``TypeError`` when ``max_seqlen_k`` is not an int, ``RuntimeError`` on another GPU. The backward raises PyTorch's
-    alert (a ``RuntimeError``; a ``UserWarning`` with ``warn_only=True``, then it runs) while
-    ``torch.use_deterministic_algorithms(True)`` is in effect. With the option ``cake_gqa_check_seqlens`` it also
-    checks the boundaries and ``max_seqlen_k`` on the host (:func:`check_seqlens`).
+    ``TypeError`` when ``max_seqlen_k`` is not an int, ``RuntimeError`` on another GPU. Under
+    ``torch.use_deterministic_algorithms(True)`` it neither raises nor warns: every output repeats bit for bit. With
+    the option ``cake_gqa_check_seqlens`` it also checks the boundaries and ``max_seqlen_k`` on the host
+    (:func:`check_seqlens`).
     """
     config.variant(OP)  # "fast", the only variant; raises in a process configured for deterministic mode
     if isinstance(max_seqlen_k, bool) or not isinstance(max_seqlen_k, int):

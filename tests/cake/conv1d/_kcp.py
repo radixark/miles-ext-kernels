@@ -103,11 +103,13 @@ def _near_equal(total: int, n: int) -> list[tuple[int, int]]:
 
 
 def partition_stand_in(cu_seqlens, world_size: int, layout: str = "contiguous", fragments=None):
-    """A partition of the pack over ``world_size`` ranks with the fields the tests read (``world_size``,
-    ``fragments[rank]`` of ``doc`` / ``off`` / ``length`` in document, then offset order): ``layout``
-    ``"contiguous"`` (near-equal token intervals), ``"zigzag"`` (``2 W`` near-equal intervals, rank ``r`` holding
-    ``r`` and ``2 W - 1 - r``), ``"zigzag_per_document"`` (the same per document), or the explicit per-rank
-    ``(doc, off, length)`` tables ``fragments``."""
+    """A partition of the pack over ``world_size`` ranks with the fields the tests and the ``fast`` route's
+    rank-agreement check read (``world_size``, ``layout``, ``cu_seqlens``, ``fragments[rank]`` of ``doc`` / ``off`` /
+    ``length`` / ``rank`` / ``slot`` in document, then offset order).
+
+    ``layout``: ``"contiguous"`` (near-equal token intervals), ``"zigzag"`` (``2 W`` near-equal intervals, rank ``r``
+    holding ``r`` and ``2 W - 1 - r``) or ``"zigzag_per_document"`` (the same per document). ``fragments``: explicit
+    per-rank ``(doc, off, length)`` tables instead; the partition's ``layout`` is then ``"explicit"``."""
     cu = [int(c) for c in cu_seqlens]
     W = int(world_size)
     if fragments is not None:
@@ -132,10 +134,14 @@ def partition_stand_in(cu_seqlens, world_size: int, layout: str = "contiguous", 
                 if hi > lo:
                     per_rank[r].append((d, lo - cu[d], hi - lo))
     table = tuple(
-        tuple(types.SimpleNamespace(doc=d, off=off, length=length) for d, off, length in sorted(entries) if length > 0)
-        for entries in per_rank
+        tuple(
+            types.SimpleNamespace(doc=d, off=off, length=length, rank=r, slot=slot)
+            for slot, (d, off, length) in enumerate(entry for entry in sorted(entries) if entry[2] > 0)
+        )
+        for r, entries in enumerate(per_rank)
     )
-    return types.SimpleNamespace(world_size=W, cu_seqlens=tuple(cu), fragments=table)
+    layout = "explicit" if fragments is not None else layout
+    return types.SimpleNamespace(world_size=W, layout=layout, cu_seqlens=tuple(cu), fragments=table)
 
 
 def build_stand_in_context(part, group, rank: int, device, conv_kernel_size: int = WIDTH):
@@ -219,6 +225,7 @@ def build_stand_in_context(part, group, rank: int, device, conv_kernel_size: int
         n_tail_rows=sum(bwd_recv),
     )
     return types.SimpleNamespace(
+        partition=part,
         rank=rank,
         world_size=W,
         group=group,

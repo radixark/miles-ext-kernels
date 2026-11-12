@@ -91,7 +91,7 @@ def test_the_typed_config_carries_deterministic_mode_too():
 def test_explicit_fast_under_deterministic_mode_is_rejected():
     args = _parse([VARIANT, "fast"], linear_attention_conv_backend="cake", deterministic_mode=True)
 
-    with pytest.raises(ValueError, match="--cake-conv1d-variant fast is not bit-reproducible"):
+    with pytest.raises(ValueError, match="--cake-conv1d-variant fast is not the det variant"):
         miles_ext_kernels.validate_args(args)
 
 
@@ -171,7 +171,7 @@ def test_miles_command_line_reaches_every_process(argv, miles_args, variant):
 def test_configure_rejects_an_unknown_variant_and_fast_in_deterministic_mode():
     with pytest.raises(ValueError, match="--cake-conv1d-variant must be one of"):
         cake.configure(cake_conv1d_variant="exact")
-    with pytest.raises(ValueError, match="not bit-reproducible"):
+    with pytest.raises(ValueError, match="not the det variant"):
         cake.configure(cake_conv1d_variant="fast", deterministic_mode=True)
     cake.configure(deterministic_mode=True)
     assert cake.variant("conv1d") == "det"

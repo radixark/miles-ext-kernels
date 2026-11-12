@@ -22,7 +22,7 @@ OP = OpSpec(
     name="gated_act_mxfp8",
     summary="fused SwiGLU + MXFP8 quantization, forward + backward, BF16 [M, 2K] gate / up input",
     variants=("det",),
-    packages=("cake_gated_act_mxfp8_backend",),
+    packages=("cake_gated_act_mxfp8_det_train",),
     exports=("silu_and_mul_mxfp8_quantize", "silu_and_mul_mxfp8_quantize_backward"),
 )
 

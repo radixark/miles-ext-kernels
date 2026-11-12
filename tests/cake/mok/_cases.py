@@ -5,8 +5,9 @@ A problem follows FlashInfer's ``examples/mok_training_features.py``: hidden 512
 macro-batch 768 rows (so backward replays the forward ring), unequal source counts with an empty rank, random distinct
 expert ids (or, with ``routing="empty"``, ids among the first top-k experts only, so the others are empty) and positive
 scores; layouts ``(local experts, top-k)``: (4, 2) at EP 1, (64, 8) at EP 4 (256 experts), (36, 8) at EP 8 (288). An
-iteration is ``build_schedule``, ``forward``, optionally ``recompute_forward_context`` in place of the saved context,
-and ``backward``; its nine outputs are ``y``, ``dx``, ``dscores``, the routed and the shared weight gradients.
+iteration is ``build_schedule``, ``forward``, optionally ``recompute_forward_context`` in place of the saved context
+(the ``context-free`` cases: after ``forward(..., save_context=False)``, which saves none), and ``backward``; its nine
+outputs are ``y``, ``dx``, ``dscores``, the routed and the shared weight gradients.
 
 Checks of a case:
 
@@ -23,12 +24,12 @@ Checks of a case:
   BF16 (``clamp_decision``), where a 2 % scale must fail. (MXFP8: the routed-dependent ones keep FlashInfer's bound.)
 - FlashInfer's own acceptance: the BF16 cases elementwise within ``1e-2 + 1e-2 * |reference|`` of the BF16 reference;
   the MXFP8 cases within its relative L2 bounds of FP32 over the group and away from the BF16 run.
-- determinism: two eager runs and two CUDA graph replays equal bit for bit; a checkpointed iteration equal to the
-  saved-context one; another fixed communication-SM split, and a fixed split that differs between the ranks (no
-  imbalance switch), equal bit for bit; an empty rank's shared gradients zero. The workspace keeps FlashInfer's
-  imbalance-aware split (``"auto"``; ``precision`` selects its row): on GPUs with a row, routing that sends every row
-  to one rank switches the split per rank, from the latest load observation that has completed, so every run above
-  may launch with other splits than the run it is compared with.
+- determinism: two eager runs and two CUDA graph replays equal bit for bit; a checkpointed iteration (its forward
+  context-free or not) equal to the saved-context one; another fixed communication-SM split, and a fixed split that
+  differs between the ranks (no imbalance switch), equal bit for bit; an empty rank's shared gradients zero. The
+  workspace keeps FlashInfer's imbalance-aware split (``"auto"``; ``precision`` selects its row): on GPUs with a row,
+  routing that sends every row to one rank switches the split per rank, from the latest load observation that has
+  completed, so every run above may launch with other splits than the run it is compared with.
 
 ``digest`` is the SHA-256 of the nine outputs' bytes, for run-to-run comparisons across processes.
 """
@@ -60,6 +61,13 @@ CASES = {
     "bf16-recompute": {"recompute": True},
     "bf16-fp32-wgrad": {"fp32_wgrad": True},
     "bf16-clamped-recompute-fp32-wgrad": {"swiglu_limit": LIMIT, "recompute": True, "fp32_wgrad": True},
+    "bf16-context-free": {"recompute": True, "save_context": False},
+    "bf16-clamped-context-free-fp32-wgrad": {
+        "swiglu_limit": LIMIT,
+        "recompute": True,
+        "save_context": False,
+        "fp32_wgrad": True,
+    },
     "mxfp8": {"mxfp8": True},
     "mxfp8-fp32-wgrad": {"mxfp8": True, "fp32_wgrad": True},
     "mxfp8-clamped-recompute": {"mxfp8": True, "swiglu_limit": MXFP8_LIMIT, "recompute": True},
@@ -178,14 +186,17 @@ class Problem:
         return self._mxfp8
 
     def iteration(self, name: str, *, recompute: bool | None = None, config=None) -> Iteration:
+        """Case ``name``; ``recompute=False`` is its saved-context iteration (its forward saves the context)."""
         case = CASES[name]
+        recompute = case.get("recompute", False) if recompute is None else recompute
         return Iteration(
             self,
             config or self.config,
             swiglu_limit=case.get("swiglu_limit"),
             mxfp8=case.get("mxfp8", False),
             fp32_wgrad=case.get("fp32_wgrad", False),
-            recompute=case.get("recompute", False) if recompute is None else recompute,
+            recompute=recompute,
+            save_context=case.get("save_context", True) or not recompute,
         )
 
     def other_split(self):
@@ -220,13 +231,13 @@ class Problem:
 
 class Iteration:
     """One schedule + forward (+ recompute) + backward, eager or CUDA-graph captured (FlashInfer's
-    ``TrainingIteration``)."""
+    ``TrainingIteration``); ``save_context=False`` runs the context-free forward, which returns no context."""
 
-    def __init__(self, problem: Problem, config, *, swiglu_limit, mxfp8, fp32_wgrad, recompute):
+    def __init__(self, problem: Problem, config, *, swiglu_limit, mxfp8, fp32_wgrad, recompute, save_context=True):
         self.p, self.config = problem, config
-        self.limit, self.recompute = swiglu_limit, recompute
+        self.limit, self.recompute, self.save_context = swiglu_limit, recompute, save_context
         self.functional = problem.adapters[fp32_wgrad]
-        self.functional.prepare(swiglu_limit, mxfp8)
+        self.functional.prepare(swiglu_limit, mxfp8, save_context=save_context)
         self.functional.prepare_recompute(swiglu_limit, mxfp8)
         weights = problem.weights
         if mxfp8:
@@ -244,8 +255,17 @@ class Iteration:
             p.workspace, self.config, p.ids, num_local_experts=p.local_experts
         )
         y, context = self.functional.forward(
-            self.config, p.workspace, self.schedule, p.x, p.scores, *w, swiglu_limit=self.limit
+            self.config,
+            p.workspace,
+            self.schedule,
+            p.x,
+            p.scores,
+            *w,
+            swiglu_limit=self.limit,
+            save_context=self.save_context,
         )
+        if not self.save_context:
+            assert context is None, "the context-free forward returned a context"
         if self.recompute:
             context = None
             context = self.functional.recompute_forward_context(

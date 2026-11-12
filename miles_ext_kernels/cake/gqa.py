@@ -12,12 +12,18 @@ alignment per segment. ``max_seqlen_k`` is a hard contract: a host int at least 
 the backward grid, so a smaller value leaves key blocks out of the backward and gives wrong dQ / dK / dV without an
 error (the output is unaffected). ``--cake-gqa-check-seqlens`` checks it, with the segment boundaries, at every call.
 
-One variant, ``fast``: the output, the LSE and dK / dV repeat bit for bit run to run, but dQ is summed with FP32
-atomic adds in a run-dependent order. There is no ``det`` variant, so ``--deterministic-mode`` rejects the op, and
-while ``torch.use_deterministic_algorithms(True)`` is in effect the backward raises PyTorch's alert (with
-``warn_only=True`` it warns and runs).
+One variant, ``fast``: no sum uses atomics, so the output, the LSE, dQ and dK / dV repeat bit for bit run to run for
+one shape and one ``max_seqlen_k``, and ``torch.use_deterministic_algorithms(True)`` raises no alert. There is no
+``det`` variant, so ``--deterministic-mode`` rejects the op.
 :func:`check_supported` and :func:`is_supported` tell, without torch, whether the kernels run a head layout; miles'
 argument validation applies them to the heads one tensor-parallel rank holds.
+
+Memory. Besides its pooled scratch, each backward allocates a BF16 dS^T workspace from PyTorch's caching allocator and
+frees it on return. All of dS^T takes 32 KiB times ``H_q / 2`` times the key blocks of ``max_seqlen_k`` (128 keys
+each, an even count) times ``(T_q + 63 B) // 64`` for ``B`` segments. Past the vendored default budget of 16 GiB the backward runs in
+chunks (one key/value head at a time, then key-block ranges) and allocates one chunk, within the budget unless one
+key/value head and two key blocks exceed it. One 32768-token sequence with 8 query and 2 key/value heads takes 8 GiB
+per backward. miles cannot lower the budget.
 
 miles selects the kernels with ``--full-attention-backend cake``. Importing this module imports neither torch nor the
 implementation.

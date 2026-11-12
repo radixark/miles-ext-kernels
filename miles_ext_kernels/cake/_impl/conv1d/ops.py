@@ -162,14 +162,19 @@ def check_supported(channels: int, kernel_size: int, activation: str, device=Non
 
 def _libraries(package: ModuleType, arch: str, bf16_taps: bool) -> list[str]:
     """Every library of ``package`` a call may launch on ``arch``: the forward route of the taps' dtype, the backward
-    routes of both SiLU' policies (each program with its fixed-order reduce program, if any), and every program of
-    the context-parallel route (forward, head-row and main backward programs, both launch forms of the backward)."""
+    routes of both SiLU' policies (each program with its fixed-order reduce program, if any), the single-rank forward
+    route the context-parallel forward runs as its main program (FP32 taps, whatever the taps' dtype), and every
+    program of the context-parallel routes (forward, history-row, head-row, tail-row and main backward programs, every
+    launch form of the backward)."""
     jit = package.cake_jit
+    kcp = import_module(".kcp", package.__name__)
     names = []
     routes = [jit.forward_route(bias=False, bf16_taps=bf16_taps)]
     for fp32_grad in (False, True):
         routes.append(jit.backward_route(bias=False, fp32_grad=fp32_grad, bf16_taps_or_dweight=bf16_taps))
-    for route in routes:
+    if arch in kcp.FWD_MAIN_ARCHS | kcp.MULTI_FWD_MAIN_ARCHS:
+        routes.append(kcp.FWD_MAIN_ROUTE)
+    for route in dict.fromkeys(routes):
         for module in jit.route_modules(arch, route):
             names.append(jit.library_name(module, arch))
             reduce = jit.MODULES[module].get("reduce")  # the det backward's fixed-order reduce program
@@ -278,9 +283,12 @@ def causal_conv1d_kcp(
     back in the order of the context's local ``cu_seqlens``. ``weight``: FP32 or BF16 ``[C, 4]`` taps, the same on
     every rank. ``kcp_context``: the rank's context of the layer's GDN or KDA context-parallel route, built with
     ``conv_kernel_size=4`` (this function reads its ``T_r``, ``n_frag``, ``cu_seqlens_local`` /
-    ``cu_seqlens_local_cpu``, ``halo``, ``halo_tables``, ``group``, ``world_size`` and calls its ``wait_ready()`` when
-    present). Every rank of the context's group calls this function for the same layers in the same order: the halo
-    exchange is a collective.
+    ``cu_seqlens_local_cpu``, ``halo``, ``halo_tables``, ``group``, ``world_size`` and, under ``fast`` with more than
+    one rank, ``partition``, and calls its ``wait_ready()`` when present). Every rank of the context's group calls this
+    function for the same layers in the same order: the halo exchange is a collective. Under ``fast`` with more than
+    one rank, the first exchange of each context and direction also checks that the ranks agree on the call (one
+    all-gather of the partition's fingerprint and a host synchronization), so it must not run inside a CUDA Graph
+    capture.
 
     Runs the configured variant; ``fast`` runs ``det`` while ``torch.use_deterministic_algorithms(True)`` is in
     effect. ``recompute_handle``: ``None``, or an object with an ``entries`` dict (for example the recompute handle
@@ -288,10 +296,10 @@ def causal_conv1d_kcp(
     ``torch.utils.checkpoint``'s recompute of this call skip the forward exchange: the original forward stores its
     history rows under the key ``"conv"``, the recompute reuses them, bitwise. One handle per call and micro-step,
     created outside the checkpointed region; every rank passes one or none. ``cooperative``: the launch form of
-    ``det``'s main backward program, ``None`` (the package default, one cooperative launch) or ``True``, or ``False``
-    (an ordinary launch one SM short of co-resident and a fixed-order reduce program, which starts beside a kernel of
-    another stream; its weight-gradient bits differ from the cooperative form's). ``fast``'s backward is one ordinary
-    launch: it takes ``None`` or ``False``.
+    ``det``'s main backward program, ``None`` (the package default) or ``False`` (an ordinary launch one SM short of
+    co-resident and a fixed-order reduce program, which starts beside a kernel of another stream), or ``True`` (one
+    cooperative launch, which starts only when every CTA fits at once; its weight-gradient bits differ from the
+    ordinary form's). ``fast``'s backward is one ordinary launch: it takes ``None`` or ``False``.
 
     Returns BF16 ``y`` of ``x_local``'s shape. The backward returns BF16 ``dx`` and the rank's FP32 weight-gradient
     partial (in ``weight``'s dtype).

@@ -5,6 +5,9 @@ Needs torch and tvm_ffi (the implementation imports them); no GPU. CPU tensors r
 which refuses them, so a call that gets that far shows that the checks before it passed.
 """
 
+import inspect
+import re
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -14,7 +17,7 @@ from miles_ext_kernels import cake  # noqa: E402
 from miles_ext_kernels.cake import gqa  # noqa: E402
 from miles_ext_kernels.cake._impl.gqa import ops  # noqa: E402
 from miles_ext_kernels.cake._runtime import config, loader, workspace  # noqa: E402
-from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_jit  # noqa: E402
+from miles_ext_kernels.cake._vendor.cake_gqa_nondet_train import cake_backend, cake_jit  # noqa: E402
 
 NO_DET = "the cake gqa kernels have no det variant"
 REACHED_THE_KERNELS = "must be on q's CUDA device"
@@ -117,6 +120,18 @@ def test_the_backward_scratch_is_one_pooled_buffer_in_the_vendored_layout(pooled
     again = ops.PoolWorkspace(torch.device("cpu")).scratch(total_q, heads, segments)
     assert again[0].data_ptr() == base and workspace.stats()["cpu"]["hits"] == hits + 1
     assert cake.release() == nbytes and workspace.stats()["cpu"]["bytes"] == 0
+
+
+def test_the_pool_workspace_has_what_the_vendored_launches_read_of_a_workspace():
+    """The vendored forward and backward read their ``workspace`` as ``ws``: the pool workspace has every attribute
+    they read, and its dS^T budget is the vendored default (the chunks, and the dQ bits, the vendored package
+    selects)."""
+    read = set(re.findall(r"\bws\.(\w+)", inspect.getsource(cake_backend)))
+    pool = ops.PoolWorkspace(torch.device("cpu"))
+
+    assert read >= {"tile_counter", "scratch", "budget_bytes"}
+    assert [name for name in sorted(read) if not hasattr(pool, name)] == []
+    assert pool.budget_bytes == cake_backend.CakeGQANondetWorkspace("cuda:0").budget_bytes
 
 
 def test_at_the_default_bound_of_zero_the_backward_scratch_is_not_kept_and_release_frees_nothing():

@@ -128,7 +128,8 @@ def _resolve(spec: OpSpec, requested: str | None, deterministic: bool, *, cli: b
             raise ValueError(f"{spec.variant_flag} must be one of {choices}, not {requested!r}")
         if deterministic and requested == "fast":
             raise ValueError(
-                f"{spec.variant_flag} fast is not bit-reproducible under --deterministic-mode: use det or leave it unset"
+                f"{spec.variant_flag} fast is not the det variant that --deterministic-mode runs: "
+                "use det or leave it unset"
             )
         return requested
     if deterministic:

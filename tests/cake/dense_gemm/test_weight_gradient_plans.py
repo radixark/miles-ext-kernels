@@ -3,8 +3,9 @@ points (CPU torch; the plans also need tvm_ffi, no device).
 
 The deterministic package's ``cake_dense_gemm_det_train_projection_wgrad`` runs the GEMM in the orientation its
 ``wgrad_views`` gives the row (the transposed-store ``X.T @ G`` for a narrow ``D_out``); the non-deterministic
-package's ``cake_dense_gemm_nondet_train_projection_wgrad`` plans its split-K program on ``X.T @ G`` and runs the
-deterministic entry point's program on a row its planner does not take. The calls of ``batched_projection`` are
+package's ``cake_dense_gemm_nondet_train_projection_wgrad`` runs its stream-K program on a row of its
+``K1_WGRAD_SK_RULES_BY_SM``, else plans its split-K program on ``X.T @ G``, and runs a program of the deterministic
+package on a row its planner does not take. The calls of ``batched_projection`` are
 recorded on CPU tensors: only a single-head ``out_in`` weight gradient calls the weight-gradient entry point, on the
 ``[T, D]`` matrices; every other GEMM keeps its K1 call. On ``meta`` tensors, for every part and a sweep of token
 counts, the backward of ``batched_projection`` on an input slice of a wider head runs the deterministic entry point
@@ -209,8 +210,11 @@ def test_fast_reports_the_program_of_the_nondet_weight_gradient_entry_point(back
         for name, (d_in, d_out) in SINGLE_HEAD.items():
             for tokens in TOKENS:
                 g, x, dw = _meta(tokens, d_out), _meta(tokens, d_in), _meta(d_out, d_in)
-                plan, *_ = fast.plan_atomic_gemm(x.t(), g, dw, transposed_out=True, arch=arch, sm_count=sm_count)
-                want = None if plan is None else plan.template
+                # the entry point's stream-K table first, then its planner
+                want = fast.K1_WGRAD_SK_RULES_BY_SM.get((arch, sm_count), {}).get((d_in, d_out, tokens, "bf16"))
+                if want is None:
+                    plan, *_ = fast.plan_atomic_gemm(x.t(), g, dw, transposed_out=True, arch=arch, sm_count=sm_count)
+                    want = None if plan is None else plan.template
                 reported = fast_projection_programs(
                     1, d_in, d_out, weight_layout="out_in", tokens=tokens, arch=arch, sm_count=sm_count
                 )
@@ -218,5 +222,6 @@ def test_fast_reports_the_program_of_the_nondet_weight_gradient_entry_point(back
                 case = (arch, sm_count, name, tokens)
                 assert reported == {"forward": None, "input_grad": None, "weight_grad": want}, case
                 own.add(want)
-    # some rows run the package's split-K program and some its deterministic sibling
+    # some rows run the package's split-K or stream-K program and some its deterministic sibling
     assert None in own and len(own) > 1, own
+    assert any(template.startswith("dense_proj_gemm_sk_") for template in own - {None}), own

@@ -88,9 +88,9 @@ def test_an_explicit_variant_is_kept(variant):
 
 
 def test_explicit_fast_is_rejected_in_deterministic_mode():
-    with pytest.raises(ValueError, match=f"{VARIANT} fast is not bit-reproducible under --deterministic-mode"):
+    with pytest.raises(ValueError, match=f"{VARIANT} fast is not the det variant that --deterministic-mode runs"):
         _validated([VARIANT, "fast"], linear_attention_output_norm_backend="cake", deterministic_mode=True)
-    with pytest.raises(ValueError, match=f"{VARIANT} fast is not bit-reproducible"):
+    with pytest.raises(ValueError, match=f"{VARIANT} fast is not the det variant"):
         cake.configure(cake_gated_rmsnorm_variant="fast", deterministic_mode=True)
     cake.configure(deterministic_mode=True)
     assert cake.variant("gated_rmsnorm") == "det"

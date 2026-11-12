@@ -28,8 +28,7 @@ LAYERS = {
 }
 CASES = [(layer, proj) for layer in LAYERS for proj in ("w13", "w2")]
 # More than 4096 rows per group on average and K a multiple of 512: the weight gradient takes the 512-wide k tile,
-# whose split tail the fast variant adds with unordered reductions (one of the vendored package's shapes whose tail
-# splits on every SM count).
+# whose last wave splits its tail tiles (one of the vendored package's shapes whose tail splits on every SM count).
 K512_SIZES = (16400, 0, 16666)
 K512_SHAPE = (4864, 1024)  # (N, K)
 

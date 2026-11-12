@@ -51,7 +51,9 @@ ignored, as FLA does).
 
 ``--cake-gdn-recompute-state`` keeps the WY / state tensors (``w``, ``u``, ``h``, ``v_new``) off the autograd tape and
 recomputes them in the backward, on every package: the single-rank packages take it as ``save_state``, the KCP packages
-as ``save_mode`` (``"full"`` keeps the tapes, ``"light"`` replays them).
+as ``save_mode`` (``"full"`` keeps the tapes, ``"light"`` replays them).  ``"light"`` is passed explicitly to both KCP
+packages: the ``fast`` package's own default with the in-kernel q / k L2 norm, ``"light_akk"``, also keeps the BF16
+``Akk`` tape (``HV * 128`` B more per padded token row), which a memory-saving flag does not ask for.
 
 Host wiring of ``cake_gdn_fla_cp_det``: the chunk table is a pure function of the micro-batch's segment lengths, so it is
 built once per distinct layout from the host copy of ``cu_seqlens`` (``cu_seqlens_cpu``; no device-to-host
@@ -76,6 +78,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.utils.deterministic
 
 from miles_ext_kernels.cake._runtime import config, loader, registry, workspace
 
@@ -2113,8 +2116,8 @@ def _share_scratch(name: str) -> None:
     and under a positive bound one buffer per role and stream, freed by ``release()``.  Each role is taken once per
     forward or backward call on the caller's stream, never saved or returned, so one buffer per role and stream serves
     it.  The 0-element state placeholders (``f_zero_state`` / ``b_zero_state``) are this module's (:func:`_no_state`).
-    The package's self-zeroing buffers (``take_zeroed``, kept zero by every launch that uses them) stay with the
-    package: :func:`release` drops them.
+    The ``fast`` package's self-zeroing buffers (``take_zeroed``, kept zero by every launch that uses them) stay with
+    the package: :func:`release` drops them.
     """
     chain = _package(name).cake_chain
 
@@ -2157,6 +2160,10 @@ def _vendored_call(
     }
     if variant == "det":
         return package.cake_gdn_det(q, k, v, g, beta, **kwargs)
+    if torch.are_deterministic_algorithms_enabled() and torch.utils.deterministic.fill_uninitialized_memory:
+        # The package's two-stream backward allocates its outputs after it forks the side stream; torch then fills them
+        # on the caller's stream unordered with the side stream's writes. One stream keeps the same bits.
+        kwargs["streams"] = 1
     return package.cake_gdn_nondet(q, k, v, g, beta, **kwargs)
 
 
@@ -2526,12 +2533,14 @@ def prebuild(*, device: Any = None, max_workers: int | None = None) -> list[Path
 def release() -> None:
     """Drop what the gdn kernels keep between calls besides the workspace pool (which ``release`` empties itself): the
     chunk tables and plans of ``cake_gdn_fla_cp_det`` and its loaded launchers, the cached ``KcpContext`` objects, and
-    the self-zeroing buffers of the single-rank packages.  The packages' own chunk tables and plans (a few int32
+    the self-zeroing buffers of the single-rank ``fast`` package with its recorded backward plans, which hold them
+    (the single-rank ``det`` package keeps neither).  The packages' own chunk tables and other plans (a few int32
     tensors per layout) stay."""
     host_cache_clear()
     native.release()
     from . import kcp
 
     kcp.release()
-    for name in ("det", "fast"):
-        getattr(_package(name).cake_chain._POOLED, "zeroed", {}).clear()
+    chain = _package("fast").cake_chain
+    chain._POOLED.zeroed.clear()
+    chain._BWD_PLANS.clear()  # the package's own rule: no backward plan keeps a buffer the pool let go

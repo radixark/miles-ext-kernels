@@ -26,11 +26,14 @@ Variants. A call runs the variant configured when its forward runs (``config.var
 runs the variant of its forward. ``det`` runs the deterministic package. ``fast`` runs the non-deterministic package,
 which has the deterministic package's operations and dtypes and binds it as its sibling
 (``use_deterministic_backend``). Where its measured tables select the row for the device's architecture and SM count
-and the token count, it runs a program of its own: a split-K program for a K1 weight gradient, a stream-K or a
-short-token SIMT program for the router weight gradient, a short-token SIMT program for the router input gradient. A
-split-K or stream-K program adds its partials in the order they finish, so a gradient whose elements get more than
-two partials is not bit-reproducible run to run; a SIMT program stores every element once, with other bits than
-``det``'s. Every forward and every other gradient runs the deterministic program, with the plan and bits of ``det``.
+and the token count, it runs a program of its own: a split-K, multi-chain, cluster or stream-K program for a K1 weight
+gradient, a short-token SIMT or a K-order program for the router weight gradient, a short-token SIMT program for the
+router input gradient, and an input-gradient program with ``det``'s bits for the router forward (a 2-D K1 GEMM of the
+input-gradient layout). A split-K program adds its partials in the order they finish, so a gradient whose elements get
+more than two partials is not bit-reproducible run to run; the other programs give the same bits on every run
+(other bits than ``det``'s for the gradients they serve). In some token windows it runs the deterministic program of
+the router weight gradient at another split count than ``det``'s: other bits than ``det``'s, the same on every run.
+Every other forward and gradient has the bits of ``det``.
 :func:`fast_projection_programs` and :func:`fast_router_programs` say which programs ``fast`` runs for a shape, a token
 count and a device. While ``torch.use_deterministic_algorithms(True)`` is in effect (``warn_only=True`` included) a
 ``fast`` call runs ``det`` and the runtime logs it once: the non-deterministic package raises PyTorch's alert at its
@@ -137,9 +140,9 @@ def _k1_gemm(variant: str) -> Callable:
 def _k1_wgrad(variant: str) -> Callable:
     """The K1 weight-gradient entry point ``wgrad(G, X, out)`` of ``variant``: ``out[N, K] = G[T, N].T @ X[T, K]``.
     The deterministic package plans the GEMM in the orientation its measured rules or its small-``N`` rule give the
-    row (``wgrad_views``: for a narrow ``N`` the transposed-store ``X.T @ G``); the non-deterministic package plans
-    its split-K program on ``X.T @ G`` with the transposed store and runs the deterministic entry point's program on a
-    row its planner does not take."""
+    row (``wgrad_views``: for a narrow ``N`` the transposed-store ``X.T @ G``); the non-deterministic package runs its
+    stream-K program on a row of its stream-K table, else plans its split-K program on ``X.T @ G`` with the
+    transposed store, and runs a program of the deterministic package on a row its planner does not take."""
     if variant == "det":
         return _vendored()[0].cake_dense_gemm_det_train_projection_wgrad
     return _vendored_fast()[0].cake_dense_gemm_nondet_train_projection_wgrad
@@ -272,9 +275,10 @@ def batched_projection(x: torch.Tensor, weight: torch.Tensor, *, weight_layout: 
     As cuBLAS computes the einsum, every element is an FP32 sum of exact BF16 products rounded once to BF16. Under
     ``det`` the sums run in a fixed order for the call's shape: the output and both gradients are bit-identical call to
     call (and not bitwise equal to cuBLAS). Under ``fast`` the output and the input gradient have ``det``'s bits; the
-    weight gradient runs the non-deterministic split-K program where :func:`fast_projection_programs` names one
-    (single-head rows such as ``4096 -> 32``), whose partials add in the order they finish, and ``det``'s program
-    elsewhere. The plan, and with it the last bits of a token's results, depends on the token count ``T``.
+    weight gradient runs the non-deterministic package's program where :func:`fast_projection_programs` names one
+    (single-head rows such as ``4096 -> 32``; a split-K program whose partials add in the order they finish, or a
+    program that repeats its bits) and a program of the deterministic package elsewhere. The plan, and with it the
+    last bits of a token's results, depends on the token count ``T``.
     """
     in_out = _in_out(weight_layout)
     if x.dim() != 3 or weight.dim() != 3:
@@ -351,10 +355,11 @@ def router_gating(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     and ``weight``. ``E`` and ``H`` must be multiples of 8. Under ``det`` every call is bit-reproducible call to call.
     Under ``fast`` the logits have ``det``'s bits; a gradient runs a program of the non-deterministic package where
     :func:`fast_router_programs` names one (256 experts at hidden 4096, 5120 or 6144 in measured token windows): a
-    short-token SIMT program of the weight or input gradient, which stores every element once (other bits than
-    ``det``'s), or a stream-K weight gradient, whose partial tiles add in the order they finish; it runs ``det``'s
-    program elsewhere. The plan, and with it the last bits of a token's logits, depends on the number of tokens of the
-    call.
+    short-token SIMT program of the weight or input gradient, which stores every element once, or a K-order weight
+    gradient, which adds a tile's partials in K order (other bits than ``det``'s, the same on every run). Elsewhere it
+    runs the deterministic program, at ``det``'s split count except in the token windows where the package's tables
+    give the weight gradient another (other bits, the same on every run). The plan, and with it the last bits of a
+    token's logits, depends on the number of tokens of the call.
     """
     if weight.dim() != 2 or x.shape[-1] != weight.shape[1]:
         raise ValueError(
@@ -380,12 +385,52 @@ def _check_part(arch: str, sm_count: int) -> None:
         raise ValueError(f"sm_count must be a device's SM count, got {sm_count}")
 
 
+def _fast_table_template(a, b, out, *, transposed_out: bool, arch: str, sm_count: int) -> str | None:
+    """The template the non-deterministic package's program tables name for the 2-D K1 call ``gemm(a, b, out)`` of
+    BF16 operands on a device of ``arch`` with ``sm_count`` SMs, as its generic entry points read them before any
+    planner (``_k1_table_call``): the forward (both operands K-major) in ``K1_FORWARD_PROGRAM_RULES_BY_SM``, the input
+    gradient (``a`` K-major, ``b`` MN-major) in ``K1_DGRAD_PROGRAM_RULES_BY_SM`` then ``K1_DGRAD_NVJET_RULES_BY_SM``,
+    the transposed-store weight gradient ``X.T @ G`` in ``K1_WGRAD_SK_RULES_BY_SM``. ``None``: no row, a view those
+    programs do not take (a batched view, an operand or ``out`` without a unit stride on its last axis), or a
+    template the package does not register for ``arch``."""
+    backend, jit = _vendored_fast()
+    if a.dim() != 2 or b.dim() != 2 or out.dim() != 2 or out.stride(1) != 1:
+        return None
+    if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16:
+        return None
+    dtype = "f32" if out.dtype == torch.float32 else "bf16"
+    a_k, b_k = a.stride(1) == 1, b.stride(0) == 1
+    if a_k and b_k and not transposed_out and out.dtype == torch.bfloat16:
+        # X = a [T, K], W = b.T [N, K]: (K, N, T)
+        key = (a.shape[1], b.shape[1], a.shape[0])
+        tables = ("K1_FORWARD_PROGRAM_RULES_BY_SM",)
+    elif a_k and not b_k and b.stride(1) == 1 and not transposed_out:
+        # G = a [T, N], W = b [N, K]: (K, N, T, out dtype)
+        key = (b.shape[1], b.shape[0], a.shape[0], dtype)
+        tables = ("K1_DGRAD_PROGRAM_RULES_BY_SM", "K1_DGRAD_NVJET_RULES_BY_SM")
+    elif not a_k and a.stride(0) == 1 and b.stride(1) == 1 and transposed_out:
+        # X = a.T [T, d_in], G = b [T, d_out]: (d_in, d_out, T, out dtype)
+        key = (a.shape[0], b.shape[1], b.shape[0], dtype)
+        tables = ("K1_WGRAD_SK_RULES_BY_SM",)
+    else:
+        return None
+    for table in tables:
+        template = getattr(backend, table).get((arch, sm_count), {}).get(key)
+        if template is not None and template in jit.KERNELS.get(arch, {}):
+            return template
+    return None
+
+
 def _fast_k1_template(a, b, out, *, transposed_out: bool = False, arch: str, sm_count: int) -> str | None:
     """The template of the non-deterministic package's program that ``fast`` launches for the K1 call
     ``gemm(a, b, out)`` (``transposed_out``: the transposed store, ``out`` is ``[N, M]``) on a device of ``arch`` with
-    ``sm_count`` SMs, or ``None``: the call runs the deterministic program. This is the package's own planner
-    (``plan_atomic_gemm``), which its launches call with the device's architecture and SM count; it plans only the
-    weight gradients (both operands MN-major) of the rows its tables select."""
+    ``sm_count`` SMs, or ``None``: the call runs a program of the deterministic package. These are the package's own
+    program tables (:func:`_fast_table_template`), then its planner (``plan_atomic_gemm``), which its launches call
+    with the device's architecture and SM count; the planner plans only the weight gradients (both operands MN-major)
+    of the rows its tables select."""
+    template = _fast_table_template(a, b, out, transposed_out=transposed_out, arch=arch, sm_count=sm_count)
+    if template is not None:
+        return template
     backend = _vendored_fast()[0]
     plan, *_ = backend.plan_atomic_gemm(a, b, out, transposed_out=transposed_out, arch=arch, sm_count=sm_count)
     return None if plan is None else plan.template
@@ -397,6 +442,19 @@ def _fast_k2_template(a, b, out, *, arch: str, sm_count: int) -> str | None:
     program (the input gradient only in its short-token SIMT windows)."""
     plan, _ = _vendored_fast()[0].plan_atomic_router(a, b, out, arch=arch, sm_count=sm_count)
     return None if plan is None else plan.template
+
+
+def _fast_router_wgrad_splits(
+    num_experts: int, hidden_size: int, *, tokens: int, arch: str, sm_count: int
+) -> int | None:
+    """The split count at which ``fast`` runs the deterministic program of the router weight gradient where the
+    non-deterministic package's tables give it another count than ``det``'s (``router_det_splits``: other bits than
+    ``det``'s, the same on every run), else ``None``."""
+    splits = _vendored_fast()[0].router_det_splits(
+        "nn_t", arch=arch, M=hidden_size, N=num_experts, K=tokens, sm_count=sm_count
+    )
+    det = _vendored()[0].router_splits("nn_t", hidden_size, num_experts, tokens, arch, sm_count)
+    return None if splits in (None, det) else splits
 
 
 def _meta(*shape: int, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
@@ -427,10 +485,12 @@ def fast_projection_programs(
     """Which program :func:`batched_projection` runs under ``fast`` for ``num_heads`` heads of ``d_in -> d_out`` at
     ``tokens`` tokens on a device of ``arch`` (``sm_100a`` / ``sm_103a`` / ``sm_107a``) with ``sm_count`` SMs:
     ``{"forward": ..., "input_grad": ..., "weight_grad": ...}``, each the template of the non-deterministic package's
-    program, or ``None`` where it runs the deterministic program (the program and bits of ``det``). The weight
-    gradient of a single-head ``out_in`` projection is planned as the package's weight-gradient entry point plans it
-    (the transposed-store ``X.T @ G``). Needs torch, no device: the package's planner is a function of the views'
-    geometry, the architecture, the SM count and the token count."""
+    program, or ``None`` where it runs the deterministic program with ``det``'s plan and bits. The weight gradient of a
+    single-head ``out_in`` projection is planned as the package's weight-gradient entry point plans it (its stream-K
+    table, then the transposed-store ``X.T @ G``; the stream-K table holds every row of the package's
+    ``K1_WGRAD_DET_RULES_BY_SM``, so those rows run the stream-K program). Needs torch, no device: the
+    package's tables and planner are a function of the views' geometry, the architecture, the SM count and the token
+    count."""
     in_out = _in_out(weight_layout)
     check_projection_dims(d_in, d_out)
     _check_part(arch, sm_count)
@@ -454,7 +514,9 @@ def fast_router_programs(
     num_experts: int, hidden_size: int, *, tokens: int, arch: str, sm_count: int
 ) -> dict[str, str | None]:
     """Which program :func:`router_gating` runs under ``fast`` for ``num_experts`` experts of ``hidden_size`` at
-    ``tokens`` tokens on a device of ``arch`` with ``sm_count`` SMs, as :func:`fast_projection_programs` reports it."""
+    ``tokens`` tokens on a device of ``arch`` with ``sm_count`` SMs, as :func:`fast_projection_programs` reports it. A
+    ``None`` weight gradient runs the deterministic program, at ``det``'s split count except in the token windows where
+    the package's tables give it another (other bits, the same on every run)."""
     _check_part(arch, sm_count)
     forward, dgrad, wgrad = _router_views(num_experts, hidden_size, tokens)
     return {
@@ -473,14 +535,24 @@ def program_kind(template: str) -> str:
 
     ``"router"``: the K2 programs (``router_fp32_*``), the BF16x3 split (``split_fp32_*``) and the K1 programs with an
     FP32 output (``_f32``; the router's forward is the only FP32-output K1 GEMM of these entry points). The K1
-    programs are the ``dense_proj_*`` ones and the deterministic package's three-chain weight gradients
+    programs are the ``dense_proj_*`` ones (the non-deterministic package's split-K, cluster, one-wave forward,
+    input-gradient, stream-K and nvjet programs) and the deterministic package's three-chain weight gradients
     (``chain_det_gemm_*``).
     ``"projections"``: the other K1 programs (BF16 output) and the swapped few-token forwards (``swap_ab_*``).
     ``ValueError`` for a template of no known kind.
     """
     if template.startswith(("router_fp32_", "router_partials_", "split_fp32_")):
         return "router"
-    k1 = ("dense_proj_det_gemm_", "dense_proj_gemm_atomic_", "dense_proj_gemm_dsm_", "chain_det_gemm_")
+    k1 = (
+        "dense_proj_det_gemm_",
+        "dense_proj_gemm_atomic_",
+        "dense_proj_gemm_dsm_",
+        "dense_proj_gemm_wave_",
+        "dense_proj_gemm_dgrad_",
+        "dense_proj_gemm_sk_",
+        "dense_proj_gemm_nvjet_",
+        "chain_det_gemm_",
+    )
     if template.startswith(k1):
         return "router" if "f32" in template.split("_") else "projections"
     if template.startswith("swap_ab_"):

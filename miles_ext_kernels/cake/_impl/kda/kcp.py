@@ -22,7 +22,8 @@ partition's order, with the shapes, dtypes and modes of the single-rank :func:`c
 and ``v`` made dense as there). Every rank of the group calls the same entry points in the same order: the
 collectives run inside them.
 
-A partition and a context hold no variant: a context serves the calls of both packages. Each call runs the package
+A partition and a context hold no variant: a context serves the calls of both packages (the first ``fast`` call of a
+context builds the non-deterministic package's own context of the same partition from it). Each call runs the package
 of the call (``config.variant("kda")``, in every gate and L2 norm mode); :func:`chunk_kda_bwd_kcp` runs the package
 that wrote ``saved``. ``det`` gives the same bits for the same inputs, partition and process group. ``fast``: in the
 activated-gate mode without the in-kernel L2 norm its ``dg`` may differ from ``det``'s by FP32 rounding; in the raw
@@ -38,6 +39,8 @@ torch but not the context-parallel packages: they load on the first call.
 
 from __future__ import annotations
 
+import dataclasses
+import weakref
 from importlib import import_module
 from typing import Any
 
@@ -70,6 +73,36 @@ def _det_plan() -> Any:
 def _fast_kcp() -> Any:
     """``cake_kcp`` of the non-deterministic context-parallel package."""
     return import_module(f"{ops._VENDOR}.cake_kda_nondet_train_kcp.cake_kcp")
+
+
+def _fast_plan() -> Any:
+    """``cake_kcp_plan`` of the non-deterministic context-parallel package."""
+    return import_module(f"{ops._VENDOR}.cake_kda_nondet_train_kcp.cake_kcp_plan")
+
+
+_FAST_CONTEXTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _fast_context(ctx: Any) -> Any:
+    """The non-deterministic package's context of the same rank, partition and build arguments as ``ctx`` (a context
+    of :func:`build_context_kcp`): that package takes its own partition and context types only. Built at the first
+    ``fast`` call of ``ctx`` (no collective runs there) and kept as long as ``ctx``."""
+    fast = _FAST_CONTEXTS.get(ctx)
+    if fast is None:
+        plan = _fast_plan()
+        part = ctx.partition
+        fragments = tuple(
+            tuple(plan.CakeKDANondetKcpFragment(**dataclasses.asdict(fragment)) for fragment in rank)
+            for rank in part.fragments
+        )
+        fast_part = plan.CakeKDANondetKcpPartition(
+            world_size=part.world_size, layout=part.layout, cu_seqlens=part.cu_seqlens, fragments=fragments
+        )
+        fast = plan.cake_kda_nondet_train_kcp_build_context(
+            fast_part, ctx.group, ctx.rank, ctx.device, ctx.conv_kernel_size, sm_count=ctx.sm_count
+        )
+        _FAST_CONTEXTS[ctx] = fast
+    return fast
 
 
 def _gate(use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel) -> dict[str, Any]:
@@ -148,7 +181,7 @@ def chunk_kda_kcp(
     v, beta = ops.seam(v, beta)
     gate = _gate(use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel)
     if config.variant(ops.OP) == "fast":
-        return _fast_kcp().cake_kda_nondet_kcp(q, k, v, g, beta, ctx, scale=scale, **gate, **options)
+        return _fast_kcp().cake_kda_nondet_kcp(q, k, v, g, beta, _fast_context(ctx), scale=scale, **gate, **options)
     return _det_kcp().cake_kda_det_kcp(q, k, v, g, beta, ctx, scale=scale, **gate, **options)
 
 
@@ -176,7 +209,7 @@ def chunk_kda_fwd_kcp(
     gate = _gate(use_gate_in_kernel, A_log, dt_bias, lower_bound, use_qk_l2norm_in_kernel)
     common = dict(scale=scale, save_for_backward=save_for_backward, **gate)
     if config.variant(ops.OP) == "fast":
-        return _fast_kcp().cake_kda_nondet_train_kcp_forward(q, k, v, g, beta, ctx, **common, **options)
+        return _fast_kcp().cake_kda_nondet_train_kcp_forward(q, k, v, g, beta, _fast_context(ctx), **common, **options)
     return _det_kcp().cake_kda_det_train_kcp_forward(q, k, v, g, beta, ctx, **common, **options)
 
 
@@ -212,7 +245,9 @@ def chunk_kda_bwd_kcp(
     else:
         variant = "fast" if isinstance(saved, _fast_kcp().CakeKDANondetKcpSaved) else "det"
     if variant == "fast":
-        grads = _fast_kcp().cake_kda_nondet_train_kcp_backward(q, k, v, g, beta, ctx, dout, **common, **options)
+        grads = _fast_kcp().cake_kda_nondet_train_kcp_backward(
+            q, k, v, g, beta, _fast_context(ctx), dout, **common, **options
+        )
     else:
         grads = _det_kcp().cake_kda_det_train_kcp_backward(q, k, v, g, beta, ctx, dout, **common, **options)
     grads = list(grads)

@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 import types
+from importlib import import_module
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,17 @@ from miles_ext_kernels.cake._impl.lm_head import ops  # noqa: E402
 from miles_ext_kernels.cake._runtime import config, loader  # noqa: E402
 
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+
+
+def _unlaunched_stages(variant: str) -> set[str]:
+    """The stages besides the candidate-support ones (``support_*``) that the package's programs register and
+    ``log_probs`` never launches, as the package's backend names them: ``fast``'s accumulating dX slab sum (the
+    candidate-support path's dense dX) and the loss entry's one-pass cross-entropy programs; none for ``det``."""
+    if variant == "det":
+        return set()
+    backend = import_module(".cake_backend", ops._package(variant).__name__)
+    one_pass = {stage for forms in backend.ONE_PASS_FWD_STAGES.values() for stage in forms}
+    return {backend.DX_SLAB_SUM_ACC_STAGE, backend.ONE_PASS_COMBINE_STAGE, backend.ONE_PASS_DW_STAGE, *one_pass}
 
 
 def _clear_toolkit_caches():
@@ -64,14 +76,22 @@ def test_prebuild_builds_every_log_prob_stage_with_and_without_a_temperature(mon
         assert "row_finalize_tau" in tau_stages
         assert tau - plain, f"{package} {arch}: no temperature library"
         assert set(requested[package]) == plain | tau
-        # the architecture's other libraries are the candidate-support stages (support_*), which log_probs never
-        # launches
-        stages = jit.MODULES[record]["stages"]
-        support = {jit.library_name(record, stage) for stage in stages if stage.startswith("support_")}
+        if variant == "fast":
+            # the ordered dX: the slab sums after each K-sliced dX GEMM are log-probability stages
+            backend = import_module(".cake_backend", ops._package(variant).__name__)
+            assert set(backend.DX_SLAB_SUM_STAGES) <= set(jit.registered_stages(record)), f"{package} {arch}"
+        # the architecture's other libraries are the candidate-support stages (support_*) and the stages of
+        # _unlaunched_stages, which log_probs never launches
+        stages = set(jit.MODULES[record]["stages"])
+        unlaunched = stages - set(jit.registered_stages_with_temperature(record))
+        support = {stage for stage in unlaunched if stage.startswith("support_")}
+        assert support, f"{package} {arch}: no candidate-support stage"
+        assert unlaunched - support == _unlaunched_stages(variant), f"{package} {arch}: {sorted(unlaunched)}"
+        others = {jit.library_name(record, stage) for stage in unlaunched}
         manifest = json.loads(Path(jit.__file__).with_name("build.json").read_text())
         libraries = {library["name"] for library in manifest["libraries"] if library["arch"] == arch}
-        assert support and not support & set(requested[package]), f"{package} {arch}: {sorted(support)}"
-        assert libraries == set(requested[package]) | support
+        assert not others & set(requested[package]), f"{package} {arch}: {sorted(others & set(requested[package]))}"
+        assert libraries == set(requested[package]) | others
 
 
 @pytest.mark.parametrize(

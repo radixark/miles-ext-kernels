@@ -98,10 +98,11 @@ def _row(partition, build_context, row, rank: int, world_size: int, device, flag
     within_reference("det", det)
     check("det_repeats_bitwise", _same(_run(x_local, w, dy_local, ctx, "det"), det))
 
-    split = _run(x_local, w, dy_local, ctx, "det", cooperative=False)
-    check("det_split_y_dx_are_det", bits_equal(split[0], det[0]) and bits_equal(split[1], det[1]))
-    within_reference("det_split", split)
-    check("det_split_repeats_bitwise", _same(_run(x_local, w, dy_local, ctx, "det", cooperative=False), split))
+    # det's default backward is the ordinary launch; the cooperative one keeps y and dx
+    coop = _run(x_local, w, dy_local, ctx, "det", cooperative=True)
+    check("det_cooperative_y_dx_are_det", bits_equal(coop[0], det[0]) and bits_equal(coop[1], det[1]))
+    within_reference("det_cooperative", coop)
+    check("det_cooperative_repeats_bitwise", _same(_run(x_local, w, dy_local, ctx, "det", cooperative=True), coop))
 
     fast = _run(x_local, w, dy_local, ctx, "fast")
     check("fast_y_dx_are_det", bits_equal(fast[0], det[0]) and bits_equal(fast[1], det[1]))

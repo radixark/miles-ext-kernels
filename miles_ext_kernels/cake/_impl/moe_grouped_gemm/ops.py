@@ -16,11 +16,12 @@ cuBLAS / CUTLASS numerics, not their bits).
 
 Variants. ``det`` reduces every output in a fixed order: the output and both gradients repeat bit for bit. ``fast``
 gives the same output and input-gradient bits; its weight gradient, where it picks the 512-wide k tile (``K`` a multiple
-of 512 and at least 4096 rows per group on average), adds the split tail of its last wave with unordered FP32 atomics
-instead of a second, ordered reduction launch, so those tiles may differ in the last bit run to run. Every forward reads
-the configured variant (``config.variant``); its backward runs the package of its forward. Under
+of 512 and at least 3072 rows per group on average on SM100a / SM103a, 4096 on SM107a), reduces the split tail of its
+last wave in a fixed slot order within the same launch instead of a second reduction launch: it repeats bit for bit
+for a given SM count, but those tiles may differ from ``det``'s within the budget. Every forward reads the configured
+variant (``config.variant``); its backward runs the package of its forward. Under
 ``torch.use_deterministic_algorithms(True)`` a ``fast`` call runs ``det`` and logs it once (``config.warn_runs_det``):
-a ``fast`` weight gradient with that unordered tail raises torch's non-determinism alert there.
+``fast`` does not promise ``det``'s bits.
 
 32-bit addressing. The kernels address each output with 32-bit element offsets: ``sum_m * N`` (the output),
 ``sum_m * K`` (the input gradient) and ``E * N * K`` (the weight gradient) must stay at most ``2**31 - 1``.

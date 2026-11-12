@@ -1,9 +1,10 @@
 """The Cake MoE grouped GEMM (``cake.moe_grouped_gemm.grouped_mm``) on the expert projections of miles' torchtitan MoE
 models: the forward, input and weight gradients against a per-group FP32 reference (relative RMS gates), ``det``
 repeating bit for bit (in one process and in a new one), ``fast`` giving ``det``'s forward and input-gradient bits and
-its unordered weight-gradient tail, the variant read at each call, ``det`` under torch's deterministic algorithms, the
-per-stream workspaces, the 32-bit row limit checked at the forward and the results at that limit, empty input and
-padding rows. Needs SM100a / SM103a / SM107a; skips elsewhere.
+a weight gradient whose split tail it reduces in a fixed order within one launch (bit for bit run to run), the variant
+read at each call, ``det`` under torch's deterministic algorithms, the per-stream workspaces, the 32-bit row limit
+checked at the forward and the results at that limit, empty input and padding rows. Needs SM100a / SM103a / SM107a;
+skips elsewhere.
 """
 
 import json
@@ -65,19 +66,22 @@ def test_det_matches_the_reference_and_repeats_bit_for_bit(layer, proj):
 
 @pytest.mark.parametrize("layer, proj", CASES)
 def test_fast_gives_the_det_bits_where_its_reductions_are_ordered(layer, proj):
-    """With fewer than 4096 rows per group on average the weight gradient keeps the 256-wide k tile and its ordered
-    tail reduction: fast is bitwise det in all three products."""
+    """Below the 512-wide k tile's rows per group the weight gradient keeps the 256-wide k tile and its ordered tail
+    reduction: fast is bitwise det in all three products."""
     sizes, n, k = _cases.shape(layer, proj)
     x, w, g, offs = _cases.inputs(sizes, n, k, seed=SEED + n + k)
 
     assert_bitwise(_run("fast", x, w, g, offs), _run("det", x, w, g, offs))
 
 
-def test_the_fast_weight_gradient_adds_its_split_tail_unordered_within_the_budget():
+def test_the_fast_weight_gradient_reduces_its_split_tail_in_order_within_the_budget():
+    """The 512-wide k tile's split tail: every part lands in its own slot and the last unit sums the slots in order,
+    so fast repeats bit for bit; its tail tiles may differ from det's within the budget."""
     sizes, (n, k) = list(K512_SIZES), K512_SHAPE
     x, w, g, offs = _cases.inputs(sizes, n, k, seed=SEED + 512)
-    launch = ops._module("fast", "cake_backend").cake_moe_grouped_gemm_nondet_train_prepare_wgrad(g, x, offs)
-    assert launch.plan["tile_k"] == 512 and launch.plan["unordered_tail"], launch.plan
+    plan = ops._module("fast", "cake_backend").cake_moe_grouped_gemm_nondet_train_prepare_wgrad(g, x, offs).plan
+    assert plan["tile_k"] == 512 and plan["tail_splits"] > 1, plan
+    assert plan["ordered_tail"] and not plan["unordered_tail"], plan
 
     det, fast = _run("det", x, w, g, offs), _run("fast", x, w, g, offs)
     reference = _cases.reference(x, w, g, sizes)
@@ -87,6 +91,7 @@ def test_the_fast_weight_gradient_adds_its_split_tail_unordered_within_the_budge
     assert_rel_rms(fast, reference, BUDGET)
     _cases.assert_empty_groups_zero(fast["dw"], sizes)
     assert_bitwise(_run("det", x, w, g, offs), det)
+    assert_bitwise(_run("fast", x, w, g, offs), fast)
 
 
 @pytest.mark.parametrize("variant", ["det", "fast"])
@@ -125,7 +130,7 @@ def test_torch_deterministic_algorithms_run_det_and_say_so_once(monkeypatch, cap
     _configure("fast")
     enabled = torch.are_deterministic_algorithms_enabled()
     warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    torch.use_deterministic_algorithms(True)  # the fast weight gradient would raise torch's alert here
+    torch.use_deterministic_algorithms(True)
     try:
         with caplog.at_level(logging.WARNING, logger="miles_ext_kernels"):
             first, second = _cases.step(x, w, g, offs), _cases.step(x, w, g, offs)
